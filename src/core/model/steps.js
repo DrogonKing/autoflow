@@ -270,6 +270,26 @@ export function validateStep(step, depth = 0) {
       if (step.clickCount !== undefined && ![1, 2, 3].includes(step.clickCount)) {
         throw new StepError('clickCount must be 1, 2 or 3', id);
       }
+      // `clickAll` turns a click into "click every match". Validated here because an imported file could
+      // otherwise carry an order or a gap the loop cannot honour, or a limit so large it fires forever.
+      if (step.clickAll !== undefined) {
+        if (step.clickAll === null) break;             // explicitly off
+        if (typeof step.clickAll !== 'object') {
+          throw new StepError('clickAll must be an object or null', id);
+        }
+        if (step.clickAll.order !== undefined
+            && !['reverse', 'forward', 'as-is'].includes(step.clickAll.order)) {
+          throw new StepError('clickAll.order must be reverse, forward or as-is', id);
+        }
+        const lim = step.clickAll.limit;
+        if (lim !== undefined && (!Number.isInteger(lim) || lim < 0 || lim > 5000)) {
+          throw new StepError('clickAll.limit must be an integer from 0 to 5000 (0 = every match)', id);
+        }
+        const gap = step.clickAll.gapMs;
+        if (gap !== undefined && (!Number.isFinite(gap) || gap < 50 || gap > 60_000)) {
+          throw new StepError('clickAll.gapMs must be between 50 and 60000', id);
+        }
+      }
       break;
 
     case 'fill':

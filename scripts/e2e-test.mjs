@@ -149,9 +149,8 @@ async function main() {
     const topMarker = await page.evaluate(() => document.documentElement.getAttribute('data-autoflow-top'));
     check('the top frame is marked as such', topMarker === '1', String(topMarker));
 
-    // and the worker can reach it: a ping round-trip proves the message channel works
-    const pinged = await ask({ type: 'ping-tab' }).catch(() => null);
-    check('the worker can reach the content script', pinged?.ok === true, JSON.stringify(pinged));
+    // the ping round-trip is checked further down, once the tab id is known: `ping-tab` needs an explicit id
+    // because "the active tab" can be an extension page here
 
     // ---- an automation that exercises the whole step vocabulary against the real page
     const automation = {
@@ -201,6 +200,17 @@ async function main() {
     check('the test page tab is identified', typeof testTabId === 'number', `tabId=${testTabId}`);
     // the evaluate callbacks are serialised into the page, so the id has to live there
     await bridge.evaluate((id) => { globalThis.TEST_TAB = id; }, testTabId);
+
+    // and the worker can reach it: a ping round-trip proves the message channel works. Sent from the BRIDGE
+    // page, which is where TEST_TAB is set, and with the id named explicitly - "the active tab" can be an
+    // extension page in this harness, and the resulting error reads as a broken message channel rather than
+    // as a wrongly-chosen tab.
+    const pinged = await bridge.evaluate(async (id) => new Promise((resolve) => {
+      chrome.runtime.sendMessage({ type: 'ping-tab', tabId: id }, (r) => resolve(r ?? null));
+    }), testTabId).catch(() => null);
+    check('the worker can reach the content script', pinged?.ok === true, JSON.stringify(pinged));
+    check('the ping names the tab it used, so a wrong tab is visible rather than inferred',
+      pinged?.tabId === testTabId, `pinged tabId=${pinged?.tabId} expected ${testTabId}`);
 
     // ---- RUN IT. This is the whole point.
     const runResult = await bridge.evaluate(async (id) => {

@@ -12,6 +12,7 @@
 import { api } from '../platform/api.js';
 import { safeSend } from '../platform/serialise.js';
 import { findElement, describeElement, buildFinder, isVisible } from '../core/dom/finder.js';
+import { afterClick, describeAllClicks, nextIndex, normaliseAll } from '../core/dom/clickAll.js';
 import {
   realClick, fillElement, selectOption, pressKeys, scrollAction, ActionError,
 } from '../core/dom/actions.js';
@@ -37,6 +38,73 @@ function reply(sendResponse, payload) {
       sendResponse({ ok: false, error: `the reply could not be sent: ${outcome.firstError}` });
     } catch { /* the port is gone */ }
   }
+}
+
+/**
+ * Click every match, re-resolving the list between clicks.
+ *
+ * Why re-resolve: the page is live. On an order page the list collapses as each button is pressed, so an
+ * index into a snapshot taken at the start stops pointing at anything. Re-resolving and always taking the
+ * same POSITION (the last, by default) is what makes "click all ten" actually click ten.
+ *
+ * The loop is bounded by `all.limit` and by a sanity ceiling, so a page that keeps producing new matches
+ * cannot spin forever - which is the failure mode that would fire orders.
+ */
+async function clickEveryMatch(step, all) {
+  const started = Date.now();
+  const CEILING = 200;                 // hard stop regardless of configuration
+  let clicked = 0;
+  let stoppedEarly = false;
+  let reason = '';
+
+  for (let taken = 0; taken < CEILING; taken++) {
+    const found = findElement(document, step.finder, {
+      requireVisible: true,
+      requireActionable: true,
+    });
+    // how many matched on THIS pass, not at the start
+    const remaining = found.candidates ?? (found.element ? 1 : 0);
+    const idx = nextIndex({ taken, remaining, order: all.order, limit: all.limit });
+    if (idx === null) break;
+
+    // pick the element at that position, freshly
+    const again = findElement(document, { ...step.finder, index: idx }, {
+      requireVisible: true,
+      requireActionable: true,
+    });
+    if (!again.element) { stoppedEarly = true; reason = `match ${idx} disappeared`; break; }
+
+    let ok = true;
+    try {
+      realClick(again.element, { button: step.button, clickCount: step.clickCount ?? 1 });
+    } catch (e) {
+      ok = false;
+      reason = String(e?.message ?? e);
+    }
+    const decision = afterClick({
+      succeeded: ok, taken: taken + 1, total: remaining, onErrorPolicy: step.onError,
+    });
+    if (ok) clicked += 1;
+    if (decision.action === 'stop') { stoppedEarly = true; reason = decision.reason ?? reason; break; }
+
+    // give the page a moment to process the click before looking again
+    if (all.gapMs > 0 && Date.now() - started < 120_000) {
+      await new Promise((r) => setTimeout(r, all.gapMs));
+    }
+  }
+
+  return {
+    how: `${clicked} of ${all.limit > 0 ? Math.min(all.limit, clicked) : clicked} clicked (${all.order})`,
+    clicked,
+    stoppedEarly,
+    summary: describeAllClicks({
+      clicked,
+      total: clicked + (stoppedEarly ? 1 : 0),
+      stoppedEarly,
+      reason,
+      language: globalThis.document?.documentElement?.getAttribute('data-autoflow-lang'),
+    }),
+  };
 }
 
 /**
@@ -71,8 +139,21 @@ async function performStep(step) {
   }
 
   switch (step.kind) {
-    case 'click':
+    case 'click': {
+      // ---- click EVERY match, when the step asks for it
+      //
+      // The finding above resolved one element. With `clickAll` set the step means "every match", so the list
+      // is re-resolved before each click instead of being captured once. That matters on a live page: pressing
+      // one of these buttons usually makes the list shrink or re-render, and an index into a stale snapshot
+      // would then click nothing, click the wrong thing, or throw on a detached node.
+      //
+      // The ORDER and the STOPPING RULE come from core/dom/clickAll.js, which is pure and separately tested.
+      const all = normaliseAll(step.clickAll);
+      if (all) {
+        return await clickEveryMatch(step, all);
+      }
       return { how, ...realClick(el, { button: step.button, clickCount: step.clickCount ?? 1 }) };
+    }
 
     case 'fill':
       return { how, ...fillElement(el, step.value ?? '', { clearFirst: step.clearFirst !== false }) };

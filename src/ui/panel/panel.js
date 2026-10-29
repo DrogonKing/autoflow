@@ -15,6 +15,7 @@ import { describeCondition } from '../../core/engine/conditions.js';
 import { readCsv } from '../../core/io/csv.js';
 import { api } from '../../platform/api.js';
 import { applyToDocument, translator } from '../../core/i18n/i18n.js';
+import { ALL_DEFAULTS, normaliseAll } from '../../core/dom/clickAll.js';
 
 /**
  * The visible name of a step kind.
@@ -410,8 +411,11 @@ function stepRow(step, list, index, rerender) {
                finder.label ?? finder.placeholder ?? finder.aria ?? finder.role ?? '',
         placeholder: t('field.selector'),
         onchange: (e) => {
-          const key = { css: 'selector', xpath: 'xpath', text: t('find.text'), id: 'id', name: 'name',
-            label: 'label', placeholder: t('find.placeholder'), aria: 'aria', role: 'role' }[finder.strategy];
+          // The property name is the MODEL's key and must never be translated. Two of these were routed
+          // through t() while translating the labels, which in Persian would have written `finder['متن']`
+          // and silently dropped the selector the user typed. Caught by reading this line, not by a test.
+          const key = { css: 'selector', xpath: 'xpath', text: 'text', id: 'id', name: 'name',
+            label: 'label', placeholder: 'placeholder', aria: 'aria', role: 'role' }[finder.strategy];
           if (key) step.finder = { ...finder, [key]: e.target.value };
           rerender();
         },
@@ -429,6 +433,59 @@ function stepRow(step, list, index, rerender) {
         ? el('span', { class: 'hint', title: finder.chain.join('\n'), text: `+${finder.chain.length} fallbacks` })
         : null,
     ));
+
+    // ---- click EVERY match, not only the first
+    //
+    // Only offered for `click`, because that is the case the user hit: ten buttons with the same label, and a
+    // single step pressing one of them. `findElement` returns `chosen[index ?? 0]`, so this is not a tuning
+    // option but a genuinely different behaviour, and it says what it will do rather than making the user
+    // infer it from a count.
+    if (step.kind === 'click') {
+      const all = normaliseAll(step.clickAll) ?? {};
+      const on = step.clickAll && typeof step.clickAll === 'object';
+      const setAll = (patchObj) => {
+        step.clickAll = { ...ALL_DEFAULTS, ...all, ...patchObj };
+        rerender();
+      };
+      body.append(el('div', { class: 'row opts' },
+        el('label', { text: t('all.everyMatch') }),
+        el('input', {
+          type: 'checkbox', id: `all-${step.id}`, checked: on,
+          onchange: (e) => {
+            step.clickAll = e.target.checked ? { ...ALL_DEFAULTS } : null;
+            rerender();
+          },
+        }),
+        // a label for the checkbox, then the options, which only make sense when it is on
+        el('label', { for: `all-${step.id}`, text: t('all.clickEveryMatch') }),
+      ));
+
+      if (on) {
+        body.append(el('div', { class: 'row opts' },
+          el('label', { text: t('all.order') }),
+          el('select', {
+            onchange: (e) => setAll({ order: e.target.value }),
+          },
+            el('option', { value: 'reverse', text: t('all.reverse'), selected: all.order === 'reverse' }),
+            el('option', { value: 'forward', text: t('all.forward'), selected: all.order === 'forward' }),
+            el('option', { value: 'as-is', text: t('all.asIs'), selected: all.order === 'as-is' })),
+          el('label', { text: t('all.limit') }),
+          el('input', {
+            type: 'number', class: 'tiny', min: '0', max: '5000', placeholder: t('all.limitAll'),
+            value: all.limit ? String(all.limit) : '',
+            onchange: (e) => setAll({ limit: e.target.value === '' ? 0 : Number(e.target.value) }),
+          }),
+          el('label', { text: t('all.gap') }),
+          el('input', {
+            type: 'number', class: 'tiny', min: '50', max: '60000',
+            value: String(all.gapMs ?? ALL_DEFAULTS.gapMs),
+            onchange: (e) => setAll({ gapMs: Number(e.target.value) }),
+          }),
+          el('span', { class: 'hint', text: t('all.gapHint') }),
+        ));
+        body.append(el('p', { class: 'hint', text: t('all.warning') }));
+      }
+    }
   }
 
   // ---- kind-specific fields

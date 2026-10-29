@@ -42,11 +42,17 @@ ALLOWED_LITERALS = {
     '',
 }
 
-# shapes that render a string to the user
+# Shapes that render a string to the user.
+#
+# `text`, `placeholder` and `title` are also ORDINARY OBJECT PROPERTIES in this codebase - the finder model has
+# `{ placeholder: 'placeholder' }` as a field-name mapping. Matching bare `placeholder:` reported that mapping
+# as a hardcoded English string. So the pattern requires the property to appear inside an `el(` call, which is
+# the only place these become visible text. This is the fifth false positive from the same root cause: matching
+# an identifier without the context that gives it meaning.
 LITERAL_PATTERNS = [
-    re.compile(r"\btext:\s*'([^']*)'"),
-    re.compile(r"\bplaceholder:\s*'([^']*)'"),
-    re.compile(r"\btitle:\s*'([^']*)'"),
+    re.compile(r"\bel\([^)]*?\btext:\s*'([^']*)'", re.S),
+    re.compile(r"\bel\([^)]*?\bplaceholder:\s*'([^']*)'", re.S),
+    re.compile(r"\bel\([^)]*?\btitle:\s*'([^']*)'", re.S),
     # A label carried in an array and rendered through a variable, e.g.
     #   for (const [id, label] of [['automations', 'Automations'], ...]) { ... text: label ... }
     # This shape defeated the first version of this scanner: it proved "no hardcoded literals" while the

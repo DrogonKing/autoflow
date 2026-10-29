@@ -668,10 +668,23 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         return { ok: true, run: publicActiveRun() };
 
       case 'ping-tab': {
-        const tab = (await api.tabs.query({ active: true, currentWindow: true }))[0];
-        if (!tab?.id) throw new Error('no active tab');
-        const res = await sendToTab(tab.id, { type: 'ping' });
-        return { ok: true, page: res };
+        /**
+         * Ping a tab, and say WHICH tab was pinged.
+         *
+         * `msg.tabId` is honoured when given. "The active tab" is ambiguous - it can be an extension page,
+         * which no content script is injected into, so the ping then fails with
+         * "Cannot access contents of url chrome-extension://..." and reads as a broken message channel when
+         * it is really a wrongly-chosen tab. A caller that knows which tab it means should say so.
+         *
+         * The resolved id is returned either way, so a caller can see what was actually pinged instead of
+         * having to infer it.
+         */
+        const tabId = Number.isInteger(msg.tabId)
+          ? msg.tabId
+          : (await api.tabs.query({ active: true, currentWindow: true }))[0]?.id;
+        if (!tabId) throw new Error('no active tab');
+        const res = await sendToTab(tabId, { type: 'ping' });
+        return { ok: true, tabId, page: res };
       }
 
       case 'pick-element': {

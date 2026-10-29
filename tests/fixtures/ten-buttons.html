@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>ten identical buttons</title></head>
+<body>
+<h1>Ten buttons with the same label</h1>
+<p>The case reported: a page showing ten buttons all named "ارسال پی در پی سفارش". A single click step presses
+one of them. With "every match" on, all ten should be pressed.</p>
+
+<!-- Each button removes itself when pressed, which is what a live order list does. That is the behaviour an
+     index-into-a-snapshot implementation gets wrong: after the first press the remaining indices shift. -->
+<div id="list"></div>
+<pre id="log"></pre>
+
+<script>
+  const list = document.getElementById('list');
+  const log = document.getElementById('log');
+  const pressed = [];
+
+  function render() {
+    list.textContent = '';
+    pressed.forEach((n) => {});
+    // rebuild the buttons that have NOT been pressed, keeping their original numbers
+    window.__remaining.forEach((n) => {
+      const b = document.createElement('button');
+      b.textContent = 'ارسال پی در پی سفارش';
+      b.dataset.n = String(n);
+      b.className = 'buy';
+      b.addEventListener('click', () => {
+        // record the press, then REMOVE it, so the list shrinks like a real one
+        window.__presses.push(Number(b.dataset.n));
+        window.__remaining = window.__remaining.filter((x) => x !== Number(b.dataset.n));
+        log.textContent = JSON.stringify(window.__presses);
+        render();
+      });
+      list.appendChild(b);
+    });
+    document.title = 'remaining ' + window.__remaining.length;
+  }
+
+  window.__remaining = [1,2,3,4,5,6,7,8,9,10];
+  window.__presses = [];
+  render();
+</script>
+</body></html>

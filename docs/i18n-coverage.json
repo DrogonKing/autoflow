@@ -1,7 +1,7 @@
 {
-  "en_keys": 214,
-  "fa_keys": 214,
-  "used_keys": 126,
+  "en_keys": 225,
+  "fa_keys": 225,
+  "used_keys": 135,
   "missing_in_en": [],
   "missing_in_fa": [],
   "unused_keys": [
@@ -20,8 +20,10 @@
     "find.id",
     "find.label",
     "find.name",
+    "find.placeholder",
     "find.point",
     "find.role",
+    "find.text",
     "find.xpath",
     "history.aborted",
     "history.failed",
