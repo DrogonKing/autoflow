@@ -272,6 +272,34 @@ async function main() {
     console.log(`  release/autoflow-firefox.zip   ${(ffInfo.bytes / 1024).toFixed(0)} KB, ${ffInfo.files} files  -> FIREFOX`);
   }
   console.log(`  release/autoflow-source.zip    ${(srcInfo.bytes / 1024).toFixed(0)} KB, ${srcInfo.files} files  -> source, both browsers`);
+
+  // ---- the test field, as a single deliverable file
+  //
+  // Generated HERE rather than copied in by hand, because `release/` is wiped at the top of this script: a
+  // hand-placed file vanishes the next time anyone packages. That is not hypothetical - it is why the file was
+  // missing when it was asked for. The page is self-contained, so the deliverable is the HTML with a note added.
+  const simSrc = await readFile(path.join(root, 'tools', 'sim', 'index.html'), 'utf8');
+  const simOut = simSrc
+    .replace('<title>میدان تست اتوفلو</title>', '<title>میدان تست اتوفلو — فایل تک‌فایلی</title>')
+    .replace(
+      '<div class="sub">هر کلیک را با زمان صدم ثانیه ثبت می‌کند. زمان از لحظه‌ای گرفته می‌شود که صفحه کلیک را دریافت می‌کند.</div>',
+      '<div class="sub">هر کلیک را با زمان صدم ثانیه ثبت می‌کند. زمان از لحظه‌ای گرفته می‌شود که صفحه کلیک را دریافت می‌کند.</div>'
+      + '\n<div class="sub" style="border:1px solid var(--line);border-radius:8px;padding:10px 12px;margin-bottom:14px">'
+      + '\n  <b style="color:var(--text)">این فایل تک‌فایلی است</b> — نه سرور لازم دارد و نه اینترنت.'
+      + '\n  کافی است در همان مرورگری بازش کنی که افزونه در آن نصب است.'
+      + '\n  اگر افزونه اینجا کار نکرد، در <code style="direction:ltr;display:inline-block">chrome://extensions</code>'
+      + '\n  روی کارت افزونه <b>Details</b> را بزن و <b>Allow access to file URLs</b> را روشن کن.'
+      + '\n</div>',
+    );
+  const simPath = path.join(releaseDir, 'autoflow-test-field.html');
+  await writeFile(simPath, simOut);
+  console.log(`  release/autoflow-test-field.html  ${(Buffer.byteLength(simOut) / 1024).toFixed(0)} KB  -> open in the browser that has the extension`);
+
+  // and the Persian guide travels with it, so the file is never a mystery
+  const guideSrc = await readFile(path.join(root, 'docs', 'SIMULATOR-FA.md'), 'utf8').catch(() => null);
+  if (guideSrc) {
+    await writeFile(path.join(releaseDir, 'SIMULATOR-FA.md'), guideSrc);
+  }
   console.log(`\n  extension : ${manifest.name} v${manifest.version}`);
   console.log(`  manifest at the root of every zip: yes`);
   if (ffManifest) {
