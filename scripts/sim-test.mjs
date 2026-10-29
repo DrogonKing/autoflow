@@ -92,7 +92,9 @@ console.log('\n--- 2. a real click is logged with a hundredth-of-a-second time -
 {
   await page.click('#pad2');
   await page.waitForTimeout(120);
-  const log = await page.evaluate(() => window.__clicks.map(({ n, at, target, delta }) => ({ n, at, target, delta })));
+  const log = await page.evaluate(() => window.__clicks
+    .filter((e) => /^نقطه/.test(e.target))
+    .map(({ n, at, target, delta }) => ({ n, at, target, delta })));
   console.log(`  log: ${JSON.stringify(log)}`);
   check('one click is recorded', log.length === 1, `${log.length}`);
   check('the time matches HH:MM:SS:CC', /^\d{2}:\d{2}:\d{2}:\d{2}$/.test(log[0]?.at ?? ''), log[0]?.at);
@@ -117,9 +119,20 @@ console.log('\n--- 3. ONE run clicking THREE different points, timed by the page
     return chrome.runtime.sendMessage({ type: 'start-run', automationId: 'sim-multi', tabId });
   }, { tabId, steps });
 
-  // wait for three clicks to be logged
-  await page.waitForFunction(() => (window.__clicks?.length ?? 0) >= 3, null, { timeout: 15_000 });
-  const log = await page.evaluate(() => window.__clicks.map(({ n, at, target, delta }) => ({ n, at, target, delta })));
+  /**
+   * Wait for the three PAD clicks, not for three log entries.
+   *
+   * The page now also logs its order windows opening and their tab switches, so a bare count of log rows can be
+   * satisfied by setup rather than by the run. Counting entries whose target is one of the points is what this test
+   * actually means.
+   */
+  await page.waitForFunction(
+    () => (window.__clicks ?? []).filter((e) => /^نقطه/.test(e.target)).length >= 3,
+    null, { timeout: 15_000 },
+  );
+  const log = await page.evaluate(() => window.__clicks
+    .filter((e) => /^نقطه/.test(e.target))
+    .map(({ n, at, target, delta }) => ({ n, at, target, delta })));
   console.log(`  log:`);
   for (const e of log) console.log(`    ${e.n}  ${e.at}   ${e.target}   +${e.delta ?? 0}ms`);
 

@@ -5,48 +5,78 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>میدان تست اتوفلو</title>
 <style>
-  /* Dark, high contrast, and deliberately large targets: this page is aimed with a mouse by a person and by a
-     picker overlay, so small elements would make the test about the page rather than about the clicker. */
+  /* Dark, high contrast, large targets. This page is aimed with a mouse by a person and by a picker overlay, so
+     small elements would make the test about the page instead of about the clicker. */
   :root {
     --bg: #0d1117;
     --panel: #161b22;
+    --panel2: #1c2128;
     --line: #30363d;
     --text: #e6edf3;
     --dim: #8b949e;
     --hit: #2ea043;
     --hot: #f0883e;
     --blue: #388bfd;
+    --up: #2ea043;
+    --down: #d32f2f;
   }
   * { box-sizing: border-box; }
   body {
-    margin: 0; padding: 18px;
+    margin: 0; padding: 16px 16px 190px;
     background: var(--bg); color: var(--text);
     font-family: "Vazirmatn", "Segoe UI", Tahoma, system-ui, sans-serif;
-    /* digits must not be reordered or shaped: a time of 13:52:10:02 is read left to right even in RTL */
+    /* digits must not be reordered or shaped: 13:52:10:02 reads left to right even in RTL */
     font-variant-numeric: tabular-nums;
   }
   h1 { font-size: 17px; margin: 0 0 4px; font-weight: 600; }
-  .sub { color: var(--dim); font-size: 12px; margin-bottom: 14px; }
+  h2 { font-size: 13px; margin: 18px 0 8px; font-weight: 600; color: var(--dim); }
+  .sub { color: var(--dim); font-size: 12px; }
+
+  .note {
+    border: 1px solid var(--line); border-radius: 8px; padding: 9px 12px;
+    margin: 0 0 12px; font-size: 12px; color: var(--dim); line-height: 1.7;
+  }
+  .note b { color: var(--text); }
+  code { direction: ltr; display: inline-block; font-size: 11px; color: var(--hot); }
 
   /* the big clock: the reference the user compares every logged time against */
   .clock {
     display: flex; align-items: baseline; gap: 10px;
     background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
-    padding: 12px 16px; margin-bottom: 16px;
+    padding: 10px 14px; margin-bottom: 14px;
   }
-  .clock b { font-size: 30px; letter-spacing: 1px; direction: ltr; font-weight: 700; }
+  .clock b { font-size: 28px; letter-spacing: 1px; direction: ltr; font-weight: 700; }
   .clock .cc { color: var(--hot); }
-  .clock span { color: var(--dim); font-size: 12px; }
 
-  .grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; margin-bottom: 18px; }
+  .row-between { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  button.reset {
+    background: transparent; color: var(--text); border: 1px solid var(--line);
+    border-radius: 8px; padding: 5px 12px; cursor: pointer; font-family: inherit; font-size: 12px;
+  }
+  button.reset:hover { border-color: var(--hot); color: var(--hot); }
+  label.switch { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--dim); cursor: pointer; }
+
+  /* ---- the watchlist: clicking a row opens an order window, as the real terminal does */
+  .watch { border: 1px solid var(--line); border-radius: 10px; overflow: hidden; background: var(--panel); }
+  .watch .head, .watch .wrow { display: grid; grid-template-columns: 1.2fr 1fr 0.8fr 1fr; }
+  .watch .head { background: var(--panel2); font-size: 11px; color: var(--dim); }
+  .watch .head > div, .watch .wrow > div { padding: 7px 10px; }
+  .watch .wrow { cursor: pointer; border-top: 1px solid var(--line); font-size: 13px; }
+  .watch .wrow:hover { background: #1a2029; }
+  .watch .wrow .up { color: var(--up); }
+  .watch .wrow .down { color: var(--down); }
+  .watch .sym { font-weight: 600; }
+
+  /* ---- the existing fixed targets, kept so earlier tests still work */
+  .grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; margin-bottom: 8px; }
   .pad {
     position: relative; cursor: pointer; user-select: none;
     background: var(--panel); border: 2px solid var(--line); border-radius: 12px;
-    padding: 16px 12px; text-align: center; transition: border-color .08s, background .08s, transform .06s;
+    padding: 14px 10px; text-align: center; transition: border-color .08s, background .08s, transform .06s;
   }
   .pad:hover { border-color: var(--blue); }
   .pad.hit { border-color: var(--hit); background: #0f2d18; transform: scale(.985); }
-  .pad .n { font-size: 26px; font-weight: 700; }
+  .pad .n { font-size: 24px; font-weight: 700; }
   .pad .lbl { color: var(--dim); font-size: 11px; margin-top: 2px; }
   .pad .count {
     position: absolute; top: 6px; inset-inline-start: 8px;
@@ -54,113 +84,173 @@
     border-radius: 20px; padding: 1px 7px; min-width: 20px;
   }
   .pad .count.on { background: var(--hit); }
-  .pad .when {
-    margin-top: 8px; font-size: 13px; direction: ltr; letter-spacing: .5px;
-    color: var(--dim); min-height: 18px;
-  }
+  .pad .when { margin-top: 6px; font-size: 12px; direction: ltr; letter-spacing: .5px; color: var(--dim); min-height: 17px; }
   .pad .when.on { color: var(--hit); font-weight: 700; }
 
-  .row-of-same { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 18px; }
+  .row-of-same { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
   .same {
     cursor: pointer; user-select: none; text-align: center;
-    background: #1c2128; border: 2px dashed var(--line); border-radius: 10px; padding: 14px 8px;
-    font-size: 13px;
+    background: var(--panel2); border: 2px dashed var(--line); border-radius: 10px; padding: 13px 8px; font-size: 13px;
   }
   .same:hover { border-color: var(--hot); }
   .same.hit { border-style: solid; border-color: var(--hit); background: #0f2d18; }
   .same .when { margin-top: 6px; font-size: 12px; direction: ltr; color: var(--dim); min-height: 16px; }
   .same .when.on { color: var(--hit); font-weight: 700; }
 
-  .bar { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
-  .bar h2 { font-size: 13px; margin: 0; font-weight: 600; color: var(--dim); }
-  button.reset {
-    background: transparent; color: var(--text); border: 1px solid var(--line);
-    border-radius: 8px; padding: 5px 12px; cursor: pointer; font-family: inherit; font-size: 12px;
+  /* ---- the floating order window, modelled on the terminal in the screenshots ---- */
+  .order-win {
+    position: absolute; width: 310px; z-index: 40;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+    box-shadow: 0 10px 28px rgba(0,0,0,.55);
+    font-size: 12px;
   }
-  button.reset:hover { border-color: var(--hot); color: var(--hot); }
+  .order-win.hit { box-shadow: 0 10px 28px rgba(46,160,67,.35); border-color: var(--hit); }
+  /* TITLE BAR: the tab pair on one side, the close button at the opposite end - as the screenshots show, and it is
+     the drag handle */
+  .order-win .title {
+    display: flex; align-items: center; gap: 6px;
+    background: var(--panel2); border-bottom: 1px solid var(--line);
+    border-radius: 10px 10px 0 0; padding: 6px 8px; cursor: move;
+  }
+  .order-win .title .tab {
+    padding: 3px 12px; border-radius: 6px; font-size: 12px; border: 1px solid transparent;
+  }
+  .order-win .title .tab.buy.active { background: #0b3d91; color: #fff; border-color: #1f6feb; }
+  .order-win .title .tab.sell.active { background: #7f1d1d; color: #fff; border-color: #d32f2f; }
+  .order-win .title .spacer { flex: 1; }
+  .order-win .title .close {
+    width: 20px; height: 20px; line-height: 18px; text-align: center;
+    border: 1px solid var(--line); border-radius: 5px; cursor: pointer; color: var(--dim);
+  }
+  .order-win .title .close:hover { border-color: var(--down); color: var(--down); }
+  .order-win .quote { padding: 8px 10px 4px; display: flex; align-items: baseline; gap: 8px; }
+  .order-win .quote .sym { font-weight: 700; font-size: 14px; }
+  .order-win .quote .px { font-weight: 700; }
+  .order-win .quote .chg { color: var(--up); }
+  .order-win .body { padding: 6px 10px 10px; }
+  .order-win .f { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
+  .order-win .f > label { width: 52px; color: var(--dim); }
+  .order-win .f input {
+    flex: 1; background: #0d1117; color: var(--text); border: 1px solid var(--line);
+    border-radius: 6px; padding: 5px 8px; font: inherit; direction: ltr; text-align: left;
+  }
+  .order-win .f .unit { background: var(--panel2); border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px; }
+  .order-win .f .ro { flex: 1; color: var(--dim); direction: ltr; text-align: left; }
+  .order-win .stepper { display: flex; gap: 4px; }
+  .order-win .stepper button {
+    width: 24px; background: var(--panel2); color: var(--text); border: 1px solid var(--line);
+    border-radius: 6px; cursor: pointer; font: inherit;
+  }
+  .order-win .actions { display: flex; gap: 8px; margin-top: 8px; }
+  .order-win .actions button {
+    flex: 1; padding: 9px; border: 0; border-radius: 7px; cursor: pointer; font: inherit; font-weight: 600;
+    color: #fff;
+  }
+  .order-win .actions .buy { background: #1f6feb; }
+  .order-win .actions .sell { background: #b91c1c; }
+  .order-win .actions .buy.dim { background: #1b2733; color: var(--dim); }
+  .order-win .actions .sell.dim { background: #2a1b1b; color: var(--dim); }
 
+  /* ---- the log */
+  #logwrap { position: fixed; bottom: 0; inset-inline: 0; background: var(--panel); border-top: 1px solid var(--line); max-height: 184px; overflow: auto; }
   table { width: 100%; border-collapse: collapse; font-size: 12px; }
   th, td { padding: 5px 8px; border-bottom: 1px solid var(--line); text-align: right; }
-  th { color: var(--dim); font-weight: 500; }
-  td.t { direction: ltr; text-align: left; letter-spacing: .5px; }
-  td.delta { direction: ltr; text-align: left; color: var(--dim); }
+  th { color: var(--dim); font-weight: 500; background: var(--panel2); position: sticky; top: 0; }
+  td.t, td.delta { direction: ltr; text-align: left; letter-spacing: .5px; }
+  td.delta { color: var(--dim); }
   tbody tr:first-child td { color: var(--hit); }
-  .empty { color: var(--dim); text-align: center; padding: 18px; font-size: 12px; }
+  .empty { color: var(--dim); text-align: center; padding: 16px; font-size: 12px; }
 </style>
 </head>
 <body>
 
 <h1>میدان تست اتوفلو</h1>
-<div class="sub">هر کلیک را با زمان صدم ثانیه ثبت می‌کند. زمان از لحظه‌ای گرفته می‌شود که صفحه کلیک را دریافت می‌کند.</div>
+<div class="sub">هر کلیک را با زمان صدم ثانیه ثبت می‌کند، و می‌گوید روی کدام نماد و کدام دکمه نشست.</div>
+
+<div class="note">
+  <b>این فایل تک‌فایلی است</b> — نه سرور لازم دارد و نه اینترنت. در همان مرورگری بازش کن که افزونه در آن نصب است.
+  اگر افزونه اینجا کار نکرد، در <code>chrome://extensions</code> روی کارت افزونه <b>Details</b> را بزن و
+  <b>Allow access to file URLs</b> را روشن کن.
+</div>
 
 <div class="clock">
   <b id="clock">--:--:--<span class="cc">:--</span></b>
-  <span>ساعت زنده — با این مقایسه کن</span>
+  <span class="sub">ساعت زنده — با این مقایسه کن</span>
 </div>
 
+<div class="row-between">
+  <h2 style="margin:0">فهرست نمادها — روی هر ردیف کلیک کن تا پنجرهٔ سفارش باز شود</h2>
+  <label class="switch">
+    <input type="checkbox" id="anchored" checked>
+    پنجره‌ها نشانهٔ نماد داشته باشند (مثل سامانهٔ واقعی)
+  </label>
+</div>
+<div class="watch" id="watch">
+  <div class="head">
+    <div>نماد</div><div>قیمت آخر</div><div>تغییر</div><div>حجم</div>
+  </div>
+</div>
+<div class="sub" style="margin-top:6px">
+  اگر تیک بالا را برداری، پنجره‌ها <b>هیچ نشانه‌ای</b> ندارند. آن حالت برای دیدن هشدار
+  <b>⚠ موقعیتی</b> در پنل است: آن‌وقت هیچ سلکتوری نمی‌تواند پنجره‌ها را از هم تشخیص دهد.
+</div>
+
+<h2>نقاط ثابت (برای تست چند نقطه با هم)</h2>
 <div class="grid" id="pads">
-  <!-- four distinguishable points: enough to prove several steps fire separately and in the right order -->
   <div class="pad" data-target="نقطه ۱" id="pad1">
-    <div class="count" data-count>0</div>
-    <div class="n">۱</div>
-    <div class="lbl">نقطه یک</div>
+    <div class="count" data-count>0</div><div class="n">۱</div><div class="lbl">نقطه یک</div>
     <div class="when" data-when>—</div>
   </div>
   <div class="pad" data-target="نقطه ۲" id="pad2">
-    <div class="count" data-count>0</div>
-    <div class="n">۲</div>
-    <div class="lbl">نقطه دو</div>
+    <div class="count" data-count>0</div><div class="n">۲</div><div class="lbl">نقطه دو</div>
     <div class="when" data-when>—</div>
   </div>
   <div class="pad" data-target="نقطه ۳" id="pad3">
-    <div class="count" data-count>0</div>
-    <div class="n">۳</div>
-    <div class="lbl">نقطه سه</div>
+    <div class="count" data-count>0</div><div class="n">۳</div><div class="lbl">نقطه سه</div>
     <div class="when" data-when>—</div>
   </div>
   <div class="pad" data-target="نقطه ۴" id="pad4">
-    <div class="count" data-count>0</div>
-    <div class="n">۴</div>
-    <div class="lbl">نقطه چهار</div>
+    <div class="count" data-count>0</div><div class="n">۴</div><div class="lbl">نقطه چهار</div>
     <div class="when" data-when>—</div>
   </div>
   <div class="pad" data-target="نقطه ۵" id="pad5">
-    <div class="count" data-count>0</div>
-    <div class="n">۵</div>
-    <div class="lbl">نقطه پنج</div>
+    <div class="count" data-count>0</div><div class="n">۵</div><div class="lbl">نقطه پنج</div>
     <div class="when" data-when>—</div>
   </div>
 </div>
 
-<div class="bar">
-  <h2>سه دکمهٔ هم‌نام — برای تست «همهٔ تطابق‌ها»</h2>
-</div>
+<h2>سه دکمهٔ هم‌نام — برای تست «همهٔ تطابق‌ها»</h2>
 <div class="row-of-same" id="sames">
   <div class="same" data-target="هم‌نام ۱" id="same1">ارسال پی در پی سفارش<div class="when" data-when>—</div></div>
   <div class="same" data-target="هم‌نام ۲" id="same2">ارسال پی در پی سفارش<div class="when" data-when>—</div></div>
   <div class="same" data-target="هم‌نام ۳" id="same3">ارسال پی در پی سفارش<div class="when" data-when>—</div></div>
 </div>
 
-<div class="bar">
-  <h2>ثبت کلیک‌ها</h2>
-  <button class="reset" id="reset">پاک کردن</button>
-  <button class="reset" id="exportCsv" style="border-color:var(--hit);color:var(--hit)">⭳ خروجی CSV</button>
-  <button class="reset" id="exportAll" style="border-color:var(--blue);color:var(--blue)">⭳ خروجی کامل (برای تحلیل)</button>
-  <span class="sub" id="summary" style="margin:0"></span>
+<div id="logwrap">
+  <div class="row-between" style="padding:8px 12px 0">
+    <h2 style="margin:0">ثبت کلیک‌ها</h2>
+    <div style="display:flex;gap:8px;align-items:center">
+      <span class="sub" id="summary" style="margin:0"></span>
+      <button class="reset" id="reset">پاک کردن</button>
+      <button class="reset" id="exportCsv" style="border-color:var(--hit);color:var(--hit)">⭳ خروجی CSV</button>
+      <button class="reset" id="exportAll" style="border-color:var(--blue);color:var(--blue)">⭳ خروجی کامل</button>
+    </div>
+  </div>
+  <table>
+    <thead>
+      <tr>
+        <th style="width:40px">#</th>
+        <th style="width:108px">زمان</th>
+        <th style="width:150px">هدف</th>
+        <th style="width:110px">نماد</th>
+        <th>رویداد</th>
+        <th style="width:86px">فاصله (ms)</th>
+      </tr>
+    </thead>
+    <tbody id="log"></tbody>
+  </table>
+  <div class="empty" id="empty">هنوز کلیکی ثبت نشده.</div>
 </div>
-
-<table>
-  <thead>
-    <tr>
-      <th style="width:44px">#</th>
-      <th style="width:110px">زمان</th>
-      <th>هدف</th>
-      <th style="width:90px">فاصله (ms)</th>
-    </tr>
-  </thead>
-  <tbody id="log"></tbody>
-</table>
-<div class="empty" id="empty">هنوز کلیکی ثبت نشده.</div>
 
 <script>
 (() => {
@@ -169,16 +259,15 @@
   /**
    * A click log with centisecond resolution, written by the page itself.
    *
-   * WHY THE PAGE TIMES IT AND NOT THE EXTENSION: the interesting question is when the BROWSER dispatched the
-   * click, not when the extension thought it had. If the extension reports its own timestamp, a bug in the
-   * extension also produces the timestamp that would hide it. The handler here is the ground truth.
+   * The page times the clicks, not the extension: the question is when the BROWSER dispatched the click. If the
+   * extension reported its own timestamps, a bug in the extension would produce the numbers that hide it.
    */
-  const pad = (n, w = 2) => String(n).padStart(w, '0');
+  const pad2 = (n, w = 2) => String(n).padStart(w, '0');
 
-  /** 13:52:10:02 - hours, minutes, seconds, hundredths. Hundredths, not milliseconds: the user reads this. */
+  /** 13:52:10:02 - hours, minutes, seconds, hundredths. Hundredths because a person reads this. */
   function stamp(ms) {
     const d = new Date(ms);
-    return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}:${pad(Math.floor(d.getMilliseconds() / 10))}`;
+    return `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}:${pad2(Math.floor(d.getMilliseconds() / 10))}`;
   }
 
   const log = [];
@@ -193,36 +282,30 @@
     tbody.textContent = '';
     for (const e of log.slice(-200).reverse()) {
       const tr = document.createElement('tr');
-      const a = document.createElement('td'); a.textContent = String(e.n);
-      const b = document.createElement('td'); b.className = 't'; b.textContent = e.at;
-      const c = document.createElement('td'); c.textContent = e.target;
-      const d = document.createElement('td'); d.className = 'delta';
-      d.textContent = e.delta === null ? '—' : String(e.delta);
-      tr.append(a, b, c, d);
+      const cell = (text, cls) => { const td = document.createElement('td'); if (cls) td.className = cls; td.textContent = text; return td; };
+      tr.append(
+        cell(String(e.n)),
+        cell(e.at, 't'),
+        cell(e.target),
+        cell(e.symbol ?? '—'),
+        cell(e.what),
+        cell(e.delta === null ? '—' : String(e.delta), 'delta'),
+      );
       tbody.append(tr);
     }
     empty.hidden = log.length > 0;
-
     if (!log.length) { summary.textContent = ''; return; }
-    const first = log[0];
-    const last = log[log.length - 1];
-    const span = last.ms - first.ms;
-    summary.textContent = `${log.length} کلیک · از ${first.at} تا ${last.at} · ${span}ms`;
+    const first = log[0], last = log[log.length - 1];
+    summary.textContent = `${log.length} کلیک · از ${first.at} تا ${last.at} · ${last.ms - first.ms}ms`;
   }
 
-  function record(target, el) {
+  /** Record one click. `symbol` is filled only for clicks inside an order window, so a wrong-window click shows. */
+  function record({ target, what, symbol = null, el = null }) {
     const now = Date.now();
-    const entry = {
-      n: ++counter,
-      ms: now,
-      at: stamp(now),
-      target,
-      delta: lastAt === null ? null : now - lastAt,
-    };
+    const entry = { n: ++counter, ms: now, at: stamp(now), target, what, symbol, delta: lastAt === null ? null : now - lastAt };
     lastAt = now;
     log.push(entry);
 
-    // per-target: count and last time
     if (el) {
       const c = el.querySelector('[data-count]');
       if (c) { c.textContent = String(Number(c.textContent) + 1); c.classList.add('on'); }
@@ -231,77 +314,198 @@
       el.classList.add('hit');
       setTimeout(() => el.classList.remove('hit'), 220);
     }
-
     renderLog();
-
-    // also exposed for a headless test to read, so a test does not have to parse the DOM
-    window.__clicks = log;
     publishSoon();
+    return entry;
   }
 
-  // One delegated handler rather than one per element: it keeps the page honest about ordering, and a click on
-  // a child node (the label inside a pad) still resolves to the pad.
+  // ---- the watchlist, and the floating windows
+  const SYMBOLS = [
+    { sym: 'فزر', px: '334,300', chg: '+2.99%', up: true, vol: '9,700' },
+    { sym: 'شستا', px: '5,260', chg: '+1.35%', up: true, vol: '127.8M' },
+    { sym: 'شپنا', px: '12,870', chg: '+2.20%', up: true, vol: '42.1M' },
+    { sym: 'خودرو', px: '1,424', chg: '-0.70%', up: false, vol: '88.4M' },
+    { sym: 'وبملت', px: '3,340', chg: '%0.07', up: true, vol: '12.9M' },
+  ];
+
+  const watch = document.getElementById('watch');
+  for (const s of SYMBOLS) {
+    const row = document.createElement('div');
+    row.className = 'wrow';
+    row.dataset.sym = s.sym;
+    row.innerHTML = `<div class="sym">${s.sym}</div><div>${s.px}</div>`
+      + `<div class="${s.up ? 'up' : 'down'}">${s.chg}</div><div>${s.vol}</div>`;
+    row.addEventListener('click', () => openOrderWindow(s));
+    watch.append(row);
+  }
+
+  const wins = [];
+  let opened = 0;
+
+  /**
+   * A floating order window modelled on the terminal in the screenshots: a title bar with a خرید/فروش tab pair and
+   * a close button at the far end, the symbol and its last price, then قیمت (with a unit dropdown), تعداد (with a
+   * stepper), and the three read-only figures دارایی / سرمایه / اعتبار, then the two action buttons.
+   *
+   * Dragging is by the title bar and changes only the CSS position - which is exactly why a selector built from
+   * sibling order is unsafe here.
+   */
+  function openOrderWindow(s) {
+    opened += 1;
+    const win = document.createElement('div');
+    win.className = 'order-win';
+    win.style.left = `${Math.min(60 + opened * 28, 620)}px`;
+    win.style.top = `${120 + opened * 22}px`;
+
+    // THE IDENTIFYING ATTRIBUTE, present or absent depending on the switch. In the real terminal a window almost
+    // always names its symbol; the off case exists so the ⚠ warning can be seen and understood.
+    if (document.getElementById('anchored').checked) win.dataset.symbol = s.sym;
+
+    win.innerHTML = `
+      <div class="title">
+        <div class="tab buy active">خرید</div>
+        <div class="tab sell">فروش</div>
+        <div class="spacer"></div>
+        <div class="close" title="بستن">✕</div>
+      </div>
+      <div class="quote">
+        <span class="sym">${s.sym}</span>
+        <span class="px">${s.px}</span>
+        <span class="chg">${s.chg}</span>
+      </div>
+      <div class="body">
+        <div class="f">
+          <label>قیمت</label>
+          <input class="px-in" value="${s.px.replace(/,/g, '')}">
+          <span class="unit">▼</span>
+        </div>
+        <div class="f">
+          <label>تعداد</label>
+          <input class="qty-in" value="3000">
+          <span class="stepper"><button class="plus">+</button><button class="minus">−</button></span>
+        </div>
+        <div class="f"><label>دارایی</label><span class="ro ro-asset">0</span></div>
+        <div class="f"><label>سرمایه</label><span class="ro ro-capital">0</span></div>
+        <div class="f"><label>اعتبار</label><span class="ro ro-credit">0</span></div>
+        <div class="actions">
+          <button class="buy">خرید</button>
+          <button class="sell">فروش</button>
+        </div>
+      </div>`;
+
+    document.body.append(win);
+    wins.push(win);
+
+    // dragging the title bar
+    const title = win.querySelector('.title');
+    let sx = 0, sy = 0, ox = 0, oy = 0, dragging = false;
+    title.addEventListener('mousedown', (e) => {
+      if (e.target.classList.contains('close') || e.target.classList.contains('tab')) return;
+      dragging = true; sx = e.clientX; sy = e.clientY;
+      ox = parseInt(win.style.left, 10); oy = parseInt(win.style.top, 10);
+      e.preventDefault();
+    });
+    window.addEventListener('mousemove', (e) => {
+      if (!dragging) return;
+      win.style.left = `${ox + (e.clientX - sx)}px`;
+      win.style.top = `${oy + (e.clientY - sy)}px`;
+    });
+    window.addEventListener('mouseup', () => { dragging = false; });
+
+    win.querySelector('.close').addEventListener('click', () => {
+      win.remove();
+      const i = wins.indexOf(win); if (i >= 0) wins.splice(i, 1);
+      record({ target: 'پنجرهٔ سفارش', what: 'بستن پنجره', symbol: s.sym });
+    });
+
+    // the tab pair switches which action is emphasised, exactly as the terminal shows it
+    win.querySelector('.tab.buy').addEventListener('click', () => {
+      win.querySelector('.tab.buy').classList.add('active');
+      win.querySelector('.tab.sell').classList.remove('active');
+      win.querySelector('.actions .buy').classList.remove('dim');
+      win.querySelector('.actions .sell').classList.add('dim');
+      record({ target: 'پنجرهٔ سفارش', what: 'تب خرید', symbol: s.sym });
+    });
+    win.querySelector('.tab.sell').addEventListener('click', () => {
+      win.querySelector('.tab.sell').classList.add('active');
+      win.querySelector('.tab.buy').classList.remove('active');
+      win.querySelector('.actions .sell').classList.remove('dim');
+      win.querySelector('.actions .buy').classList.add('dim');
+      record({ target: 'پنجرهٔ سفارش', what: 'تب فروش', symbol: s.sym });
+    });
+
+    win.querySelector('.plus').addEventListener('click', (e) => {
+      e.stopPropagation();
+      const q = win.querySelector('.qty-in');
+      q.value = String(Number(q.value.replace(/,/g, '') || 0) + 100);
+    });
+    win.querySelector('.minus').addEventListener('click', (e) => {
+      e.stopPropagation();
+      const q = win.querySelector('.qty-in');
+      q.value = String(Math.max(0, Number(q.value.replace(/,/g, '') || 0) - 100));
+    });
+
+    win.querySelector('.actions .buy').addEventListener('click', () => {
+      record({ target: 'دکمهٔ خرید', what: 'خرید', symbol: s.sym, el: win });
+    });
+    win.querySelector('.actions .sell').addEventListener('click', () => {
+      record({ target: 'دکمهٔ فروش', what: 'فروش', symbol: s.sym, el: win });
+    });
+
+    record({ target: 'پنجرهٔ سفارش', what: 'باز شدن پنجره', symbol: s.sym });
+    return win;
+  }
+
+  // ---- the fixed targets: one delegated handler, so ordering stays honest
   document.addEventListener('click', (e) => {
     const el = e.target.closest('[data-target]');
-    if (el) record(el.dataset.target, el);
+    if (el) record({ target: el.dataset.target, what: 'کلیک', el });
   }, true);
 
-  // the live clock, on animation frames so the hundredths are smooth rather than stuttering
+  // ---- the live clock
   const clockEl = document.getElementById('clock');
   function tick() {
-    const now = Date.now();
-    const d = new Date(now);
-    clockEl.innerHTML = `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
-      + `<span class="cc">:${pad(Math.floor(d.getMilliseconds() / 10))}</span>`;
+    const d = new Date();
+    clockEl.innerHTML = `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`
+      + `<span class="cc">:${pad2(Math.floor(d.getMilliseconds() / 10))}</span>`;
     requestAnimationFrame(tick);
   }
   tick();
 
-  /**
-   * The click log as a CSV, one row per click.
-   *
-   * CSV because it opens in any spreadsheet and survives being pasted into a chat. The header names carry the units
-   * so a row cannot be misread later, and the raw epoch milliseconds are included beside the formatted time: the
-   * formatted one is for a person, the raw one is what makes two machines comparable.
-   */
+  // ---- exports
   function toCsv() {
-    const rows = [['n', 'time_hh_mm_ss_cc', 'epoch_ms', 'target', 'gap_from_previous_ms']];
-    for (const e of log) {
-      rows.push([e.n, e.at, e.ms, e.target, e.delta === null ? '' : e.delta]);
-    }
+    const rows = [['n', 'time_hh_mm_ss_cc', 'epoch_ms', 'target', 'symbol', 'event', 'gap_from_previous_ms']];
+    for (const e of log) rows.push([e.n, e.at, e.ms, e.target, e.symbol ?? '', e.what, e.delta === null ? '' : e.delta]);
     return rows.map((r) => r.map((c) => {
       const s = String(c ?? '');
       return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
     }).join(',')).join('\r\n') + '\r\n';
   }
 
-  /**
-   * A full export: the CSV plus everything needed to reason about a missing click.
-   *
-   * The page cannot see the extension's alarms, so this carries what only the page knows - the elements that were
-   * clicked, the ones that were not, and the exact moment the log was taken.
-   */
   function toFullReport() {
-    const points = [...document.querySelectorAll('[data-target]')].map((el) => ({
+    const targets = [...document.querySelectorAll('[data-target]')].map((el) => ({
       target: el.dataset.target,
       id: el.id || null,
       clicks: el.querySelector('[data-count]')?.textContent ?? '0',
       lastAt: el.querySelector('[data-when]')?.textContent ?? null,
     }));
-    const clickedTargets = new Set(log.map((e) => e.target));
+    const symbolsClicked = [...new Set(log.filter((e) => e.symbol).map((e) => e.symbol))];
     return {
       generatedAt: stamp(Date.now()),
       generatedAtMs: Date.now(),
       timezoneOffsetMin: new Date().getTimezoneOffset(),
       clock: document.getElementById('clock')?.textContent ?? null,
+      anchoredWindows: document.getElementById('anchored').checked,
+      orderWindowsOpen: wins.length,
       totals: {
         clicks: log.length,
-        distinctTargets: clickedTargets.size,
+        distinctTargets: new Set(log.map((e) => e.target)).size,
+        symbolsClicked,
         spanMs: log.length ? log[log.length - 1].ms - log[0].ms : 0,
       },
-      // the point of the file: which targets DID NOT get a click
-      targets: points.map((p) => ({ ...p, wasClicked: clickedTargets.has(p.target) })),
-      notClicked: points.filter((p) => !clickedTargets.has(p.target)).map((p) => p.target),
+      // the point of the file when a click goes missing: which targets received nothing
+      targets,
+      notClicked: targets.filter((t) => Number(t.clicks) === 0).map((t) => t.target),
       clicks: log,
     };
   }
@@ -310,62 +514,54 @@
     const blob = new Blob([text], { type: mime });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
-    a.href = url;
-    a.download = filename;
-    document.body.append(a);
-    a.click();
-    a.remove();
+    a.href = url; a.download = filename;
+    document.body.append(a); a.click(); a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 10000);
   }
-
   const fileStamp = () => new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
 
   document.getElementById('exportCsv').addEventListener('click', (e) => {
     e.stopPropagation();
-    save('autoflow-clicks-' + fileStamp() + '.csv', toCsv(), 'text/csv;charset=utf-8');
+    save(`autoflow-clicks-${fileStamp()}.csv`, toCsv(), 'text/csv;charset=utf-8');
   });
-
   document.getElementById('exportAll').addEventListener('click', (e) => {
     e.stopPropagation();
-    save('autoflow-test-report-' + fileStamp() + '.txt',
-      JSON.stringify(toFullReport(), null, 2), 'text/plain;charset=utf-8');
+    save(`autoflow-test-report-${fileStamp()}.txt`, JSON.stringify(toFullReport(), null, 2), 'text/plain;charset=utf-8');
   });
-
-  // expose to the extension and to a headless test
-  window.__export = { csv: toCsv, report: toFullReport };
-
-  /**
-   * The extension's content script runs in an isolated world, so it cannot read `window.__clicks` here. It reads
-   * this attribute instead: the log as JSON, refreshed on every click. That is the only bridge, and it means the
-   * page stays the authority on when a click arrived.
-   */
-  const publish = () => {
-    try {
-      document.documentElement.setAttribute('data-autoflow-clicks', JSON.stringify(log.slice(-200)));
-    } catch { /* a very long log could throw; the attribute is a convenience, not the record */ }
-  };
-  const publishSoon = () => setTimeout(publish, 0);
 
   document.getElementById('reset').addEventListener('click', (e) => {
     e.stopPropagation();
-    log.length = 0;
-    counter = 0;
-    lastAt = null;
-    window.__clicks = [];
+    /**
+     * Emptied IN PLACE, never reassigned.
+     *
+     * `window.__clicks` is the same array object the page appends to, so a reset that pointed the global at a new
+     * array would leave the page writing into the old one - the log on screen would clear and then stay empty
+     * forever while clicks were still being recorded. Measured: after one reset no further click ever appeared.
+     */
+    log.length = 0; counter = 0; lastAt = null;
     for (const el of document.querySelectorAll('[data-target]')) {
       el.classList.remove('hit');
-      const c = el.querySelector('[data-count]');
-      if (c) { c.textContent = '0'; c.classList.remove('on'); }
-      const w = el.querySelector('[data-when]');
-      if (w) { w.textContent = '—'; w.classList.remove('on'); }
+      const c = el.querySelector('[data-count]'); if (c) { c.textContent = '0'; c.classList.remove('on'); }
+      const w = el.querySelector('[data-when]'); if (w) { w.textContent = '—'; w.classList.remove('on'); }
     }
     renderLog();
     publishSoon();
   });
 
-  // named for the picker and for the docs
-  window.__sim = { stamp, log: () => log, reset: () => document.getElementById('reset').click() };
+  // ---- the bridge the content script reads, because worlds are isolated
+  function publish() {
+    try {
+      document.documentElement.setAttribute('data-autoflow-clicks', JSON.stringify(log.slice(-200)));
+    } catch { /* a very long log could throw; the attribute is a convenience, not the record */ }
+  }
+  function publishSoon() { setTimeout(publish, 0); }
+
+  // hooks for a headless test
   window.__clicks = log;
+  window.__export = { csv: toCsv, report: toFullReport };
+  window.__openOrderWindow = (sym) => openOrderWindow(SYMBOLS.find((s) => s.sym === sym) ?? SYMBOLS[0]);
+  window.__wins = () => wins;
+  window.__anchored = () => document.getElementById('anchored').checked;
 })();
 </script>
 </body>

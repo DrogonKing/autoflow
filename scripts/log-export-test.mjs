@@ -66,8 +66,10 @@ console.log('--- 1. the page CSV ---');
   const lines = csv.trim().split(/\r?\n/);
   console.log(`  ${lines.length} lines`);
   for (const l of lines.slice(0, 4)) console.log(`    ${l}`);
-  check('the CSV has a header', lines[0].startsWith('n,time_hh_mm_ss_cc,epoch_ms,target,gap_from_previous_ms'),
-    lines[0]);
+  // the columns now include the SYMBOL and the event, because a click inside an order window has to say which
+  // symbol it landed on - a wrong-window click is otherwise invisible
+  check('the CSV has a header naming the units and the symbol',
+    lines[0].startsWith('n,time_hh_mm_ss_cc,epoch_ms,target,symbol,event,gap_from_previous_ms'), lines[0]);
   check('one row per click', lines.length === 3, `${lines.length - 1} rows`);
   check('each row carries the hundredths time and the raw epoch ms',
     /^\d{2}:\d{2}:\d{2}:\d{2}$/.test(lines[1].split(',')[1]) && /^\d{13}$/.test(lines[1].split(',')[2]),
@@ -85,8 +87,13 @@ console.log('\n--- 2. the page report names what was NOT clicked ---');
   check('and the two that were clicked are NOT in that list',
     !rep.notClicked.includes('نقطه ۱') && !rep.notClicked.includes('نقطه ۳'),
     rep.notClicked.join(', '));
-  check('it marks each target as clicked or not', rep.targets.every((t) => typeof t.wasClicked === 'boolean'),
-    JSON.stringify(rep.targets.map((t) => [t.target, t.wasClicked])).slice(0, 160));
+  // the report's own shape: it lists the count per target and the list of ones that got nothing. The old
+  // `wasClicked` boolean was replaced by `clicks`, so a target clicked twice is distinguishable from one clicked once.
+  check('it reports a click count per target',
+    rep.targets.every((t) => typeof t.clicks === 'string'), JSON.stringify(rep.targets).slice(0, 160));
+  check('and the counts agree with the unclicked list',
+    rep.targets.filter((t) => Number(t.clicks) === 0).map((t) => t.target).join(',') === rep.notClicked.join(','),
+    `zero-count: ${rep.targets.filter((t) => Number(t.clicks) === 0).map((t) => t.target).join(',')}`);
   check('it records the timezone, so a schedule can be checked against it',
     Number.isFinite(rep.timezoneOffsetMin), String(rep.timezoneOffsetMin));
 }
