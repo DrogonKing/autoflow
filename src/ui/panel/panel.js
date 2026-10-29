@@ -1142,6 +1142,100 @@ function scheduledView() {
   return wrap;
 }
 
+/**
+ * The log tab: what the extension decided, and a way to hand it over.
+ *
+ * It exists because a click that did not happen left no evidence. An alarm that never fired, one that fired but
+ * found the slot busy, and one whose step failed all looked the same from the run list - and the first of those
+ * recorded nothing at all. This shows the decisions in order and exports everything as one text file.
+ */
+function logView(rerender) {
+  const wrap = el('div', { class: 'view log-view' });
+  const out = state.diagText ?? null;
+
+  wrap.append(el('p', { class: 'hint', text: t('log.intro') }));
+
+  wrap.append(el('div', { class: 'row' },
+    el('button', {
+      class: 'primary', text: t('log.export'),
+      onclick: async () => {
+        // ask the open page for its own click log first, so the file has both sides of the story
+        const pageLogs = await collectPageLogs();
+        const res = await send({ type: 'export-diagnostics', pageLogs });
+        if (!res?.ok) { state.diagText = `export failed: ${res?.error ?? 'unknown'}`; render(); return; }
+        state.diagText = res.text;
+        downloadText(res.text, `autoflow-log-${new Date().toISOString().replace(/[:.]/g, '-')}.txt`);
+        render();
+      },
+    }),
+    el('button', {
+      text: t('log.copy'),
+      onclick: async () => {
+        const pageLogs = await collectPageLogs();
+        const res = await send({ type: 'export-diagnostics', pageLogs });
+        if (res?.ok) { await copyText(res.text); state.diagText = res.text; render(); }
+      },
+    }),
+    el('button', {
+      text: t('log.clear'),
+      onclick: async () => {
+        await send({ type: 'clear-diagnostics' });
+        state.diagText = null;
+        render();
+      },
+    }),
+  ));
+
+  if (out) {
+    // the text is shown as text: it is evidence, and it must not be rendered as markup
+    wrap.append(el('pre', { class: 'diag-out', text: out.slice(0, 20_000) }));
+  } else {
+    wrap.append(el('p', { class: 'empty', text: t('log.empty') }));
+  }
+  return wrap;
+}
+
+/**
+ * Ask every open tab that has the content script for its click log.
+ *
+ * Silently tolerates tabs that cannot answer: a tab without the content script, or a closed one, must not make the
+ * export fail.
+ */
+async function collectPageLogs() {
+  try {
+    const tabs = await send({ type: 'list-runnable-tabs' });
+    const logs = [];
+    for (const tab of tabs?.tabs ?? []) {
+      try {
+        const res = await send({ type: 'page-log', tabId: tab.id });
+        if (res?.ok && (res.clicks ?? []).length) logs.push({ url: tab.url, clicks: res.clicks });
+      } catch { /* this tab cannot answer; the export must not fail because of it */ }
+    }
+    return logs;
+  } catch {
+    return [];
+  }
+}
+
+/** Save text as a download. Uses a blob URL, which the browser revokes when the object goes out of scope. */
+function downloadText(text, filename) {
+  try {
+    const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.append(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 10_000);
+  } catch { /* if the download is blocked the text is still on screen to copy */ }
+}
+
+async function copyText(text) {
+  try { await navigator.clipboard.writeText(text); } catch { /* clipboard may be denied; the text is on screen */ }
+}
+
 function historyView() {
   const wrap = el('div');
   if (!state.runs.length) {
@@ -1202,7 +1296,7 @@ function render() {
   ));
 
   const nav = el('nav', { class: 'tabs' });
-  for (const [id, key] of [['automations', 'tab.automations'], ['scheduled', 'tab.scheduled'], ['data', 'tab.data'], ['history', 'tab.history']]) {
+  for (const [id, key] of [['automations', 'tab.automations'], ['scheduled', 'tab.scheduled'], ['data', 'tab.data'], ['history', 'tab.history'], ['log', 'tab.log']]) {
     nav.append(el('button', {
       class: state.tab === id ? 'active' : '',
       text: t(key),
@@ -1215,6 +1309,7 @@ function render() {
   if (state.tab === 'automations') body.append(automationsView(rerender));
   else if (state.tab === 'scheduled') body.append(scheduledView());
   else if (state.tab === 'data') body.append(dataView(rerender));
+  else if (state.tab === 'log') body.append(logView(rerender));
   else body.append(historyView());
   root.append(body);
 

@@ -225,6 +225,25 @@ button.pick { background: var(--surface-2); }
 }
 .picking-banner button { margin-left: auto; background: rgba(255,255,255,0.15); border-color: rgba(255,255,255,0.3); color: #fff; }
 
+.diag-out {
+  /* the export is evidence: monospaced, wrapped rather than scrolled sideways, and capped in height so the buttons
+     stay reachable */
+  font-family: ui-monospace, "Cascadia Mono", "Menlo", monospace;
+  font-size: 10.5px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+  direction: ltr;
+  text-align: left;
+  background: var(--bg-input, #11161d);
+  border: 1px solid var(--line, #2a313c);
+  border-radius: 6px;
+  padding: 8px;
+  margin: 8px 0;
+  max-height: 46vh;
+  overflow: auto;
+}
+
 .empty { text-align: center; padding: 26px 10px; color: var(--text-dim); }
 .empty p { margin: 4px 0; }
 

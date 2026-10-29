@@ -144,6 +144,8 @@
 <div class="bar">
   <h2>ثبت کلیک‌ها</h2>
   <button class="reset" id="reset">پاک کردن</button>
+  <button class="reset" id="exportCsv" style="border-color:var(--hit);color:var(--hit)">⭳ خروجی CSV</button>
+  <button class="reset" id="exportAll" style="border-color:var(--blue);color:var(--blue)">⭳ خروجی کامل (برای تحلیل)</button>
   <span class="sub" id="summary" style="margin:0"></span>
 </div>
 
@@ -234,6 +236,7 @@
 
     // also exposed for a headless test to read, so a test does not have to parse the DOM
     window.__clicks = log;
+    publishSoon();
   }
 
   // One delegated handler rather than one per element: it keeps the page honest about ordering, and a click on
@@ -254,6 +257,95 @@
   }
   tick();
 
+  /**
+   * The click log as a CSV, one row per click.
+   *
+   * CSV because it opens in any spreadsheet and survives being pasted into a chat. The header names carry the units
+   * so a row cannot be misread later, and the raw epoch milliseconds are included beside the formatted time: the
+   * formatted one is for a person, the raw one is what makes two machines comparable.
+   */
+  function toCsv() {
+    const rows = [['n', 'time_hh_mm_ss_cc', 'epoch_ms', 'target', 'gap_from_previous_ms']];
+    for (const e of log) {
+      rows.push([e.n, e.at, e.ms, e.target, e.delta === null ? '' : e.delta]);
+    }
+    return rows.map((r) => r.map((c) => {
+      const s = String(c ?? '');
+      return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+    }).join(',')).join('\r\n') + '\r\n';
+  }
+
+  /**
+   * A full export: the CSV plus everything needed to reason about a missing click.
+   *
+   * The page cannot see the extension's alarms, so this carries what only the page knows - the elements that were
+   * clicked, the ones that were not, and the exact moment the log was taken.
+   */
+  function toFullReport() {
+    const points = [...document.querySelectorAll('[data-target]')].map((el) => ({
+      target: el.dataset.target,
+      id: el.id || null,
+      clicks: el.querySelector('[data-count]')?.textContent ?? '0',
+      lastAt: el.querySelector('[data-when]')?.textContent ?? null,
+    }));
+    const clickedTargets = new Set(log.map((e) => e.target));
+    return {
+      generatedAt: stamp(Date.now()),
+      generatedAtMs: Date.now(),
+      timezoneOffsetMin: new Date().getTimezoneOffset(),
+      clock: document.getElementById('clock')?.textContent ?? null,
+      totals: {
+        clicks: log.length,
+        distinctTargets: clickedTargets.size,
+        spanMs: log.length ? log[log.length - 1].ms - log[0].ms : 0,
+      },
+      // the point of the file: which targets DID NOT get a click
+      targets: points.map((p) => ({ ...p, wasClicked: clickedTargets.has(p.target) })),
+      notClicked: points.filter((p) => !clickedTargets.has(p.target)).map((p) => p.target),
+      clicks: log,
+    };
+  }
+
+  function save(filename, text, mime) {
+    const blob = new Blob([text], { type: mime });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.append(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
+  }
+
+  const fileStamp = () => new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+
+  document.getElementById('exportCsv').addEventListener('click', (e) => {
+    e.stopPropagation();
+    save('autoflow-clicks-' + fileStamp() + '.csv', toCsv(), 'text/csv;charset=utf-8');
+  });
+
+  document.getElementById('exportAll').addEventListener('click', (e) => {
+    e.stopPropagation();
+    save('autoflow-test-report-' + fileStamp() + '.txt',
+      JSON.stringify(toFullReport(), null, 2), 'text/plain;charset=utf-8');
+  });
+
+  // expose to the extension and to a headless test
+  window.__export = { csv: toCsv, report: toFullReport };
+
+  /**
+   * The extension's content script runs in an isolated world, so it cannot read `window.__clicks` here. It reads
+   * this attribute instead: the log as JSON, refreshed on every click. That is the only bridge, and it means the
+   * page stays the authority on when a click arrived.
+   */
+  const publish = () => {
+    try {
+      document.documentElement.setAttribute('data-autoflow-clicks', JSON.stringify(log.slice(-200)));
+    } catch { /* a very long log could throw; the attribute is a convenience, not the record */ }
+  };
+  const publishSoon = () => setTimeout(publish, 0);
+
   document.getElementById('reset').addEventListener('click', (e) => {
     e.stopPropagation();
     log.length = 0;
@@ -268,6 +360,7 @@
       if (w) { w.textContent = '—'; w.classList.remove('on'); }
     }
     renderLog();
+    publishSoon();
   });
 
   // named for the picker and for the docs

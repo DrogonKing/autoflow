@@ -1,7 +1,7 @@
 {
-  "en_keys": 236,
-  "fa_keys": 236,
-  "used_keys": 145,
+  "en_keys": 242,
+  "fa_keys": 242,
+  "used_keys": 150,
   "missing_in_en": [],
   "missing_in_fa": [],
   "unused_keys": [
@@ -93,6 +93,7 @@
     "tab.automations",
     "tab.data",
     "tab.history",
+    "tab.log",
     "tab.scheduled",
     "timer.nextPreview",
     "timer.title"

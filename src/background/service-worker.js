@@ -19,12 +19,14 @@ import {
   getSettings, saveSettings, recordRun, listRuns, clearRuns,
   getDataRows, setDataRows, exportAll, importAll, auditImportedAutomation,
   getUploadFile, setUploadFile, listUploadFiles,
+  recordEvent, clearEvents, flushEvents, readEvents,
 } from './storage.js';
 import {
   rescheduleAll, scheduleOne, cancelOne, automationIdFromAlarm, ALARM_PREFIX, listScheduled,
 } from './alarms.js';
 import { nextRun, wantsPreciseTiming, PRECISE_WAKE_MS } from '../core/schedule/schedule.js';
 import { clockOffset } from '../core/clock/skew.js';
+import { buildHeader, buildExport, exportAsText } from '../core/diag/report.js';
 
 /** The run currently in progress, if any. Mirrored into session storage for the UI. */
 let activeRun = null;
@@ -376,22 +378,40 @@ export async function startAutomation(automationId, opts = {}) {
    */
   const queue = opts.trigger === 'schedule';
   const deadline = Date.now() + (queue ? SCHEDULE_QUEUE_WAIT_MS : 0);
+  let depth = 0;
+
+  recordEvent({ kind: 'start-request', automationId, trigger: opts.trigger ?? 'manual', lateByMs: opts.lateByMs });
 
   for (;;) {
     if (!activeRun && !startingUp) {
       const token = { claimedAt: Date.now() };
       startingUp = token;                     // synchronous: no await between the test above and this
+      // logged HERE, at the instant of acceptance, before any await. Recorded later it landed after the run it
+      // started, which read as if the run were accepted once it had already finished.
+      recordEvent({ kind: 'start-accepted', automationId, trigger: opts.trigger ?? 'manual' });
       try {
+        // the acceptance is logged INSIDE the locked body, at the moment it is accepted. Logging it after the await
+        // put ACCEPTED after FINISHED in the trail, which reads as if the run were accepted once it had already
+        // ended - unhelpful in precisely the case this log exists for.
         return await startAutomationLocked(automationId, { ...opts, token });
       } catch (e) {
         if (startingUp === token) startingUp = null;
+        recordEvent({ kind: 'start-refused', automationId, reason: String(e?.message ?? e) });
         throw e;
       }
     }
     if (!queue || Date.now() >= deadline) {
+      recordEvent({
+        kind: 'start-refused', automationId,
+        reason: `slot busy with ${activeRun?.name ?? 'starting'} after ${depth} waits`,
+      });
       throw new Error(`a run is already in progress (${activeRun?.name ?? 'starting'}); stop it first`);
     }
     // a scheduled run waits its turn rather than vanishing
+    depth += 1;
+    if (depth === 1) {
+      recordEvent({ kind: 'start-queued', automationId, behind: activeRun?.name ?? 'starting', depth });
+    }
     await new Promise((r) => setTimeout(r, 60));
   }
 }
@@ -472,6 +492,10 @@ async function startAutomationLocked(automationId, {
   };
 
   activeRun = null;
+  recordEvent({
+    kind: 'run-finished', automationId, reason: finished.reason, steps: finished.steps,
+    error: finished.error?.message ?? null,
+  });
   await api.storage.session.remove('activeRun');
   await recordRun(finished).catch(() => {});
   await setBadge(null);
@@ -575,6 +599,9 @@ api.runtime.onStartup.addListener(async () => {
 
 api.alarms.onAlarm.addListener(async (alarm) => {
   const id = automationIdFromAlarm(alarm.name);
+  // recorded FIRST, before anything can throw: the previous version's failure mode was an alarm that arrived and
+  // then died inside this handler, leaving no evidence that it had ever fired
+  recordEvent({ kind: 'alarm-fired', automationId: id, alarmName: alarm.name, scheduledTime: alarm.scheduledTime });
   if (!id) return;
   try {
     const automation = await getAutomation(id);
@@ -663,8 +690,9 @@ api.alarms.onAlarm.addListener(async (alarm) => {
       await runWhenSlotIsFree();
  }
  if (lateBy > 0) {
- // recorded, not hidden: a click that lands 4s after 09:00:00 is a different event from one that lands on time
- console.warn(`[autoflow] ${id} fired ${lateBy}ms late - the machine or the browser was busy at its time`);
+   // recorded, not hidden: a click that lands 4s after 09:00:00 is a different event from one that lands on time
+   console.warn(`[autoflow] ${id} fired ${lateBy}ms late - the machine or the browser was busy at its time`);
+   recordEvent({ kind: 'alarm-late', automationId: id, lateByMs: lateBy });
  }
   } catch (e) {
     await recordRun({
@@ -916,6 +944,93 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       case 'reschedule': {
         const automations = await listAutomations();
         return { ok: true, results: await rescheduleAll(automations) };
+      }
+
+      /**
+       * Build the diagnostic export.
+       *
+       * Assembled in the worker because this is the only place that can see the alarms, the run history and the
+       * event log together. Nothing leaves the machine: the text is returned to the caller, which offers it as a
+       * download. There is no network code on this path.
+       */
+      case 'export-diagnostics': {
+        // queued appends are flushed first: an export taken straight after a test would otherwise miss the newest
+        // events, which are the ones being investigated
+        await flushEvents();
+        const manifest = api.runtime.getManifest();
+        const s = await getSettings();
+        const alarms = await api.alarms.getAll().catch(() => []);
+        const runs = await listRuns().catch(() => []);
+        const automations = (await listAutomations()).map((a) => ({
+          id: a.id, name: a.name, enabled: a.enabled !== false, schedule: a.schedule,
+          urls: a.urls ?? [], steps: (a.steps ?? []).map((x) => ({ kind: x.kind, id: x.id })),
+        }));
+        const header = buildHeader({
+          version: manifest.version,
+          browser: (() => { try { return api.runtime.getBrowserInfo ? 'firefox' : (navigator.userAgent.includes('Edg/') ? 'edge' : 'chrome'); } catch { return 'unknown'; } })(),
+          platform: navigator.userAgent,
+          timezoneOffsetMin: new Date().getTimezoneOffset(),
+        });
+        const events = await readEvents();
+        const doc = buildExport({
+          header,
+          events,
+          runs: runs.slice(0, 40),
+          automations,
+          alarms: alarms.map((a) => ({ name: a.name, scheduledTime: a.scheduledTime, periodInMinutes: a.periodInMinutes })),
+          // the page's own log is fetched from the page rather than duplicated here, so it is the page's truth
+          pageLogs: Array.isArray(msg.pageLogs) ? msg.pageLogs : [],
+          settings: { ...s, diagnosticEvents: `(${events.length} events, listed above)` },
+          includedPaths: [
+            'src/background/service-worker.js: alarm -> decision -> run',
+            'src/core/diag/events.js: bounded local event log',
+            'the test page, if its export button was pressed',
+          ],
+        });
+        return { ok: true, text: exportAsText(doc), doc };
+      }
+
+      case 'clear-diagnostics': {
+        await clearEvents();
+        return { ok: true };
+      }
+
+      /**
+       * Write one numbered event, for testing that the log is in order.
+       *
+       * Exists because the appends are queued to stop concurrent writes clobbering each other, and a queue that is
+       * not FIFO would scramble the trail - which is the one thing the trail is for. Only reachable from an
+       * extension page.
+       */
+      case 'record-test-event': {
+        recordEvent({ kind: 'ordering-probe', n: msg.n });
+        return { ok: true };
+      }
+
+      /** Tabs that might have the content script, so the export can ask each one for its click log. */
+      case 'list-runnable-tabs': {
+        const all = await api.tabs.query({});
+        return {
+          ok: true,
+          tabs: all
+            .filter((t) => t.id != null && /^(https?|file):/i.test(t.url ?? ''))
+            .map((t) => ({ id: t.id, url: t.url, title: t.title })),
+        };
+      }
+
+      /**
+       * One tab's own click log.
+       *
+       * The page holds the truth about when a click reached it: an extension that reported its own timestamps
+       * would be reporting the very thing under suspicion. So this asks the page rather than reconstructing.
+       */
+      case 'page-log': {
+        try {
+          const res = await api.tabs.sendMessage(msg.tabId, { type: 'get-click-log' });
+          return { ok: true, clicks: res?.clicks ?? [] };
+        } catch (e) {
+          return { ok: false, error: String(e?.message ?? e) };
+        }
       }
 
       case 'schedule-one': {

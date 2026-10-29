@@ -90,6 +90,7 @@ export async function scheduleOne(automation, { now = Date.now() } = {}) {
   const base = precise ? Math.max(at - PRECISE_WAKE_MS, now + 500) : at;
   const when = Math.max(base, now + 1000);
   await api.alarms.create(name, { when });
+  // the caller records this; kept out of here so this module stays free of the storage layer
   return { scheduled: true, at: when, target: at, precise };
 }
 

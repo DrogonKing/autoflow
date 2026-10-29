@@ -11,6 +11,7 @@
  */
 
 import { api } from '../platform/api.js';
+import { pushEvent } from '../core/diag/events.js';
 
 export const KEYS = {
   automations: 'automations',
@@ -18,6 +19,8 @@ export const KEYS = {
   runs: 'runs',
   dataRows: 'dataRows',
   schemaVersion: 'schemaVersion',
+  // its own key, so a settings write cannot drop diagnostic events (see recordEvent)
+  diagnosticEvents: 'diagnosticEvents',
 };
 
 export const CURRENT_SCHEMA = 1;
@@ -32,6 +35,9 @@ export const DEFAULT_SETTINGS = {
   shortcutsEnabled: true,
   /** Stop everything if the tab loses focus unexpectedly. */
   stopOnTabBlur: false,
+  // NOTE: diagnostic events are NOT here. They live under their own storage key - see recordEvent - because
+  // sharing the settings object meant a settings write could silently drop them.
+
   /** Show the on-page status badge while a run is active. */
   showStatusBadge: true,
   /**
@@ -190,6 +196,82 @@ export async function duplicateAutomation(id) {
 // ---------------------------------------------------------------------------------------------
 // settings
 // ---------------------------------------------------------------------------------------------
+
+/**
+ * Serialises the diagnostic log's read-modify-write.
+ *
+ * WHY: `recordEvent` appends to one array with a read, a merge and a write. Two calls made in the same tick both
+ * read the same array and the second write clobbers the first, so events are LOST - and the events most likely to
+ * coincide are the ones at the same instant, which is precisely the case this log exists to explain. Measured: two
+ * accepted starts and two finished runs produced only one `start-accepted` record.
+ *
+ * A promise chain is the queue: each append waits for the previous one to finish, so every event is written on top
+ * of the last. It cannot deadlock because a failing append still resolves the chain.
+ */
+let eventWriteChain = Promise.resolve();
+
+/**
+ * The events are kept in memory as the source of truth for the queue, and storage is written from that.
+ *
+ * Reasoning: the storage layer does not serialise concurrent writes, so a read-modify-write built on it loses
+ * events (measured: five appends in one tick, one survived). Keeping the list in memory means the read cannot go
+ * stale, and storage becomes a single write of the whole list. The in-memory copy is rehydrated from storage on
+ * first use, so events survive a service-worker restart.
+ */
+let eventCache = null;
+
+/**
+ * Append one diagnostic event.
+ *
+ * Deliberately NOT awaited by its callers: a diagnostic must never be able to slow down or fail a click. The
+ * write is queued and forgotten, so a storage failure costs a log line rather than a run.
+ */
+export function recordEvent(event) {
+  // stamped HERE, at the moment the event happened. Stamping inside the queued write put a start-accepted 4
+  // seconds after the run it started, which destroys the ordering that makes the trail readable.
+  const stamped = { ...event, at: event.at ?? Date.now() };
+  /**
+   * Written to its OWN storage key, not through `saveSettings`.
+   *
+   * `saveSettings` reads the whole settings object, merges, and writes it back. Two writers to different fields in
+   * the same tick therefore clobber each other, and the events were the field that lost - measured as two of five
+   * events disappearing. A separate key removes the sharing entirely, which is cheaper than a lock over every
+   * settings write in the extension.
+   */
+  const write = eventWriteChain.then(async () => {
+    // the read is from memory, inside the critical section: storage cannot supply a reliable "read the current
+    // list" here because concurrent writes to one key are not serialised
+    if (eventCache === null) {
+      const { [KEYS.diagnosticEvents]: stored } = await get(KEYS.diagnosticEvents);
+      eventCache = Array.isArray(stored) ? stored : [];
+    }
+    eventCache = pushEvent(eventCache, stamped);
+    await set({ [KEYS.diagnosticEvents]: eventCache });
+  });
+  // the chain must survive a failure, or one storage error would stop all further logging
+  eventWriteChain = write.catch(() => {});
+  return write;
+}
+
+/** Wait for every queued append to land. Used by the export, so a file is never missing the newest events. */
+export async function flushEvents() {
+  await eventWriteChain.catch(() => {});
+}
+
+/** The stored events, oldest first. */
+export async function readEvents() {
+  await flushEvents();
+  if (eventCache !== null) return eventCache.slice();
+  const { [KEYS.diagnosticEvents]: list } = await get(KEYS.diagnosticEvents);
+  return Array.isArray(list) ? list : [];
+}
+
+/** Clear them, after an export or when starting a clean test. */
+export async function clearEvents() {
+  await flushEvents();
+  eventCache = [];
+  await set({ [KEYS.diagnosticEvents]: [] });
+}
 
 export async function getSettings() {
   const { [KEYS.settings]: s } = await get(KEYS.settings);

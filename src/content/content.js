@@ -664,6 +664,27 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   switch (msg.type) {
+    /**
+     * The page's own click log, for the diagnostic export.
+     *
+     * Comes from the page rather than from here: the question under investigation is when the browser dispatched
+     * the click, and only the page's own handler knows that.
+     */
+    case 'get-click-log': {
+      /**
+       * Read the page's own log through the DOM, because this script runs in an isolated world and cannot see the
+       * page's `window` variables. The test field publishes its log as JSON in a data attribute for exactly this
+       * reason; a page that does not publish one simply returns an empty list.
+       */
+      let clicks = [];
+      try {
+        const raw = document.documentElement.getAttribute('data-autoflow-clicks');
+        if (raw) clicks = JSON.parse(raw);
+      } catch { /* malformed or absent: an empty log, not an error */ }
+      sendResponse({ ok: true, clicks: Array.isArray(clicks) ? clicks : [] });
+      return true;
+    }
+
     case 'ping':
       // used by the worker to check the page is still there before each step
       reply(sendResponse, { ok: true, url: location.href, readyState: document.readyState });
