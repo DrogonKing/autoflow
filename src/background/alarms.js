@@ -71,6 +71,38 @@ export async function rescheduleAll(automations, { now = Date.now() } = {}) {
  * A `cron` or `daily` schedule registers a single next occurrence rather than a repeating alarm, because
  * a repeating alarm cannot express "09:00 local, skipping DST" and would drift by an hour twice a year.
  */
+/** Key for the last observed worker start latency, in storage.local so it survives a worker restart. */
+const START_LATENCY_KEY = 'scheduledStartLatencyMs';
+
+/**
+ * The latest measured gap between an alarm firing and the scheduled run actually reaching its first step.
+ *
+ * Kept in storage rather than memory: the whole point is to survive the worker being torn down, which is the normal
+ * state of an MV3 background worker between alarms. A missing or absurd value falls back to 0, which makes the margin
+ * the PRECISE_WAKE_MS floor - the old behaviour, so a fresh install is no worse than before.
+ */
+export async function startLatencyMs() {
+  try {
+    const got = await api.storage.local.get(START_LATENCY_KEY);
+    const n = Number(got?.[START_LATENCY_KEY]);
+    if (!Number.isFinite(n) || n < 0 || n > 60_000) return 0;
+    return n;
+  } catch {
+    return 0;
+  }
+}
+
+/** Remember how late the worker actually was, keeping the worst of the last few so one fast run cannot shrink it. */
+export async function recordStartLatency(ms) {
+  const n = Math.round(Number(ms));
+  if (!Number.isFinite(n) || n < 0) return;
+  const previous = await startLatencyMs();
+  const next = Math.max(n, Math.round(previous * 0.8));
+  try {
+    await api.storage.local.set({ [START_LATENCY_KEY]: next });
+  } catch { /* a latency hint that cannot be stored must not break the run */ }
+}
+
 export async function scheduleOne(automation, { now = Date.now() } = {}) {
   const name = ALARM_PREFIX + automation.id;
   await api.alarms.clear(name);
@@ -87,7 +119,21 @@ export async function scheduleOne(automation, { now = Date.now() } = {}) {
   // The schedule's instant is used as-is. Any clock difference is reported to the user and never applied:
   // the measurement's own uncertainty is about half a second, so "correcting" by it would move an order by an
   // amount that could easily be in the wrong direction.
-  const base = precise ? Math.max(at - PRECISE_WAKE_MS, now + 500) : at;
+  /**
+   * THE WAKE MARGIN IS AT LEAST THE MEASURED WORKER LATENCY, not a constant.
+   *
+   * The margin exists to absorb the time between the alarm firing and the precise wait actually starting: the worker
+   * boots, settings are read, the tab is resolved, the message is sent. Measured on the user's machine that gap was
+   * 6000ms, while the margin was a fixed 1500ms - so the alarm fired 1.5s before the target, the worker arrived 4.5s
+   * late, and the precise wait clamped to "now" and fired a best-effort shot that could miss the window.
+   *
+   * The margin is therefore the LATEST MEASURED start latency, with the constant as a floor. A latency sample is
+   * recorded on every scheduled run (see recordStartLatency), so the value adapts to the machine it runs on instead
+   * of to the machine it was written on.
+   */
+  const observed = await startLatencyMs();
+  const margin = Math.min(Math.max(PRECISE_WAKE_MS, observed + 1000), 20_000);
+  const base = precise ? Math.max(at - margin, now + 500) : at;
   const when = Math.max(base, now + 1000);
   await api.alarms.create(name, { when });
   // the caller records this; kept out of here so this module stays free of the storage layer

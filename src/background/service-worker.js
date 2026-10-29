@@ -457,6 +457,9 @@ async function startAutomationLocked(automationId, {
     name: automation.name,
     tabId: targetTabId,
     startedAt: Date.now(),
+    // when the alarm that started this run fired, so the wake margin can be calibrated against reality.
+    // Only the alarm path supplies it; a manual run has no alarm and no margin to calibrate.
+    firedAt: Number.isFinite(opts?.firedAt) ? opts.firedAt : null,
     trigger,
     stopFlag,
     trace: [],
@@ -497,12 +500,23 @@ async function startAutomationLocked(automationId, {
     steps: result.steps,
     elapsedMs: result.elapsedMs,
     startedAt: activeRun?.startedAt ?? Date.now(),
+    firedAt: activeRun?.firedAt ?? null,
     trigger,
     error: result.error ? { message: result.error.message ?? String(result.error), stepId: result.error.stepId } : null,
     trace: result.trace?.slice(-200) ?? [],
   };
 
   activeRun = null;
+  /**
+   * How long the scheduled path took to get going, so the next wake margin is based on this machine.
+   *
+   * Measured from the alarm FIRING to the runner starting - not from the target, because the alarm is deliberately
+   * set early and that early part is the margin under test. `targetAt` was referenced here before it existed, so the
+   * sample was never taken and the margin could not adapt at all.
+   */
+  if (trigger === 'schedule' && Number.isFinite(finished.startedAt) && Number.isFinite(finished.firedAt)) {
+    await recordStartLatency(Math.max(0, finished.startedAt - finished.firedAt)).catch(() => {});
+  }
   recordEvent({
     kind: 'run-finished', automationId, reason: finished.reason, steps: finished.steps,
     error: finished.error?.message ?? null,
@@ -687,6 +701,10 @@ api.alarms.onAlarm.addListener(async (alarm) => {
         if (planned && now - planned <= LATE_TOLERANCE_MS) {
           lateBy = now - planned;
           atMs = null;                          // too late to wait for it; run now
+          // reported, not just computed: "it fired late" and "it fired on time" must be distinguishable in the export
+          recordEvent({ kind: 'fired-late', automationId: id, lateByMs: lateBy });
+        } else if (planned) {
+          recordEvent({ kind: 'fired-too-late', automationId: id, lateByMs: now - planned, toleranceMs: LATE_TOLERANCE_MS });
         }
       }
     }
@@ -707,10 +725,16 @@ api.alarms.onAlarm.addListener(async (alarm) => {
      *
      * The wait is bounded: if the slot has not freed by then, the refusal is reported rather than hidden.
      */
-    // `startAutomation` queues a scheduled trigger itself now, so this is a plain call. Keeping a retry loop
-    // here as well would be two mechanisms for one rule, and the outer one would hide the inner one's timeout.
+    /**
+     * `startAutomation` queues a scheduled trigger itself now, so this is a plain call. Keeping a retry loop here as
+     * well would be two mechanisms for one rule, and the outer one would hide the inner one's timeout.
+     *
+     * `firedAt` is carried through so the run can report how long the scheduled path took to get going - that sample
+     * is what the alarm's wake margin adapts to. Without it the margin stayed a constant guess.
+     */
+    const alarmFiredAt = Date.now();
     const runWhenSlotIsFree = (extra = {}) =>
-      startAutomation(id, { tabId, trigger: 'schedule', atMs, ...extra });
+      startAutomation(id, { tabId, trigger: 'schedule', atMs, firedAt: alarmFiredAt, ...extra });
 
     // a CSV-driven automation iterates its rows
     const data = automation.dataSource?.key ? await getDataRows(automation.dataSource.key) : null;
@@ -1144,7 +1168,34 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
       case 'save-automation': {
         const saved = await saveAutomation(msg.automation);
-        return { ok: true, automation: saved };
+        /**
+         * ARM OR DISARM THE SCHEDULE. This was missing, and it is why a saved time never fired.
+         *
+         * `rescheduleAll` at worker start deliberately leaves existing alarms alone, so a restart cannot disturb a
+         * valid pending alarm. The consequence was that nothing ever created an alarm for an automation the user had
+         * just saved: the panel wrote the record and returned. Reported as "I set a time and saved it, and it did not
+         * activate" - and the export confirmed it, showing a stale alarm from an earlier session and no alarm at all
+         * for the new target time.
+         *
+         * Failure here must not fail the save: the record is already stored, and a schedule that could not be armed
+         * is reported rather than silently swallowed.
+         */
+        let schedule = { scheduled: false, reason: 'not attempted' };
+        try {
+          schedule = saved.enabled === false || saved.schedule?.kind === 'manual'
+            ? { scheduled: false, reason: 'manual' }
+            : await scheduleOne(saved);
+          if (schedule.scheduled) {
+            recordEvent({ kind: 'armed', automationId: saved.id, at: schedule.at, target: schedule.target, precise: schedule.precise, via: 'save' });
+          }
+        } catch (e) {
+          schedule = { scheduled: false, reason: String(e?.message ?? e) };
+          recordEvent({ kind: 'arm-failed', automationId: saved.id, error: schedule.reason });
+        }
+        if (!schedule.scheduled && saved.schedule?.kind !== 'manual' && saved.enabled !== false) {
+          await cancelOne(saved.id);      // a disabled or unarmable schedule must not leave a stale alarm behind
+        }
+        return { ok: true, automation: saved, schedule };
       }
 
       case 'duplicate-automation': {
