@@ -23,6 +23,8 @@
     "lint:firefox": "web-ext lint --source-dir=dist-firefox",
     "test:firefox": "node scripts/firefox-test.mjs",
     "test:security": "node scripts/firefox-security-test.mjs",
+    "pretest:guard": "node scripts/build.mjs && node scripts/build-firefox.mjs && node scripts/package.mjs",
+    "test:guard": "node scripts/verify-build-guard.mjs",
     "audit:security": "python3 scripts/adversarial_review.py",
     "audit:firefox": "python3 scripts/firefox_security_audit.py",
     "package": "node scripts/package.mjs"

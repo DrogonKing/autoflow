@@ -61,6 +61,9 @@ async function loadIn(buildDir, { headless = true } = {}) {
       `--load-extension=${buildDir}`,
       '--no-sandbox',
       '--disable-dev-shm-usage',
+      // Chromium 137+ ignores --load-extension unless this is set: the switch is behind a feature flag, and
+      // without it NO extension loads at all, which is why a CI runner saw "not registered" and no worker.
+      '--disable-features=DisableLoadExtensionCommandLineSwitch',
     ],
   });
   ctx.__profile = profile;

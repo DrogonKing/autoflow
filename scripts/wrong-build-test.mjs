@@ -39,6 +39,9 @@ async function probe(label, dir) {
       `--load-extension=${dir}`,
       '--no-sandbox',
       '--disable-dev-shm-usage',
+      // Chromium 137+ ignores --load-extension unless this is set: the switch is behind a feature flag, and
+      // without it NO extension loads at all, which is why a CI runner saw "not registered" and no worker.
+      '--disable-features=DisableLoadExtensionCommandLineSwitch',
     ],
   });
 
