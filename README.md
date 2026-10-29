@@ -221,3 +221,60 @@ and a filename that disagree. Use the script:
 scripts/bump-version.sh 1.1.0     # package.json, src/manifest.json, options page, README
 git tag v1.1.0 && git push --tags # the release workflow attaches the zips
 ```
+
+---
+
+## Releases
+
+Every `v*` tag produces a release with the three archives attached, built by CI from that commit:
+
+```
+https://github.com/DrogonKing/autoflow/releases/latest
+```
+
+Direct downloads (once the repo is public, or with access to it):
+
+```
+.../releases/download/v1.0.0/autoflow.zip            Chrome and Edge
+.../releases/download/v1.0.0/autoflow-firefox.zip    Firefox
+.../releases/download/v1.0.0/autoflow-source.zip     full source, tests included
+```
+
+### Two things CI caught that a local run could not
+
+Recorded because both are the kind of failure that looks like something else.
+
+**1. Node 20 fails while reporting success.** jsdom 30 calls `zlib.createZstdDecompress`, added in Node 22.19.
+On Node 20 that is `undefined`, so jsdom throws 11 unhandled errors, **all 381 tests still report as passed**,
+and `vitest run` exits 1. The workflow was on Node 20 and the local tree on Node 24, where the failure never
+appears. Measured after the fact:
+
+| Node | Result |
+|---|---|
+| 20.19.0 | **fails** — 11 unhandled jsdom errors, exit 1, every test reported passed |
+| 22.22.0 | 381/381 passed |
+| 24.22.2 | 381/381 passed |
+
+Fixed by moving the workflow to Node 22 and adding `scripts/preflight.mjs`, which checks for the missing
+`zlib` function and prints one clear sentence. It runs as `pretest`, so the confusing failure cannot recur.
+
+`engines` is **advisory, not enforced**: `engine-strict` was tried and reverted, because jsdom and its
+css-color dependency both declare `^22.22.2 || ^24.15.0 || >=26` — so enforcing would refuse Node 22.22.0,
+a version measured working. A declared range stricter than the behaviour is common; enforcing it invents a
+restriction the project does not have.
+
+**2. The release step 403s after fourteen green steps.** A workflow with no `permissions:` block inherits the
+repository's default `GITHUB_TOKEN` scopes, which is read-only for a repository created through the API. Every
+step passed and only `attach the zips to the release` failed. Fixed with an explicit
+`permissions: contents: write`, plus `fail_on_unmatched_files: true` so a missing asset is an error rather
+than a release carrying two of its three files.
+
+### Scripts
+
+| Script | Purpose |
+|---|---|
+| `scripts/preflight.mjs` | one clear sentence instead of a confusing jsdom failure |
+| `scripts/secret_scan.py` | refuses to publish a live credential; run before any push |
+| `scripts/ci_status.py` | the recent runs, and every step of the newest completed one |
+| `scripts/ci_why.py` | the failing step of a run, and its log |
+| `scripts/bump-version.sh` | the four files that carry the version, updated together |
