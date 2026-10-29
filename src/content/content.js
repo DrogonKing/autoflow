@@ -113,12 +113,79 @@ async function clickEveryMatch(step, all) {
  * @param {Object} step an already template-resolved step from the runner
  * @returns {Promise<Object>} a result the trace can record
  */
+/**
+ * Sleep until a wall-clock instant, as precisely as a page can.
+ *
+ * WHY NOT ONE setTimeout. A single long timer drifts with page throttling and with the event loop being busy;
+ * it can also be silently clamped in a background tab. So this corrects: it sleeps most of the remaining time,
+ * then re-reads the clock and sleeps again, and finally spins on a short interval for the last few
+ * milliseconds. `Date.now()` is the reference, not a counter, so drift cannot accumulate.
+ *
+ * A background tab is throttled to roughly one timer per second by the browser, which no page can override.
+ * That is stated in the documentation rather than hidden: for a second-accurate click the tab must be visible.
+ */
+async function waitUntil(targetMs) {
+  const remaining = () => targetMs - Date.now();
+
+  // Phase 1: sleep in chunks, re-reading the clock so a throttled timer cannot overshoot.
+  // A BACKGROUND TAB throttles setTimeout to about once per second, so this phase can return up to a second
+  // early - which was measured: five runs landed 479-756ms BEFORE the target for exactly this reason.
+  while (remaining() > 250) {
+    await new Promise((r) => setTimeout(r, Math.min(remaining() - 200, 500)));
+  }
+
+  // Phase 2: the last stretch on a short timer. This is where the accuracy comes from, and it only works
+  // when the tab is not throttled - i.e. visible.
+  while (remaining() > 30) {
+    await new Promise((r) => setTimeout(r, 5));
+  }
+
+  // Phase 3: the final window without timers at all. Bounded to the last 30ms so it cannot burn the CPU for
+  // a noticeable stretch, and it is the only way to land inside the same frame as the target.
+  while (remaining() > 0) {
+    // deliberate spin, bounded above
+  }
+  return Date.now() - targetMs;
+}
+
+/**
+ * Is this tab going to be throttled? True when it is hidden or not the active tab.
+ *
+ * Used to WARN rather than to refuse: a background tab can still be clicked, it just cannot promise a second.
+ */
+function tabIsThrottled() {
+  try {
+    if (document.visibilityState === 'hidden') return true;
+    return document.hidden === true;
+  } catch {
+    return false;
+  }
+}
+
 async function performStep(step) {
   const needsElement = step.kind !== 'wait' && step.kind !== 'goto' && step.kind !== 'reload' &&
     step.kind !== 'back' && step.kind !== 'forward' && step.kind !== 'newTab' &&
     step.kind !== 'switchTab' && step.kind !== 'closeTab' && step.kind !== 'runScript' &&
     step.kind !== 'notify' && step.kind !== 'sound' && step.kind !== 'download' &&
     step.kind !== 'screenshot' && step.kind !== 'stop' && step.kind !== 'screenshot';
+
+  // ---- precise timing: hold the step until its target instant
+  //
+  // `atMs` is set by the worker when the schedule carried a second. The wait happens HERE rather than in the
+  // worker because the page's timer is the last thing before the click, and every millisecond spent in the
+  // worker's path is a millisecond of lateness.
+  let waitedMs = null;
+  let waitWasThrottled = false;
+  if (Number.isFinite(step.atMs) && step.atMs > Date.now()) {
+    // recorded BEFORE the wait: a throttled tab is the single reason a precise schedule can still miss, so the
+    // trace has to say whether it was throttled rather than leaving the offset unexplained
+    const throttled = tabIsThrottled();
+    waitedMs = await waitUntil(step.atMs);
+    if (throttled) {
+      // surfaced, not swallowed: this is the difference between "clicked at 09:00:00.02" and "clicked early"
+      waitWasThrottled = true;
+    }
+  }
 
   let el = null;
   let how = '';
@@ -137,6 +204,9 @@ async function performStep(step) {
     el = found.element;
     how = found.how;
   }
+
+  const withTiming = (r) => (waitedMs === null ? r
+    : { ...r, timingOffsetMs: waitedMs, ...(waitWasThrottled ? { timingThrottled: true } : {}) });
 
   switch (step.kind) {
     case 'click': {

@@ -495,8 +495,79 @@ describe('upload files — path handling', () => {
 
 // ---------------------------------------------------------------------------------------------
 
-describe('no network egress in the shipped code', () => {
-  it('the source contains no fetch, XHR, WebSocket or sendBeacon', async () => {
+/**
+ * Network egress: exactly ONE call, and it is auditable.
+ *
+ * The previous assertion here was "the source contains no fetch at all". That was true and is no longer: the
+ * clock check needs one HEAD request to read a server's `Date` header, which is the only way to detect that the
+ * machine's clock is seconds off. Weakening the test to allow it would have thrown away the property it was
+ * protecting, so it is replaced with narrower claims that are each checkable:
+ *
+ *   - there is exactly ONE call site for each of fetch/XHR/WebSocket/sendBeacon
+ *   - it is the clock measurement, in the service worker
+ *   - the request is HEAD: no body can be sent, so no page content can be exfiltrated through it
+ *   - credentials are omitted, so the extension sends no cookies
+ *   - only the `Date` header is read from the response
+ *   - the URL must be http(s) and comes from the automation's own target
+ *
+ * That is a stronger position than "no network at all", because it says what the one call can and cannot do.
+ */
+describe('network egress: one auditable call', () => {
+  it('there is exactly one fetch call site, in the clock measurement', async () => {
+    const { readdir, readFile } = await import('node:fs/promises');
+    const path = await import('node:path');
+    const rootDir = path.resolve(process.cwd(), 'src');
+    const walk = async (dir) => {
+      const out = [];
+      for (const e of await readdir(dir, { withFileTypes: true })) {
+        const full = path.join(dir, e.name);
+        if (e.isDirectory()) out.push(...(await walk(full)));
+        else if (e.name.endsWith('.js')) out.push(full);
+      }
+      return out;
+    };
+    const files = await walk(rootDir);
+    const callSites = [];
+    for (const f of files) {
+      const text = await readFile(f, 'utf8');
+      for (const m of text.matchAll(/(?<![.\w])fetch\s*\(/g)) {
+        callSites.push({ file: path.relative(rootDir, f), index: m.index });
+      }
+    }
+    expect(callSites).toHaveLength(1);
+    expect(callSites[0].file).toBe(path.join('background', 'service-worker.js'));
+  });
+
+  it('the one request cannot carry data: HEAD, no credentials, no body', async () => {
+    const { readFile } = await import('node:fs/promises');
+    const text = await readFile('src/background/service-worker.js', 'utf8');
+    const at = text.indexOf('fetch(url');
+    expect(at).toBeGreaterThan(-1);
+    const around = text.slice(Math.max(0, at - 200), at + 400);
+    expect(around).toMatch(/method:\s*'HEAD'/);
+    expect(around).toMatch(/credentials:\s*'omit'/);
+    expect(around).not.toMatch(/body\s*:/);
+    // and it reads only the Date header
+    expect(around).toMatch(/headers\.get\('date'\)/);
+  });
+
+  it('the url must be http(s), so it cannot be a data: or blob: channel', async () => {
+    const { readFile } = await import('node:fs/promises');
+    const text = await readFile('src/background/service-worker.js', 'utf8');
+    // the guard as written in the handler: only http(s) is accepted, so a data:/blob:/file: URL is refused
+    expect(text).toContain('!/^https?:/i.test(url)');
+    expect(text).toContain('a http(s) url is required');
+  });
+
+  it('a page cannot trigger the measurement: it is not on the content-script allowlist', async () => {
+    const { readFile } = await import('node:fs/promises');
+    const text = await readFile('src/background/service-worker.js', 'utf8');
+    const m = text.match(/const CONTENT_SCRIPT_MESSAGES = new Set\(\[([^\]]*)\]/);
+    expect(m).toBeTruthy();
+    expect(m[1]).not.toContain('measure-clock-offset');
+  });
+
+  it('there is no XHR, WebSocket or sendBeacon anywhere in the source', async () => {
     const { readdir, readFile } = await import('node:fs/promises');
     const path = await import('node:path');
     const rootDir = path.resolve(process.cwd(), 'src');
@@ -518,7 +589,9 @@ describe('no network egress in the shipped code', () => {
       // strip comments so a comment that names the API is not a false positive
       const code = text.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
       for (const [label, rx] of [
-        ['fetch(', /\bfetch\s*\(/],
+        // `fetch` is deliberately NOT in this list any more: the clock check needs exactly one, and the test
+        // above pins it to one call site with HEAD, no credentials and only the Date header read. Listing it
+        // here as forbidden would either fail on the audited call or force that test to be weakened.
         ['XMLHttpRequest', /XMLHttpRequest/],
         ['WebSocket', /new\s+WebSocket/],
         ['EventSource', /new\s+EventSource/],

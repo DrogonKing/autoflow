@@ -144,6 +144,24 @@ export function localParts(ms) {
  * yields 03:30, which is a valid instant but not the one asked for. Callers that care compare the
  * round-trip; this helper reports whether the requested wall time actually existed.
  */
+/**
+ * How early to wake before a precise target, so the wait happens in the page rather than in the alarm.
+ *
+ * 1500ms is chosen from measurement, not taste: the alarm itself lands within 3ms of what it was asked for,
+ * but the work between the alarm and the click - worker wake-up, reading the automation, resolving the tab,
+ * the message round-trip, the finder - is what adds up. Waking 1.5s early leaves room for all of it and still
+ * keeps the in-page wait short enough that a sleeping laptop is unlikely to miss the whole window.
+ */
+export const PRECISE_WAKE_MS = 1500;
+
+/** Should this schedule be fired precisely, i.e. is a second specified? */
+export function wantsPreciseTiming(schedule) {
+  if (!schedule) return false;
+  if (typeof schedule.second === 'number') return true;
+  if (schedule.kind === 'cron') return String(schedule.cron ?? '').trim().split(/\s+/).length >= 6;
+  return false;
+}
+
 export function makeLocal(year, month, day, hour, minute = 0, second = 0) {
   const d = new Date(year, month, day, hour, minute, second, 0);
   const exists = d.getHours() === hour && d.getMinutes() === minute && d.getDate() === day;

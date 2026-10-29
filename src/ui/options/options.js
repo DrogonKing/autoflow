@@ -98,6 +98,33 @@ function settingsSection() {
         }))),
       el('span', { class: 'hint', text: t('opt.languageHint') }),
     ),
+    // ---- clock offset: measured and reported, never applied without this switch
+    el('div', { class: 'row' },
+      el('input', {
+        type: 'checkbox', checked: s.skewAutoApply === true, id: 'skewAutoApply',
+        onchange: async (e) => {
+          state.settings = (await send({
+            type: 'save-settings', patch: { skewAutoApply: e.target.checked },
+          })).settings ?? state.settings;
+          render();
+        },
+      }),
+      el('label', { for: 'skewAutoApply', text: t('opt.skew') }),
+      el('span', { class: 'hint', text: t('opt.skewHint') }),
+    ),
+    el('div', { class: 'row' },
+      el('label', { text: t('opt.skewThreshold') }),
+      el('input', {
+        type: 'number', class: 'small', min: '0', max: '60000', step: '100',
+        value: String(s.skewWarnThresholdMs ?? 1000),
+        onchange: async (e) => {
+          state.settings = (await send({
+            type: 'save-settings', patch: { skewWarnThresholdMs: Number(e.target.value) },
+          })).settings ?? state.settings;
+        },
+      }),
+      el('span', { class: 'hint', text: 'ms' }),
+    ),
     toggle('shortcutsEnabled', t('opt.shortcuts'), t('opt.shortcutsHint')),
     toggle('showStatusBadge', t('opt.showStatusBadge'), t('opt.showStatusBadgeHint')),
     toggle('stopOnTabBlur', t('opt.stopOnTabBlur'), t('opt.stopOnTabBlurHint')),

@@ -1,7 +1,7 @@
 {
-  "en_keys": 225,
-  "fa_keys": 225,
-  "used_keys": 135,
+  "en_keys": 236,
+  "fa_keys": 236,
+  "used_keys": 145,
   "missing_in_en": [],
   "missing_in_fa": [],
   "unused_keys": [
@@ -62,6 +62,7 @@
     "schedule.monthly",
     "schedule.once",
     "schedule.weekly",
+    "skew.noUrl",
     "step.break",
     "step.click",
     "step.closeTab",

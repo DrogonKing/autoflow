@@ -16,6 +16,7 @@ import { readCsv } from '../../core/io/csv.js';
 import { api } from '../../platform/api.js';
 import { applyToDocument, translator } from '../../core/i18n/i18n.js';
 import { ALL_DEFAULTS, normaliseAll } from '../../core/dom/clickAll.js';
+import { describeSkew, shouldWarn } from '../../core/clock/skew.js';
 
 /**
  * The visible name of a step kind.
@@ -79,6 +80,7 @@ const state = {
   dataKey: null,
   tab: 'automations',
   pickTarget: null,       // the step id awaiting an element pick
+  clockSkew: null,        // { offsetMs, rttMs, trustworthy, warn, applied } - measured, never applied silently
 };
 
 // ---------------------------------------------------------------------------------------------
@@ -140,6 +142,38 @@ async function refresh() {
  * Persian panel flickers left-to-right for a frame. Re-decided on every settings change so switching language
  * re-renders in place without a reload.
  */
+/**
+ * Measure the clock offset and decide, but do not change anything.
+ *
+ * Cached, because a HEAD request on every render would be both wasteful and visible to the target server. The
+ * stored value is used until the user asks for a re-measurement.
+ */
+async function refreshClockSkew(force = false) {
+  const stored = state.settings?.lastClockOffsetMs;
+  const apply = state.settings?.skewAutoApply === true;
+  const threshold = Number(state.settings?.skewWarnThresholdMs ?? 1000);
+  if (!force && Number.isFinite(stored)) {
+    state.clockSkew = {
+      offsetMs: stored, rttMs: null, trustworthy: true,
+      warn: shouldWarn(stored, threshold), applied: apply,
+    };
+    return state.clockSkew;
+  }
+  // which server to ask: the automation's own target site, so the comparison is with the clock that matters
+  const target = state.editing?.urls?.[0];
+  const url = typeof target === 'string' && /^https?:/i.test(target) ? target : null;
+  if (!url) { state.clockSkew = null; return null; }
+  const res = await send({ type: 'measure-clock-offset', url }).catch(() => null);
+  if (!res?.ok) { state.clockSkew = null; return null; }
+  await send({ type: 'save-settings', patch: { lastClockOffsetMs: res.offsetMs } });
+  state.settings = { ...state.settings, lastClockOffsetMs: res.offsetMs };
+  state.clockSkew = {
+    offsetMs: res.offsetMs, rttMs: res.rttMs, trustworthy: res.trustworthy,
+    warn: shouldWarn(res.offsetMs, threshold), applied: apply,
+  };
+  return state.clockSkew;
+}
+
 async function applyLanguage() {
   const res = await send({ type: 'get-settings' }).catch(() => null);
   if (res?.ok) state.settings = res.settings ?? {};
@@ -282,16 +316,57 @@ function scheduleEditor(onChange) {
     wrap.append(el('div', { class: 'row' },
       el('label', { text: t('field.time') }),
       el('input', {
-        type: 'time', class: 'grow', value: `${String(s.hour ?? 9).padStart(2, '0')}:${String(s.minute ?? 0).padStart(2, '0')}`,
+        // `step: 1` is what makes the SECONDS part of the control appear. Without it the input is minute-only,
+        // so the model's `second` field was unreachable from the UI entirely - it existed in the scheduler and
+        // could only be set by hand-writing a six-field cron. That is why the panel showed hour and minute.
+        type: 'time', class: 'grow', step: '1',
+        value: `${String(s.hour ?? 9).padStart(2, '0')}:${String(s.minute ?? 0).padStart(2, '0')}`
+          + (typeof s.second === 'number' ? `:${String(s.second).padStart(2, '0')}` : ''),
         onchange: (e) => {
-          const [h, m] = e.target.value.split(':').map(Number);
-          if (Number.isFinite(h) && Number.isFinite(m)) {
-            state.editing.schedule = { ...s, hour: h, minute: m, second: 0 };
-            onChange();
-          }
+          // "09:00" gives two parts and means minute precision; "09:00:00" gives three and means a precise
+          // schedule. The distinction is carried into the model, because `wantsPreciseTiming` keys off it.
+          const [h, m, sec] = e.target.value.split(':').map(Number);
+          if (!Number.isFinite(h) || !Number.isFinite(m)) return;
+          const next = { ...s, hour: h, minute: m };
+          if (Number.isFinite(sec)) next.second = sec;
+          else delete next.second;
+          state.editing.schedule = next;
+          onChange();
         },
       }),
+      // a second is only worth setting if the run can land on it, so say what it costs
+      typeof s.second === 'number'
+        ? el('span', { class: 'hint', text: t('sched.secondHint') })
+        : null,
     ));
+
+    // ---- the clock warning, shown where the time is chosen
+    //
+    // A measurement and its consequences, not an automatic correction. The user asked for the offset to be
+    // REPORTED and, separately, for an option to apply it - so it is a warning plus a switch, never a silent
+    // adjustment. It appears only for a precise schedule, because only then can whole seconds matter.
+    if (typeof s.second === 'number' && state.clockSkew && state.clockSkew.warn) {
+      wrap.append(el('div', { class: 'skew-warn' },
+        el('strong', { text: t('skew.title') }),
+        el('div', { text: describeSkew(state.clockSkew, t.language) }),
+        el('div', { class: 'hint', text: t('skew.consequence') }),
+        el('div', { class: 'skew-actions' },
+          el('button', {
+            text: state.clockSkew.applied ? t('skew.applied') : t('skew.apply'),
+            class: state.clockSkew.applied ? '' : 'primary',
+            onclick: async () => {
+              const settings = await send({ type: 'save-settings', patch: { skewAutoApply: !state.clockSkew.applied } });
+              if (settings?.ok) state.settings = settings.settings;
+              await refreshClockSkew();
+              render();
+            },
+          }),
+          el('button', {
+            text: t('skew.recheck'),
+            onclick: async () => { await refreshClockSkew(true); render(); },
+          })),
+      ));
+    }
   }
 
   if (s.kind === 'cron') {
@@ -416,7 +491,21 @@ function stepRow(step, list, index, rerender) {
           // and silently dropped the selector the user typed. Caught by reading this line, not by a test.
           const key = { css: 'selector', xpath: 'xpath', text: 'text', id: 'id', name: 'name',
             label: 'label', placeholder: 'placeholder', aria: 'aria', role: 'role' }[finder.strategy];
-          if (key) step.finder = { ...finder, [key]: e.target.value };
+          if (key) {
+            /**
+             * EDITING A PICKED FINDER MUST DROP ITS FALLBACK CHAIN.
+             *
+             * `buildFinder` records a chain of fallbacks alongside the primary strategy, and the finder tries
+             * the chain when the primary matches nothing. So typing a corrected selector left the OLD chain in
+             * place: if the new selector had a typo it silently fell back to the element originally picked,
+             * and the step clicked the wrong thing while appearing to work. This is why a picked finder felt
+             * impossible to correct - the correction was there, but outvoted.
+             *
+             * Only `chain` is dropped; the primary strategy the user chose is kept.
+             */
+            const { chain, ...rest } = finder;
+            step.finder = { ...rest, [key]: e.target.value };
+          }
           rerender();
         },
       }),
@@ -431,6 +520,18 @@ function stepRow(step, list, index, rerender) {
       }),
       finder.chain?.length
         ? el('span', { class: 'hint', title: finder.chain.join('\n'), text: `+${finder.chain.length} fallbacks` })
+        : null,
+      // A picked finder could not be undone at all - there was no reset and no delete. Clearing resets to a
+      // plain CSS strategy with an empty selector, which is the state a new step starts in.
+      (finder.chain?.length || Object.keys(finder).some((k) => k !== 'strategy'))
+        ? el('button', {
+          class: 'icon', text: '✕', title: t('finder.clear'),
+          onclick: () => {
+            // keep the strategy the user is looking at, drop everything that came from the picker
+            step.finder = { strategy: finder.strategy ?? 'css' };
+            rerender();
+          },
+        })
         : null,
     ));
 

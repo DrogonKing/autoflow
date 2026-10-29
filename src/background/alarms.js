@@ -15,13 +15,18 @@
  *     deleted automation can be identified and cleared instead of firing forever.
  */
 
-import { nextRun, validateSchedule, describeSchedule } from '../core/schedule/schedule.js';
+import {
+  nextRun, validateSchedule, describeSchedule, wantsPreciseTiming, PRECISE_WAKE_MS,
+} from '../core/schedule/schedule.js';
+import { correctedTarget } from '../core/clock/skew.js';
 import { api } from '../platform/api.js';
 
 export const ALARM_PREFIX = 'autoflow:run:';
 
 /** Reschedule every enabled automation, and clear alarms that no longer belong to one. */
-export async function rescheduleAll(automations, { now = Date.now() } = {}) {
+export async function rescheduleAll(automations, {
+  now = Date.now(), clockOffsetMs = null, skewAutoApply = false,
+} = {}) {
   const wanted = new Set();
   const results = [];
 
@@ -40,9 +45,17 @@ export async function rescheduleAll(automations, { now = Date.now() } = {}) {
       results.push({ id: a.id, name: a.name, ok: false, reason: 'this schedule will not fire again' });
       continue;
     }
-    const when = Math.max(at, now + 1000);
+    const precise = wantsPreciseTiming(a.schedule);
+    const offset = skewAutoApply && Number.isFinite(clockOffsetMs) ? clockOffsetMs : 0;
+    const atLocal = offset ? (correctedTarget(at, offset) ?? at) : at;
+    const base = precise ? Math.max(atLocal - PRECISE_WAKE_MS, now + 500) : atLocal;
+    const when = Math.max(base, now + 1000);
     await api.alarms.create(name, { when });
-    results.push({ id: a.id, name: a.name, ok: true, at: when, description: describeSchedule(a.schedule) });
+    results.push({
+      id: a.id, name: a.name, ok: true, at: when, target: at, precise,
+      correctedBy: offset || 0,
+      description: describeSchedule(a.schedule),
+    });
   }
 
   // remove alarms whose automation is gone or now disabled
@@ -62,7 +75,14 @@ export async function rescheduleAll(automations, { now = Date.now() } = {}) {
  * A `cron` or `daily` schedule registers a single next occurrence rather than a repeating alarm, because
  * a repeating alarm cannot express "09:00 local, skipping DST" and would drift by an hour twice a year.
  */
-export async function scheduleOne(automation, { now = Date.now() } = {}) {
+/**
+ * @param clockOffsetMs  the measured server-minus-local offset, already trusted by the caller. Passed in rather
+ *   than read here so this module stays free of the settings store.
+ * @param skewAutoApply  whether the user asked for the correction to be applied
+ */
+export async function scheduleOne(automation, {
+  now = Date.now(), clockOffsetMs = null, skewAutoApply = false,
+} = {}) {
   const name = ALARM_PREFIX + automation.id;
   await api.alarms.clear(name);
   if (!automation.enabled || !automation.schedule || automation.schedule.kind === 'manual') {
@@ -71,9 +91,24 @@ export async function scheduleOne(automation, { now = Date.now() } = {}) {
   validateSchedule(automation.schedule);
   const at = nextRun(automation.schedule, now);
   if (at === null) return { scheduled: false, reason: 'no future occurrence' };
-  const when = Math.max(at, now + 1000);
+  // A schedule with a second is fired PRECISELY: the alarm wakes the worker early and the exact instant is
+  // waited for in the page, where the timer is millisecond-resolution. Without that the click inherits the
+  // alarm path's whole latency - worker wake-up, storage read, tab resolution, message round-trip.
+  const precise = wantsPreciseTiming(automation.schedule);
+  // When the user has turned the correction on, the schedule's instant is in SERVER time and the alarm reads
+  // this machine's clock, so the two are reconciled here - in one place, so a target is never half-corrected.
+  const offset = skewAutoApply && Number.isFinite(clockOffsetMs) ? clockOffsetMs : 0;
+  const atInLocalTerms = offset ? (correctedTarget(at, offset) ?? at) : at;
+  const base = precise ? Math.max(atInLocalTerms - PRECISE_WAKE_MS, now + 500) : atInLocalTerms;
+  const when = Math.max(base, now + 1000);
   await api.alarms.create(name, { when });
-  return { scheduled: true, at: when };
+  return {
+    scheduled: true,
+    // `target` is the instant the SCHEDULE names; `targetLocal` is when this machine will act. Two fields
+    // because they differ exactly when the correction is on, and reporting only the first made the correction
+    // impossible to observe from outside - which is how it appeared to do nothing.
+    at: when, target: at, targetLocal: atInLocalTerms, precise, correctedBy: offset || 0,
+  };
 }
 
 export async function cancelOne(automationId) {

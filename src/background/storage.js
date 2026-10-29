@@ -35,6 +35,28 @@ export const DEFAULT_SETTINGS = {
   /** Show the on-page status badge while a run is active. */
   showStatusBadge: true,
   /**
+   * Bring the tab to the front just before a second-precise click.
+   *
+   * Default true, because a schedule with a second exists for the express purpose of hitting that second, and
+   * a throttled background tab cannot: measured, five runs landed 479-756ms EARLY for that reason alone. A
+   * user who would rather keep focus elsewhere can turn it off and accept the imprecision.
+   */
+  focusBeforePrecise: true,
+  /**
+   * Warn when this machine's clock differs from the server by at least this much.
+   *
+   * A whole second, not a few hundred ms: an HTTP Date header has one-second resolution, so a smaller apparent
+   * difference is indistinguishable from noise. A warning that fires on noise teaches the user to ignore it.
+   */
+  skewWarnThresholdMs: 1000,
+  /**
+   * Correct the schedule by the measured offset. OFF by default and deliberately so: it changes WHEN an order
+   * fires based on a measurement, so it must be a decision the user makes rather than one they discover.
+   */
+  skewAutoApply: false,
+  /** The last measured offset, kept so the panel can show it without re-measuring on every open. */
+  lastClockOffsetMs: null,
+  /**
    * UI language: 'system' follows the browser, otherwise a catalogue code.
    *
    * Stored as a preference rather than resolved here, because the resolution rule (a region subtag like

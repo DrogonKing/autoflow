@@ -23,6 +23,8 @@ import {
 import {
   rescheduleAll, scheduleOne, cancelOne, automationIdFromAlarm, ALARM_PREFIX, listScheduled,
 } from './alarms.js';
+import { nextRun, wantsPreciseTiming, PRECISE_WAKE_MS } from '../core/schedule/schedule.js';
+import { clockOffset, correctedTarget } from '../core/clock/skew.js';
 
 /** The run currently in progress, if any. Mirrored into session storage for the UI. */
 let activeRun = null;
@@ -85,6 +87,15 @@ async function sendToTab(tabId, message, { injectIfMissing = true } = {}) {
 function makeHost(tabId, { stopFlag, onTrace, opts }) {
   const startedAt = Date.now();
 
+  /**
+   * The precise instant this run must act at, consumed once by the first element step.
+   *
+   * Declared here, at the top of the closure, because `execute` below refers to it inside an object literal
+   * evaluated during the return - a `let` declared after that point is in the temporal dead zone and throws
+   * "pendingAtMs is not defined" the moment the first step runs. That is exactly what happened.
+   */
+  let pendingAtMs = (opts && opts.atMs !== undefined) ? opts.atMs : null;
+
   async function waitForLoad(timeoutMs = 30_000) {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
@@ -124,6 +135,31 @@ function makeHost(tabId, { stopFlag, onTrace, opts }) {
     onTrace,
 
     async execute(step) {
+      // Attach the precise target to the step that will act. It is put on the step rather than in a global so
+      // the content script cannot act on a stale value from a previous run in the same tab.
+      if (pendingAtMs !== null && step.kind !== 'wait' && step.kind !== 'notify' && step.kind !== 'goto') {
+        /**
+         * Bring the tab to the front first, when the automation asks for it.
+         *
+         * WHY: Chromium throttles setTimeout in a background tab to roughly once per second, which makes a
+         * second-accurate wait impossible - measured as five runs landing 479-756ms EARLY, all of them. A
+         * visible tab is not throttled, and `tabs.update({active:true})` is the only way an extension can lift
+         * it. It is opt-in because taking focus is a visible, intrusive action.
+         */
+        if (opts.focusBeforePrecise) {
+          try {
+            await api.tabs.update(tabId, { active: true });
+            await api.windows.update?.((await api.tabs.get(tabId))?.windowId, { focused: true });
+            // a short settle: the throttle decision is made per task, and one frame is enough for it to lift
+            await new Promise((r) => setTimeout(r, 60));
+          } catch {
+            // focus is best-effort; the run still proceeds, just possibly throttled and reported as such
+          }
+        }
+        const withTarget = step.atMs === undefined ? { ...step, atMs: pendingAtMs } : step;
+        pendingAtMs = null;       // once only: a later step must not wait for a moment already passed
+        step = withTarget;
+      }
       switch (step.kind) {
         case 'goto': {
           await api.tabs.update(tabId, { url: step.url });
@@ -287,7 +323,13 @@ function makeHost(tabId, { stopFlag, onTrace, opts }) {
 // running an automation
 // ---------------------------------------------------------------------------------------------
 
-export async function startAutomation(automationId, { tabId, trigger = 'manual', row = null, vars = {} } = {}) {
+/**
+ * @param atMs  Optionally, the wall-clock instant this run must act at. Set for a schedule that carries a
+ *              second: the alarm arrives early and the first awaited step holds until exactly this moment.
+ *              Passed as `vars.__atMs` so it travels through the runner without changing every step's shape,
+ *              and read in `execute` below.
+ */
+export async function startAutomation(automationId, { tabId, trigger = 'manual', row = null, vars = {}, atMs = null } = {}) {
   if (activeRun) {
     throw new Error(`a run is already in progress (${activeRun.name}); stop it first`);
   }
@@ -297,9 +339,11 @@ export async function startAutomation(automationId, { tabId, trigger = 'manual',
   validateAutomation(automation);
 
   const settings = await getSettings();
-  const opts = { ...automation.options };
+  const opts = { ...automation.options, atMs };
   const targetTabId = tabId ?? (await api.tabs.query({ active: true, currentWindow: true }))[0]?.id;
   if (!targetTabId) throw new Error('there is no active tab to run in');
+
+  // `pendingAtMs` lives inside makeHost, above; it is per-run by construction there.
 
   const stopFlag = { stopped: false };
   activeRun = {
@@ -363,7 +407,13 @@ export async function startAutomation(automationId, { tabId, trigger = 'manual',
   try {
     const fresh = await getAutomation(automationId);
     if (fresh?.schedule && fresh.schedule.kind !== 'manual') {
-      await scheduleOne(fresh);
+      // re-armed with the same correction rules: a chain of runs must not silently lose the correction after
+      // the first one, which would make the offset appear to work once and then stop
+      const s = await getSettings();
+      await scheduleOne(fresh, {
+        clockOffsetMs: s.lastClockOffsetMs,
+        skewAutoApply: s.skewAutoApply === true,
+      });
     }
   } catch { /* the run already finished; a schedule failure must not look like a run failure */ }
 
@@ -432,7 +482,8 @@ api.runtime.onInstalled.addListener(async (details) => {
   // panel call meant one failure stopped the other, and the panel call was what the user could see.
   try {
     const automations = await listAutomations();
-    await rescheduleAll(automations);
+    const s = await getSettings();
+    await rescheduleAll(automations, { clockOffsetMs: s.lastClockOffsetMs, skewAutoApply: s.skewAutoApply === true });
   } catch (e) {
     console.warn('[autoflow] rescheduling at install failed:', String(e?.message || e));
   }
@@ -451,7 +502,8 @@ ensureClickOpensPanel();
 api.runtime.onStartup.addListener(async () => {
   // every alarm is re-derived from storage: an alarm set before a restart cannot be trusted
   const automations = await listAutomations();
-  await rescheduleAll(automations);
+  const s2 = await getSettings();
+  await rescheduleAll(automations, { clockOffsetMs: s2.lastClockOffsetMs, skewAutoApply: s2.skewAutoApply === true });
 });
 
 api.alarms.onAlarm.addListener(async (alarm) => {
@@ -481,14 +533,29 @@ api.alarms.onAlarm.addListener(async (alarm) => {
     }
     if (!tabId) throw new Error('no tab available to run in');
 
+    // For a schedule with a second, the alarm arrived early on purpose. The target instant is recomputed from
+    // the schedule instead of being carried on the alarm, so a worker restart between arming and firing cannot
+    // lose it. If the alarm somehow fires after the target, this is null and the run starts immediately.
+    let atMs = null;
+    if (wantsPreciseTiming(automation.schedule)) {
+      // The alarm fired EARLY on purpose, so the schedule's next occurrence from *now* is the instant we are
+      // early for - no arithmetic required. The first attempt at this subtracted a second from the alarm time,
+      // which landed before the target and therefore asked for the next day's occurrence: the run then waited
+      // for tomorrow and the click never happened. Measured, not reasoned about.
+      const target = nextRun(automation.schedule, Date.now());
+      // only trust it if it is close: a target far away means the recomputation is wrong, and waiting for it
+      // would silently swallow the run rather than running late
+      if (target && target - Date.now() <= PRECISE_WAKE_MS + 5000) atMs = target;
+    }
+
     // a CSV-driven automation iterates its rows
     const data = automation.dataSource?.key ? await getDataRows(automation.dataSource.key) : null;
     if (Array.isArray(data) && data.length) {
       for (const row of data) {
-        await startAutomation(id, { tabId, trigger: 'schedule', row });
+        await startAutomation(id, { tabId, trigger: 'schedule', row, atMs });
       }
     } else {
-      await startAutomation(id, { tabId, trigger: 'schedule' });
+      await startAutomation(id, { tabId, trigger: 'schedule', atMs });
     }
   } catch (e) {
     await recordRun({
@@ -667,6 +734,49 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       case 'get-active-run':
         return { ok: true, run: publicActiveRun() };
 
+      case 'measure-clock-offset': {
+        /**
+         * Compare this machine's clock with a server's, using one same-origin HEAD request.
+         *
+         * The extension made NO network requests before this. Adding one is a deliberate trade and is stated
+         * in the docs: it is the only way to know whether the machine's clock is seconds off, and a schedule
+         * that acts at the wrong real moment is the one failure the extension cannot otherwise detect. The
+         * request carries nothing - no body, no cookies of ours, no identifiers - and only the `Date`
+         * response header is read.
+         *
+         * `msg.url` is required so this never fires against an address the user did not intend; the caller
+         * passes the URL of the tab the automation targets.
+         */
+        const url = typeof msg.url === 'string' ? msg.url : null;
+        if (!url || !/^https?:/i.test(url)) {
+          throw new Error('a http(s) url is required to measure the offset');
+        }
+        const samples = [];
+        for (let i = 0; i < 3; i++) {
+          const t0 = Date.now();
+          const res = await fetch(url, { method: 'HEAD', cache: 'no-store', credentials: 'omit' });
+          const header = res.headers.get('date');
+          const t1 = Date.now();
+          if (!header) throw new Error('the server sent no Date header');
+          const parsed = new Date(header).getTime();
+          if (!Number.isFinite(parsed)) throw new Error('the Date header could not be parsed');
+          samples.push(clockOffset({ t0, t1, serverStamp: parsed }));
+        }
+        // the median of three, because a single sample can be spoiled by a routed request; the median also
+        // makes the result stable between two runs, which matters when the user is watching the number
+        const sorted = [...samples].sort((a, b) => a.offsetMs - b.offsetMs);
+        const median = sorted[1];
+        return {
+          ok: true,
+          offsetMs: median.offsetMs,
+          rttMs: median.rttMs,
+          uncertaintyMs: median.uncertaintyMs,
+          trustworthy: samples.every((s) => s.trustworthy),
+          samples: samples.map((s) => ({ offsetMs: s.offsetMs, rttMs: s.rttMs })),
+          measuredAt: Date.now(),
+        };
+      }
+
       case 'ping-tab': {
         /**
          * Ping a tab, and say WHICH tab was pinged.
@@ -696,13 +806,24 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
       case 'reschedule': {
         const automations = await listAutomations();
-        return { ok: true, results: await rescheduleAll(automations) };
+        const s = await getSettings();
+        return { ok: true, results: await rescheduleAll(automations, { clockOffsetMs: s.lastClockOffsetMs, skewAutoApply: s.skewAutoApply === true }) };
       }
 
       case 'schedule-one': {
         const automation = await getAutomation(msg.automationId);
         if (!automation) throw new Error('no such automation');
-        return { ok: true, ...(await scheduleOne(automation)) };
+        // The offset and the opt-in are read HERE and passed in, so `alarms.js` stays free of the settings
+        // store. Omitting them was a real bug: the parameter existed and nothing supplied it, so opting in
+        // changed nothing - the same shape as `allowScripts` never being passed true.
+        const s = await getSettings();
+        return {
+          ok: true,
+          ...(await scheduleOne(automation, {
+            clockOffsetMs: s.lastClockOffsetMs,
+            skewAutoApply: s.skewAutoApply === true,
+          })),
+        };
       }
 
       case 'list-scheduled': {
