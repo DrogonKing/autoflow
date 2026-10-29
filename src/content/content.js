@@ -68,12 +68,22 @@ async function clickEveryMatch(step, all) {
    * Weak so a node the page discards is not kept alive, and so an element the page re-creates counts as new.
    */
   const done = new WeakSet();
+
+  /**
+   * The number of matches seen on the FIRST pass, which is the number the user cares about.
+   *
+   * It used to be overwritten on every pass, so the final report came from the last pass - by which time a list
+   * that shrinks as it is clicked (a real order list does) is empty, and a completed run of ten announced
+   * "10 of 0 clicked". The value reported is a property of the list when it was found, not of the leftovers.
+   */
   let total = 0;
+  let firstPassTotal = 0;
 
   for (let pass = 0; pass < CEILING; pass++) {
     // the whole candidate list on this pass, filtered the same way a single click would be
     const found = findAll(document, step.finder, { requireVisible: true, requireActionable: true });
     total = found.elements.length;
+    if (pass === 0) firstPassTotal = total;
     const el = pickNext({
       candidates: found.elements,
       isVisited: (x) => done.has(x),
@@ -93,7 +103,9 @@ async function clickEveryMatch(step, all) {
     }
 
     const decision = afterClick({
-      succeeded: ok, taken: clicked + 1, total, onErrorPolicy: step.onError,
+      // the total reported to the policy is the first-pass count, so "how many of how many" stays meaningful while
+      // the list is being consumed
+      succeeded: ok, taken: clicked + 1, total: Math.max(firstPassTotal, clicked + 1), onErrorPolicy: step.onError,
     });
     if (ok) clicked += 1;
     if (decision.action === 'stop') {
@@ -109,13 +121,13 @@ async function clickEveryMatch(step, all) {
   }
 
   return {
-    how: `${clicked} of ${total} clicked (${all.order})`,
+    how: `${clicked} of ${Math.max(firstPassTotal, clicked)} clicked (${all.order})`,
     clicked,
-    total,
+    total: Math.max(firstPassTotal, clicked),
     stoppedEarly,
     summary: describeAllClicks({
       clicked,
-      total: Math.max(total, clicked),
+      total: Math.max(firstPassTotal, clicked),
       stoppedEarly,
       reason,
       language: globalThis.document?.documentElement?.getAttribute('data-autoflow-lang'),

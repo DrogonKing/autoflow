@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="utf-8">
+<title>floating order window</title>
+<style>
+  /* A deliberately close model of the terminal in the screenshots: no ids on the generated parts, a floating
+     order window whose position is changed by dragging, and the ability to open a second one. */
+  body { margin: 0; font-family: Tahoma, sans-serif; background: #0f1318; color: #e6edf3; }
+  #symbols { padding: 10px; display: flex; gap: 8px; }
+  .sym { background: #1b2230; border: 1px solid #2a313c; padding: 8px 14px; cursor: pointer; border-radius: 6px; }
+  .sym:hover { border-color: #388bfd; }
+
+  /* the floating window: positioned absolutely, moved by drag */
+  .order-win {
+    position: absolute; width: 300px; background: #161b22; border: 1px solid #30363d;
+    border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,.5);
+  }
+  .order-win .title {
+    padding: 8px 10px; background: #1c2128; cursor: move; border-radius: 8px 8px 0 0;
+    display: flex; justify-content: space-between; border-bottom: 1px solid #30363d;
+  }
+  .order-win .body { padding: 10px; display: flex; gap: 8px; }
+  .order-win input { width: 100%; background: #0d1117; color: #e6edf3; border: 1px solid #30363d;
+    border-radius: 5px; padding: 6px; margin-bottom: 8px; }
+  .buy, .sell { flex: 1; padding: 10px; border: 0; border-radius: 6px; cursor: pointer; font: inherit; }
+  .buy { background: #2ea043; color: #fff; }
+  .sell { background: #d32f2f; color: #fff; }
+  #log { position: fixed; bottom: 0; inset-inline: 0; background: #11161d; border-top: 1px solid #2a313c;
+    padding: 8px 12px; font-size: 12px; direction: ltr; text-align: left; max-height: 130px; overflow: auto; }
+</style>
+</head>
+<body>
+<div id="symbols">
+  <div class="sym" data-target="نماد فزر">فزر</div>
+  <div class="sym" data-target="نماد شستا">شستا</div>
+  <div class="sym" data-target="نماد خودرو">خودرو</div>
+</div>
+<div id="log">waiting</div>
+
+<script>
+(() => {
+  'use strict';
+  const log = document.getElementById('log');
+  const lines = [];
+  const say = (s) => { lines.push(s); log.textContent = lines.slice(-40).join('\n'); };
+  window.__say = say;
+
+  let opened = 0;
+  const wins = [];
+
+  /** Build a floating order window. No ids, no data attributes, no aria: the harder, realistic case. */
+  function openWindow(symbol) {
+    opened += 1;
+    const win = document.createElement('div');
+    win.className = 'order-win';
+    win.style.left = `${320 + opened * 24}px`;
+    win.style.top = `${70 + opened * 18}px`;
+    win.setAttribute('data-symbol', symbol);   // present, as such apps usually mark the symbol
+    win.innerHTML = `
+      <div class="title"><span>${symbol} — خرید</span><span class="close">×</span></div>
+      <div class="body">
+        <div style="flex:1">
+          <input placeholder="قیمت" value="334300">
+          <input placeholder="تعداد" value="3000">
+        </div>
+        <div style="flex:1;display:flex;gap:6px;align-items:flex-start">
+          <button class="buy">خرید</button>
+          <button class="sell">فروش</button>
+        </div>
+      </div>`;
+    document.body.append(win);
+    wins.push(win);
+
+    // dragging changes only the CSS position, which is what the screenshots show
+    const title = win.querySelector('.title');
+    let sx = 0, sy = 0, ox = 0, oy = 0, dragging = false;
+    title.addEventListener('mousedown', (e) => {
+      dragging = true; sx = e.clientX; sy = e.clientY;
+      ox = parseInt(win.style.left, 10); oy = parseInt(win.style.top, 10);
+      e.preventDefault();
+    });
+    window.addEventListener('mousemove', (e) => {
+      if (!dragging) return;
+      win.style.left = `${ox + (e.clientX - sx)}px`;
+      win.style.top = `${oy + (e.clientY - sy)}px`;
+    });
+    window.addEventListener('mouseup', () => { dragging = false; });
+
+    win.querySelector('.close').addEventListener('click', () => {
+      win.remove();
+      const i = wins.indexOf(win); if (i >= 0) wins.splice(i, 1);
+    });
+    win.querySelector('.buy').addEventListener('click', () => say(`BUY clicked in ${symbol}`));
+    win.querySelector('.sell').addEventListener('click', () => say(`SELL clicked in ${symbol}`));
+
+    window.__clicks = window.__clicks || [];
+    for (const [cls, label] of [['.buy', 'خرید'], ['.sell', 'فروش']]) {
+      win.querySelector(cls).addEventListener('click', () => {
+        window.__clicks.push({ symbol, label, at: new Date().toISOString() });
+      });
+    }
+    return win;
+  }
+
+  for (const s of document.querySelectorAll('.sym')) {
+    s.addEventListener('click', () => {
+      const w = openWindow(s.dataset.target.replace('نماد ', ''));
+      say(`opened order window for ${s.dataset.target}`);
+      window.__lastWindow = w;
+    });
+  }
+  window.__openWindow = openWindow;
+  window.__wins = () => wins;
+})();
+</script>
+</body>
+</html>

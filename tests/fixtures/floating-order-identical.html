@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="fa" dir="rtl">
+<head><meta charset="utf-8"><title>identical floating windows</title>
+<style>
+  body { margin:0; font-family:Tahoma,sans-serif; background:#0f1318; color:#e6edf3; }
+  .order-win { position:absolute; width:300px; background:#161b22; border:1px solid #30363d; border-radius:8px; }
+  .order-win .title { padding:8px 10px; background:#1c2128; cursor:move; }
+  .order-win .body { padding:10px; }
+  .buy { background:#2ea043; color:#fff; border:0; padding:10px; border-radius:6px; }
+  .sell { background:#d32f2f; color:#fff; border:0; padding:10px; border-radius:6px; }
+</style>
+</head>
+<body>
+<script>
+(() => {
+  'use strict';
+  /**
+   * The worst realistic case: windows with NO ids, NO data attributes, NO aria, identical classes. The only thing
+   * distinguishing two of them is their order among siblings.
+   *
+   * This fixture exists to state the LIMIT of any selector-based picker: when a page gives its windows nothing to
+   * identify them by, no selector can survive a window being replaced. The test asserts that limit rather than
+   * pretending it away - the answer there is the warning in the panel, not a cleverer selector.
+   */
+  window.__clicks = [];
+  let n = 0;
+  window.__open = (left, top, label) => {
+    n += 1;
+    const w = document.createElement('div');
+    w.className = 'order-win';
+    w.style.left = left + 'px';
+    w.style.top = top + 'px';
+    w.innerHTML = '<div class="title">' + label + ' — خرید</div>'
+      + '<div class="body"><button class="buy">خرید</button><button class="sell">فروش</button></div>';
+    document.body.append(w);
+    w.querySelector('.buy').addEventListener('click', () => {
+      window.__clicks.push({ which: label, kind: 'buy' });
+    });
+    return w;
+  };
+  window.__wins = () => [...document.querySelectorAll('.order-win')];
+})();
+</script>
+</body>
+</html>

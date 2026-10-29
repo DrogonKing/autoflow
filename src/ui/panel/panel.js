@@ -541,6 +541,9 @@ function stepRow(step, list, index, rerender) {
       finder.chain?.length
         ? el('span', { class: 'hint', title: finder.chain.join('\n'), text: `+${finder.chain.length} fallbacks` })
         : null,
+      positionalWarning(finder)
+        ? el('span', { class: 'hint warn', title: t('finder.positionalTitle'), text: '⚠' })
+        : null,
       // A picked finder could not be undone at all - there was no reset and no delete. Clearing resets to a
       // plain CSS strategy with an empty selector, which is the state a new step starts in.
       (finder.chain?.length || Object.keys(finder).some((k) => k !== 'strategy'))
@@ -1078,6 +1081,10 @@ function basicView(rerender) {
           finder.chain?.length
             ? el('span', { class: 'hint', title: finder.chain.join('\n'), text: `+${finder.chain.length}` })
             : null,
+          // a positional selector is the silent case: warn, in the row where the pick was made
+          positionalWarning(finder)
+            ? el('span', { class: 'hint warn', title: t('finder.positionalTitle'), text: '⚠' })
+            : null,
           // and remove whatever was picked, keeping the strategy so the row stays usable
           (finder.chain?.length || Object.keys(finder).some((k) => k !== 'strategy'))
             ? el('button', {
@@ -1165,6 +1172,23 @@ function pickerSummary(finder) {
   const value = finder.selector ?? finder.text ?? finder.id ?? finder.xpath ?? finder.aria ?? finder.placeholder;
   if (!value) return { label: '—', detail: null };
   return { label: String(value).slice(0, 60), detail: finder.strategy };
+}
+
+/**
+ * A warning when a picked selector depends on an element's POSITION.
+ *
+ * Why this is shown and not fixed silently: a picker that cannot find an identifying attribute has no better
+ * selector to offer, and saying nothing is how a click ends up in the wrong window. Measured: two byte-identical
+ * order windows produce different selectors that differ only in `nth-of-type`, and closing the first one redirects a
+ * saved click to whatever took its place. There is no selector that survives that - so the user has to know.
+ */
+function positionalWarning(finder) {
+  const sel = finder?.selector;
+  if (typeof sel !== 'string' || !sel) return null;
+  if (finder.anchored === true) return null;            // anchored: identifies the thing, not its position
+  if (!/nth-of-type/.test(sel)) return null;            // no positional step at all
+  // is the positional step ABOVE the target rather than inside it? a positional path anywhere is the risk
+  return t('finder.positional');
 }
 
 function automationsView(rerender) {

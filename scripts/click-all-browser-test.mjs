@@ -91,6 +91,13 @@ async function runOnPage(step, { reset = true } = {}) {
   if (reset) await page.evaluate(() => { window.__presses = []; window.__remaining = [1,2,3,4,5,6,7,8,9,10]; location.reload(); });
   await page.waitForTimeout(400);
 
+  /**
+   * The step is sent and awaited, but the RESULT is only trusted once the page has stopped changing.
+   *
+   * `clickEveryMatch` sleeps `gapMs` between clicks, so on a loaded machine the message can resolve while clicks are
+   * still landing - and the assertion then reads a partial state. Waiting for the page's own count to reach ten, or
+   * for it to stop growing, makes the assertion about the finished run rather than about a race.
+   */
   const res = await worker.evaluate(async ({ step, tabId }) => {
     try {
       const r = await chrome.tabs.sendMessage(tabId, { type: 'perform-step', step });
@@ -99,6 +106,15 @@ async function runOnPage(step, { reset = true } = {}) {
       return { ok: false, error: String(e?.message ?? e) };
     }
   }, { step, tabId });
+
+  // wait until the presses stop arriving, so the assertion is about a settled page
+  let lastCount = -1;
+  for (let i = 0; i < 40; i++) {
+    const n = await page.evaluate(() => (window.__presses ?? []).length);
+    if (n === lastCount && n > 0) break;
+    lastCount = n;
+    await page.waitForTimeout(100);
+  }
 
   await page.waitForTimeout(600);
   const presses = await page.evaluate(() => window.__presses ?? []);
@@ -132,8 +148,17 @@ console.log('\n--- 1. every match ON: the same ten, each once ---');
     JSON.stringify([...presses].sort((a, b) => a - b)) === JSON.stringify([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]),
     JSON.stringify([...presses].sort((a, b) => a - b)));
   check('the page is empty afterwards', remaining.length === 0, `remaining ${remaining.length}`);
-  check('the step reported a count of ten', /10/.test(JSON.stringify(res.r)),
-    JSON.stringify(res.r));
+  /**
+   * Assert the COUNT, not the presence of the characters "10".
+   *
+   * The old assertion searched the whole run object for /10/ - so a timestamp or a trace line containing "10"
+   * satisfied it, and the check was both fragile and capable of passing when the count was wrong. The step reports
+   * `how` as "<n> of <total> clicked (<order>)`, so that is what is read.
+   */
+  const reported = res.r?.result?.how ?? res.r?.run?.trace?.find((x) => x.how)?.how ?? '';
+  console.log(`  step reported: ${JSON.stringify(reported)}`);
+  check('the step reported a count of ten',
+    /^10 of 10 clicked/.test(String(reported)), String(reported));
 }
 
 // ---- 2. every match OFF: the bug being fixed

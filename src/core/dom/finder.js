@@ -11,6 +11,8 @@
  * because "it clicked the wrong thing" is only debuggable if you can see what it matched.
  */
 
+import { anchoredSelector } from './anchor.js';
+
 export class FinderError extends Error {
   constructor(message, detail = {}) {
     super(message);
@@ -407,6 +409,12 @@ export function findElement(root, finder, opts = {}) {
     if (clickable.length) chosen = clickable;
   }
 
+  // an empty selector is the state the clear control leaves behind. It finds nothing - which is honest - and it must
+  // not surface a raw "the CSS selector "" is invalid" error to the user, which reads like a crash.
+  if (finder.strategy === 'css' && (finder.selector === '' || finder.selector === undefined)) {
+    return { element: null, how: 'css (empty selector)', candidates: 0, tried: [] };
+  }
+
   const index = finder.index ?? 0;
   if (index >= chosen.length) {
     throw new FinderError(
@@ -518,6 +526,18 @@ export function describeElement(el) {
 export function buildFinder(el) {
   const doc = el.ownerDocument;
   const chain = [];
+
+  /**
+   * ANCHORING COMES FIRST, because a positional path is the least stable thing about an element whose window can be
+   * dragged or replaced. See src/core/dom/anchor.js for the measured case: two identical order windows differing
+   * only in `nth-of-type`, where a swap redirected the click to the wrong symbol.
+   *
+   * The positional path is still recorded below and kept in the chain as a fallback, so this only ever adds a
+   * better first choice - it never removes a way to reach the element.
+   */
+  const positional = cssPath(el, doc);
+  const anchored = anchoredSelector(el, positional, doc);
+
   const id = el.getAttribute?.('id');
   if (id && /^[A-Za-z][\w-]*$/.test(id)) {
     try {
@@ -531,20 +551,61 @@ export function buildFinder(el) {
   );
   if (dataAttr) chain.push(`[${dataAttr.name}="${cssEscape(dataAttr.value)}"]`);
   if (el.getAttribute?.('aria-label')) chain.push(`[aria-label="${cssEscape(el.getAttribute('aria-label'))}"]`);
-  const path = cssPath(el, doc);
-  if (path) chain.push(path);
+  const path = positional;
+  // the positional path is a fallback, not the primary, when an anchor was found
+  if (path && anchored.anchored && path !== anchored.selector) chain.push(path);
+  else if (path && !anchored.anchored) chain.push(path);
   const label = accessibleName(el);
-  if (label && label.length < 80) chain.push(null); // text fallback is separate from CSS
 
-  // The primary strategy: prefer a unique id, else the structural path, else the text.
+  /**
+   * The label is recorded as `label`, NOT as a member of the chain.
+   *
+   * It used to be pushed into `chain` as `null` and then dropped by `chain.filter(Boolean)` - so a text fallback
+   * that the code and a comment both implied never existed. It is kept separate on purpose: the chain holds CSS
+   * selectors that `findElement` re-queries, and a text match is a different kind of rule.
+   *
+   * It is also deliberately NOT used as an automatic fallback by `findElement`. A page with several windows that
+   * each contain a button reading "خرید" has several elements with the same text, and a text fallback would click
+   * whichever comes first in the DOM - which is how a correction turns into a click on the wrong window. The label
+   * is here so the UI can SHOW it and so a person can choose it knowingly.
+   */
+  const withLabel = label && label.length < 80 ? { label: label.slice(0, 120) } : {};
+
+  // The primary strategy, in order of how long each survives: an anchored selector (identifies the thing), then a
+  // unique id, then the structural path, then the text.
+  if (anchored.anchored && anchored.selector) {
+    const rest = chain.filter((c) => c && c !== anchored.selector && c !== positional);
+    // an ID anchor stays an ID finder: that is the commonest and strongest case, and reporting it as `css` with a
+    // stray `id` field changed what an already-saved automation meant
+    if (anchored.anchor?.attr === 'id') {
+      return {
+        strategy: 'id',
+        id: anchored.anchor.value,
+        anchored: true,
+        anchor: anchored.anchor,
+        positional: positional || undefined,
+        chain: [positional, ...rest].filter(Boolean),
+        ...withLabel,
+      };
+    }
+    return {
+      strategy: 'css',
+      selector: anchored.selector,
+      anchored: true,
+      anchor: anchored.anchor,
+      positional: positional || undefined,
+      chain: [positional, ...rest].filter(Boolean),
+      ...withLabel,
+    };
+  }
   if (chain[0]?.startsWith('#')) {
-    return { strategy: 'id', id: id, chain: chain.filter(Boolean) };
+    return { strategy: 'id', id: id, chain: chain.filter(Boolean), ...withLabel };
   }
   if (path) {
-    return { strategy: 'css', selector: path, chain: chain.filter(Boolean) };
+    return { strategy: 'css', selector: path, chain: chain.filter(Boolean), ...withLabel };
   }
   if (label) {
-    return { strategy: 'text', text: label.slice(0, 120), textExact: false, chain: chain.filter(Boolean) };
+    return { strategy: 'text', text: label.slice(0, 120), textExact: false, chain: chain.filter(Boolean), ...withLabel };
   }
   return { strategy: 'css', selector: 'body', chain: chain.filter(Boolean) };
 }
