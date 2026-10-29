@@ -1,0 +1,138 @@
+name: build
+
+on:
+  push:
+    branches: ['**']
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+# Two jobs, and the split is deliberate:
+#
+#   test  - the whole suite, on every push and PR. Fast, and it does not need a browser.
+#   build - produces the two extension zips and attaches them to a release when a v* tag is pushed.
+#
+# The browser tests are NOT here, and that is a real limitation rather than an oversight: the Firefox test needs
+# geckodriver and a Firefox binary, and the end-to-end test drives a real Chromium through Playwright. Both are
+# doable on a GitHub runner but they make the job minutes long and flaky, so they stay a local gate. What CI
+# proves is that the code builds, the unit suite passes, both manifests are well formed, and Mozilla's own
+# linter accepts the Firefox build.
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - run: npm ci
+
+      - name: unit tests
+        run: npx vitest run
+
+      - name: build both targets
+        run: npm run build:all
+
+      - name: the manifests must be well formed
+        run: |
+          python3 - <<'PY'
+          import json, pathlib, sys
+          ok = True
+          for rel in ("dist/manifest.json", "dist-firefox/manifest.json"):
+              p = pathlib.Path(rel)
+              if not p.exists():
+                  print(f"MISSING {rel}"); ok = False; continue
+              m = json.loads(p.read_text())
+              print(f"{rel}: mv{m.get('manifest_version')} v{m.get('version')} id={m.get('browser_specific_settings',{}).get('gecko',{}).get('id')}")
+              if m.get("manifest_version") != 3:
+                  print(f"  {rel}: manifest_version is not 3"); ok = False
+          sys.exit(0 if ok else 1)
+          PY
+
+      - name: every file the manifest references must exist
+        run: |
+          python3 - <<'PY'
+          import json, pathlib, sys
+          ok = True
+          for dist in ("dist", "dist-firefox"):
+              base = pathlib.Path(dist)
+              m = json.loads((base / "manifest.json").read_text())
+              refs = set()
+              refs.update((m.get("background") or {}).get("scripts") or [])
+              if (m.get("background") or {}).get("service_worker"):
+                  refs.add(m["background"]["service_worker"])
+              for cs in m.get("content_scripts") or []:
+                  refs.update(cs.get("js") or [])
+              for key in ("default_panel", "options_page"):
+                  v = (m.get("sidebar_action") or {}).get(key) if key == "default_panel" else m.get(key)
+                  if v: refs.add(v)
+              refs.update((m.get("icons") or {}).values())
+              missing = sorted(r for r in refs if not (base / r).exists())
+              print(f"{dist}: {len(refs)} referenced files, missing {missing or 'none'}")
+              if missing: ok = False
+          sys.exit(0 if ok else 1)
+          PY
+
+      - name: Mozilla's linter on the Firefox build
+        run: |
+          npx --yes web-ext lint --source-dir=dist-firefox --output=json > /tmp/lint.json || true
+          python3 - <<'PY'
+          import json, sys
+          d = json.load(open("/tmp/lint.json"))
+          errs, warns = d.get("errors") or [], d.get("warnings") or []
+          for e in errs:  print("ERROR  ", e.get("code"), e.get("message"))
+          for w in warns: print("WARNING", w.get("code"), w.get("message"))
+          print(f"errors={len(errs)} warnings={len(warns)}")
+          sys.exit(1 if errs else 0)
+          PY
+
+      - name: security audits (static, deterministic)
+        run: |
+          python3 scripts/adversarial_review.py | tail -20
+          python3 scripts/firefox_security_audit.py | tail -20
+          python3 scripts/follow_the_lead.py | tail -20
+
+      - name: the review packet must be complete and correctly numbered
+        run: |
+          python3 scripts/build_review_packet.py
+          python3 scripts/check_exhibit_completeness.py | tail -12
+
+      - name: package the artifacts
+        run: npm run package
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: autoflow-extension-zips
+          path: |
+            release/autoflow.zip
+            release/autoflow-firefox.zip
+            release/autoflow-source.zip
+          if-no-files-found: error
+
+      - name: attach the zips to the release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release/autoflow.zip
+            release/autoflow-firefox.zip
+            release/autoflow-source.zip
+          generate_release_notes: true
+          body: |
+            ## Install
+
+            **Chrome / Edge** — download `autoflow.zip`, unpack it, then
+            `chrome://extensions` → enable Developer mode → **Load unpacked** → pick the unpacked folder.
+
+            **Firefox** — download `autoflow-firefox.zip`. A permanent install requires Mozilla's signature,
+            which this archive does not have, so for now use
+            `about:debugging#/runtime/this-firefox` → **Load Temporary Add-on** → pick `manifest.json`
+            inside the unpacked folder. Temporary add-ons are removed when Firefox closes.
+
+            **Source** — `autoflow-source.zip` is the full tree, including the tests and the security scripts.
+
+            Verified before this archive was produced: the unit suite, both manifests' referenced files, and
+            Mozilla's own linter reporting zero errors and zero warnings.

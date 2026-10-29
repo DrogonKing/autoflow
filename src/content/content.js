@@ -1,0 +1,573 @@
+/**
+ * The content script.
+ *
+ * It is the page-side half of the runner's host: it receives one already-resolved step, performs it with
+ * the DOM modules, and answers with a result or an error. It holds no run state of its own — loops,
+ * variables and branching all live in the service worker — because a page can navigate mid-run and take
+ * any local state with it.
+ *
+ * It also implements the element picker, which is the other thing that has to run here.
+ */
+
+import { api } from '../platform/api.js';
+import { safeSend } from '../platform/serialise.js';
+import { findElement, describeElement, buildFinder, isVisible } from '../core/dom/finder.js';
+import {
+  realClick, fillElement, selectOption, pressKeys, scrollAction, ActionError,
+} from '../core/dom/actions.js';
+
+const PICKER_ATTR = 'data-autoflow-pick';
+
+/**
+ * Answer a message.
+ *
+ * Two failure modes are handled, both of which are silent without this:
+ *
+ *   - the port is gone (a closed panel), so sending throws and there is nothing to do about it
+ *   - the payload contains something a message port cannot carry. A runtime message is structured-cloned,
+ *     and a function cannot be cloned. Chromium drops such a property; Firefox throws
+ *     "Function object could not be cloned" and the whole step fails. Values here come from a web page, so
+ *     `value` on a plain element can be a function the page defined.
+ */
+function reply(sendResponse, payload) {
+  const outcome = safeSend(sendResponse, payload, 'the step result');
+  if (!outcome.sent && outcome.secondError) {
+    // even the sanitised form could not be sent: report the reason in the simplest shape that can travel
+    try {
+      sendResponse({ ok: false, error: `the reply could not be sent: ${outcome.firstError}` });
+    } catch { /* the port is gone */ }
+  }
+}
+
+/**
+ * Perform one step.
+ *
+ * @param {Object} step an already template-resolved step from the runner
+ * @returns {Promise<Object>} a result the trace can record
+ */
+async function performStep(step) {
+  const needsElement = step.kind !== 'wait' && step.kind !== 'goto' && step.kind !== 'reload' &&
+    step.kind !== 'back' && step.kind !== 'forward' && step.kind !== 'newTab' &&
+    step.kind !== 'switchTab' && step.kind !== 'closeTab' && step.kind !== 'runScript' &&
+    step.kind !== 'notify' && step.kind !== 'sound' && step.kind !== 'download' &&
+    step.kind !== 'screenshot' && step.kind !== 'stop' && step.kind !== 'screenshot';
+
+  let el = null;
+  let how = '';
+  if (needsElement && step.finder) {
+    const found = findElement(document, step.finder, {
+      requireVisible: step.kind !== 'check' && step.kind !== 'fill',
+      requireActionable: step.kind === 'click' || step.kind === 'hover',
+    });
+    if (!found.element) {
+      throw new ActionError(
+        `could not find ${how || 'the element'} - nothing matched (tried: ${
+          (found.tried ?? []).map((t) => t.how).join('; ')})`,
+        { tried: found.tried, finder: step.finder },
+      );
+    }
+    el = found.element;
+    how = found.how;
+  }
+
+  switch (step.kind) {
+    case 'click':
+      return { how, ...realClick(el, { button: step.button, clickCount: step.clickCount ?? 1 }) };
+
+    case 'fill':
+      return { how, ...fillElement(el, step.value ?? '', { clearFirst: step.clearFirst !== false }) };
+
+    case 'clear':
+      return { how, ...fillElement(el, '', { clearFirst: true }) };
+
+    case 'check':
+      return { how, ...fillElement(el, step.checked ? 'true' : 'false') };
+
+    case 'select':
+      return { how, ...selectOption(el, step.values ?? step.value) };
+
+    case 'hover': {
+      const rect = el.getBoundingClientRect();
+      const w = el.ownerDocument.defaultView;
+      const opts = {
+        bubbles: true, cancelable: true, composed: true, view: w,
+        clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2,
+      };
+      el.dispatchEvent(new w.MouseEvent('mouseover', opts));
+      el.dispatchEvent(new w.MouseEvent('mouseenter', { ...opts, bubbles: false }));
+      el.dispatchEvent(new w.MouseEvent('mousemove', opts));
+      return { how, hovered: true };
+    }
+
+    case 'focus':
+      el.focus?.();
+      return { how, focused: el.ownerDocument.activeElement === el };
+
+    case 'blur':
+      el.blur?.();
+      return { how, blurred: true };
+
+    case 'submit': {
+      const form = el.tagName === 'FORM' ? el : el.form ?? el.closest?.('form');
+      if (!form) throw new ActionError('there is no form to submit around this element');
+      if (typeof form.requestSubmit === 'function') form.requestSubmit();
+      else form.submit();
+      return { how, submitted: true };
+    }
+
+    case 'scroll': {
+      if (step.target === 'element' && step.finder) {
+        el.scrollIntoView?.({ block: step.block ?? 'center', inline: 'nearest' });
+        return { how, method: 'scrollIntoView' };
+      }
+      return scrollAction({ target: step.target ?? 'window', mode: step.mode ?? 'by', x: step.x ?? 0, y: step.y ?? 0, el });
+    }
+
+    case 'key':
+      return { how, ...(await pressKeys(el, step.keys, { gapMs: step.gapMs ?? 0, holdMs: step.holdMs ?? 0 })) };
+
+    case 'wait':
+      await new Promise((r) => setTimeout(r, step.ms));
+      return { waited: step.ms };
+
+    case 'waitFor': {
+      const timeout = step.timeoutMs ?? 15_000;
+      const poll = step.pollMs ?? 200;
+      const started = Date.now();
+      let last = null;
+      while (Date.now() - started <= timeout) {
+        last = observe(step.finder, step.condition);
+        if (conditionMatches(step.condition, last)) {
+          return { how, matchedAfterMs: Date.now() - started, observed: last };
+        }
+        await new Promise((r) => setTimeout(r, poll));
+      }
+      // Report what was last seen. "Timed out" alone leaves the user unable to tell whether the element
+      // was missing, hidden, or simply had different text.
+      const seen = last === null
+        ? 'nothing observed'
+        : `found=${last.found} value=${JSON.stringify(String(last.value ?? '').slice(0, 80))}`
+          + ` flags=${JSON.stringify(last.flags ?? {})} count=${last.count ?? 0}`;
+      throw new ActionError(
+        `waited ${timeout} ms for a condition that did not become true (last observed: ${seen})`,
+      );
+    }
+
+    case 'extract': {
+      if (!step.finder) throw new ActionError('extract needs a finder');
+      const found = findElement(document, step.finder, { requireVisible: false });
+      const source = step.source ?? 'text';
+      if (source === 'count') return { value: String(found.candidates ?? 0) };
+      if (!found.element) {
+        // a missing element extracts an empty string rather than failing the run: a page that has not
+        // rendered yet is a normal situation, and the user's next step decides what to do about it
+        return { value: '', found: false };
+      }
+      const e = found.element;
+
+      /**
+       * Read the requested source and ALWAYS return a string.
+       *
+       * A reply travels over a message port, which structured-clones it, and a function is not cloneable.
+       * That is easy to hit by accident: `e.value` on a plain <div> is `undefined`, but on a page that has
+       * put a function on the property it is a function, and a branch that falls through can return
+       * `getAttribute` itself. Chromium drops such a property silently; Firefox throws
+       * "Function object could not be cloned". Coercing here makes the reply serialisable on both, and the
+       * value a user gets is the same either way.
+       */
+      const read = () => {
+        switch (source) {
+          case 'value': return e.value;
+          case 'attribute': return step.attribute ? e.getAttribute(step.attribute) : '';
+          case 'html': return e.innerHTML;
+          case 'text': return (e.textContent ?? '').trim();
+          default: return (e.textContent ?? '').trim();
+        }
+      };
+
+      let raw;
+      try {
+        raw = read();
+      } catch (err) {
+        throw new ActionError(`could not read the ${source} of the element: ${err?.message ?? err}`);
+      }
+      if (raw === null || raw === undefined) return { value: '', found: true, how: found.how };
+      if (typeof raw === 'object') {
+        // an object would be a surprising thing to extract; its string form is what a template can use
+        try {
+          return { value: JSON.stringify(raw), found: true, how: found.how, note: 'the value was an object' };
+        } catch {
+          return { value: String(raw), found: true, how: found.how };
+        }
+      }
+      return { value: String(raw), found: true, how: found.how };
+    }
+
+    case 'upload': {
+      /**
+       * Attach a file to a file input.
+       *
+       * A page cannot set `input.files` itself - the property is read-only to page script - which is why
+       * the DOM cannot be used to fake a user's file choice. An extension can construct a File and a
+       * DataTransfer and assign that, which is the same mechanism a user's picker ultimately produces.
+       * Only files already fetched by the extension can be attached: a path on disk is not reachable.
+       */
+      if (!el || el.tagName !== 'INPUT' || el.type !== 'file') {
+        throw new ActionError('upload needs a file input (<input type="file">)');
+      }
+      const files = Array.isArray(step.files) ? step.files : [step.files].filter(Boolean);
+      if (files.length === 0) throw new ActionError('upload needs at least one file');
+
+      const built = [];
+      for (const spec of files) {
+        const name = typeof spec === 'string' ? spec : spec.name;
+        if (!name) throw new ActionError('each uploaded file needs a name');
+        // the content is fetched by the extension itself, never by this page-side code, so no page
+        // permission or CORS rule is involved
+        const res = await api.runtime.sendMessage({ type: 'read-file-for-upload', name });
+        if (!res?.ok) throw new ActionError(res?.error || `could not read the file ${name}`);
+        const bytes = Uint8Array.from(atob(res.base64), (c) => c.charCodeAt(0));
+        built.push(new File([bytes], name, { type: res.mime || 'application/octet-stream' }));
+      }
+
+      const dt = new DataTransfer();
+      for (const f of built) dt.items.add(f);
+      el.files = dt.files;
+      el.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+      return { how, method: 'data-transfer', files: built.map((f) => f.name) };
+    }
+
+    case 'runScript': {
+      // Runs in the page's main world via a DOM script element, so it can reach page globals. The
+      // extension's own privileged APIs are deliberately out of reach from here.
+      const result = await runInPage(step.code);
+      return { result };
+    }
+
+    case 'screenshot':
+      return { note: 'handled by the service worker (captureVisibleTab)' };
+
+    case 'notify':
+      return { note: 'handled by the service worker' };
+
+    case 'sound':
+      return { note: 'handled by the service worker' };
+
+    case 'download':
+      return { note: 'handled by the service worker' };
+
+    default:
+      throw new ActionError(`the page side does not handle step kind "${step.kind}"`);
+  }
+}
+
+/** Read the page for a condition, returning the shape the condition evaluator expects. */
+function observe(finder, condition) {
+  if (!finder || (condition && ['url', 'title', 'variable', 'js'].includes(condition.source))) {
+    if (condition?.source === 'url') return { value: location.href };
+    if (condition?.source === 'title') return { value: document.title };
+    return { value: null, found: false, flags: {} };
+  }
+  const result = findElement(document, finder, { requireVisible: false });
+  const el = result.element ?? null;
+  const found = Boolean(el);
+  // `candidates` is how many matched, which is what a count condition needs. Reading `el.count` was the
+  // bug: an Element has no such property, and on a miss it threw instead of reporting a count of zero.
+  const count = result.candidates ?? 0;
+  const flags = found
+    ? {
+        visible: isVisible(el),
+        hidden: !isVisible(el),
+        checked: el.checked === true,
+        unchecked: el.checked !== true,
+        enabled: el.disabled !== true,
+        disabled: el.disabled === true,
+      }
+    : { visible: false, hidden: false, checked: false, unchecked: false, enabled: false, disabled: false };
+  const value = found
+    ? (condition?.source === 'value' ? el.value
+      : condition?.source === 'attribute' ? el.getAttribute(condition.attribute)
+      : el.textContent?.trim() ?? '')
+    : null;
+  return { value, found, flags, count, how: result.how, matched: count };
+}
+
+/** The page-side mirror of core/engine/conditions.js, kept minimal because the evaluator runs in the worker. */
+function conditionMatches(condition, observed) {
+  const cmp = condition.comparator;
+  if (cmp === 'exists') return observed.found;
+  if (cmp === 'notExists') return !observed.found;
+  if (['visible', 'hidden', 'checked', 'unchecked', 'enabled', 'disabled'].includes(cmp)) {
+    return observed.flags?.[cmp] === true;
+  }
+  if (!observed.found) return false;
+  const a = String(observed.value ?? '');
+  const b = String(condition.value ?? '');
+  const ci = condition.caseSensitive !== true;
+  const A = ci ? a.toLowerCase() : a;
+  const B = ci ? b.toLowerCase() : b;
+  switch (cmp) {
+    case 'eq': return A === B;
+    case 'neq': return A !== B;
+    case 'contains': return A.includes(B);
+    case 'notContains': return !A.includes(B);
+    case 'startsWith': return A.startsWith(B);
+    case 'endsWith': return A.endsWith(B);
+    case 'matches': try { return new RegExp(b, ci ? 'i' : '').test(a); } catch { return false; }
+    case 'gt': return Number(a) > Number(b);
+    case 'gte': return Number(a) >= Number(b);
+    case 'lt': return Number(a) < Number(b);
+    case 'lte': return Number(a) <= Number(b);
+    case 'empty': return a.trim() === '';
+    case 'notEmpty': return a.trim() !== '';
+    default: return false;
+  }
+}
+
+/**
+ * Run code in the page's main world.
+ *
+ * A `script` element is used rather than `eval` so the code executes with the page's globals. Anything
+ * the page returns synchronously is captured; async results are not awaited, because a message channel
+ * that could be blocked indefinitely by page code is a deadlock waiting to happen.
+ */
+function runInPage(code) {
+  return new Promise((resolve) => {
+    const token = `autoflow-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const holder = document.createElement('div');
+    holder.id = token;
+    holder.style.display = 'none';
+    // The holder MUST be in the document, because the injected script finds it with getElementById to
+    // publish its result. Without this line the script ran, found nothing, and every runScript step
+    // returned "no synchronous result" - a value could never come back. Found by running a runScript step
+    // against a real page; the unit tests did not cover the return path.
+    document.documentElement.appendChild(holder);
+    const script = document.createElement('script');
+    script.textContent = `(function(){
+      var out;
+      try { out = (function(){ ${code} })(); }
+      catch (e) { out = { __autoflowError: String(e && e.message || e) }; }
+      var el = document.getElementById(${JSON.stringify(token)});
+      if (el) el.setAttribute('data-result', JSON.stringify(out === undefined ? null : out));
+    })();`;
+    document.documentElement.appendChild(script);
+    script.remove();
+    const result = holder.getAttribute('data-result');
+    holder.remove();
+    if (result === null) {
+      resolve({ note: 'the script produced no synchronous result', hint: 'the code must `return` a value' });
+      return;
+    }
+    try {
+      const parsed = JSON.parse(result);
+      if (parsed && parsed.__autoflowError) resolve({ error: parsed.__autoflowError });
+      else resolve(parsed);
+    } catch {
+      resolve({ note: 'the script result was not JSON-serialisable' });
+    }
+  });
+}
+
+// ---------------------------------------------------------------------------------------------
+// element picker
+// ---------------------------------------------------------------------------------------------
+
+let picking = false;
+let pickerOverlay = null;
+let lastHover = null;
+
+function ensureOverlay() {
+  if (pickerOverlay) return pickerOverlay;
+  const el = document.createElement('div');
+  el.style.cssText = [
+    'position:fixed', 'pointer-events:none', 'z-index:2147483647',
+    'border:2px solid #2962ff', 'background:rgba(41,98,255,0.14)',
+    'border-radius:2px', 'transition:all 40ms linear', 'display:none',
+  ].join(';');
+  document.documentElement.appendChild(el);
+  pickerOverlay = el;
+  return el;
+}
+
+function positionOverlay(target) {
+  const overlay = ensureOverlay();
+  if (!target) {
+    overlay.style.display = 'none';
+    return;
+  }
+  const r = target.getBoundingClientRect();
+  overlay.style.display = 'block';
+  overlay.style.left = `${r.left}px`;
+  overlay.style.top = `${r.top}px`;
+  overlay.style.width = `${r.width}px`;
+  overlay.style.height = `${r.height}px`;
+}
+
+function isOurUi(node) {
+  return node === pickerOverlay || node?.closest?.('[data-autoflow-ui]') != null;
+}
+
+function onPickerMove(e) {
+  const target = e.target;
+  if (isOurUi(target)) return;
+  lastHover = target;
+  positionOverlay(target);
+}
+
+function onPickerClick(e) {
+  e.preventDefault();
+  e.stopPropagation();
+  const target = e.target;
+  if (isOurUi(target)) return;
+  stopPicking();
+  const info = describeElement(target);
+  const finder = buildFinder(target);
+  api.runtime.sendMessage({ type: 'element-picked', info, finder }).catch(() => {});
+}
+
+function onPickerKey(e) {
+  if (e.key === 'Escape') {
+    e.preventDefault();
+    stopPicking();
+    api.runtime.sendMessage({ type: 'element-pick-cancelled' }).catch(() => {});
+  }
+}
+
+function startPicking() {
+  if (picking) return;
+  picking = true;
+  document.addEventListener('mousemove', onPickerMove, true);
+  document.addEventListener('click', onPickerClick, true);
+  document.addEventListener('keydown', onPickerKey, true);
+  document.documentElement.style.cursor = 'crosshair';
+}
+
+function stopPicking() {
+  picking = false;
+  document.removeEventListener('mousemove', onPickerMove, true);
+  document.removeEventListener('click', onPickerClick, true);
+  document.removeEventListener('keydown', onPickerKey, true);
+  document.documentElement.style.cursor = '';
+  positionOverlay(null);
+}
+
+// ---------------------------------------------------------------------------------------------
+// message handling
+// ---------------------------------------------------------------------------------------------
+
+api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (!msg || typeof msg.type !== 'string') return false;
+
+  /**
+   * A message must come from this extension and from a page context that is allowed to drive the page.
+   *
+   * The only sender that legitimately drives this script is the service worker. Two things are checked,
+   * and each is deliberate:
+   *
+   *  1. the id must be ours. `externally_connectable` is not declared, so no page and no other extension
+   *     can send here at all; this is belt-and-braces for the case where that ever changes.
+   *  2. the sender must be an extension-scheme context. The service worker's own messages carry its
+   *     extension url, and a panel or options page carries its own - both are inside the extension. What
+   *     this rejects is a sender whose url is a web page, which would mean page code reached this
+   *     listener.
+   *
+   * An earlier version required the ABSENCE of `sender.tab`. Measured in a real browser, a panel message
+   * has a tab of its own, so that test was wrong in both directions: it rejected the panel and would have
+   * accepted a content script. The measured shapes are in tests/security.test.js; do not infer them.
+   */
+  if (sender?.id !== api.id) {
+    return false;
+  }
+  /**
+   * Refuse a sender that is a WEB PAGE.
+   *
+   * The check is written against the thing being guarded, not against a scheme literal. A previous version
+   * compared to `chrome-extension://` and therefore rejected the extension's own background page on
+   * Firefox, where the scheme is `moz-extension://` - so every page action failed there with "the page gave
+   * no answer". What matters is that the sender is not http(s); any extension scheme is ours.
+   */
+  const senderUrl = String(sender?.url ?? '');
+  if (senderUrl && /^(https?|ftp|data|blob|file):/i.test(senderUrl)) {
+    return false;
+  }
+  // and an unknown scheme is not ours either
+  if (senderUrl && !/^[a-z-]+-extension:\/\//i.test(senderUrl)) {
+    return false;
+  }
+
+  switch (msg.type) {
+    case 'ping':
+      // used by the worker to check the page is still there before each step
+      reply(sendResponse, { ok: true, url: location.href, readyState: document.readyState });
+      return true;
+
+    case 'perform-step':
+      performStep(msg.step)
+        .then((result) => reply(sendResponse, { ok: true, result }))
+        .catch((err) => reply(sendResponse, {
+          ok: false,
+          error: err?.message ?? String(err),
+          name: err?.name ?? 'Error',
+          detail: err?.detail ?? null,
+        }));
+      return true;
+
+    case 'observe':
+      try {
+        reply(sendResponse, { ok: true, observed: observe(msg.finder, msg.condition) });
+      } catch (e) {
+        reply(sendResponse, { ok: false, error: e.message });
+      }
+      return true;
+
+    case 'start-picking':
+      startPicking();
+      reply(sendResponse, { ok: true });
+      return true;
+
+    case 'stop-picking':
+      stopPicking();
+      reply(sendResponse, { ok: true });
+      return true;
+
+    case 'highlight': {
+      if (msg.finder) {
+        try {
+          const { elements } = findElement(document, msg.finder, { requireVisible: false });
+          if (elements) {
+            const r = elements.getBoundingClientRect();
+            const overlay = ensureOverlay();
+            overlay.style.display = 'block';
+            overlay.style.left = `${r.left}px`;
+            overlay.style.top = `${r.top}px`;
+            overlay.style.width = `${r.width}px`;
+            overlay.style.height = `${r.height}px`;
+            overlay.style.borderColor = '#00c853';
+            setTimeout(() => positionOverlay(null), msg.ms ?? 1500);
+          }
+        } catch { /* a highlight must never break anything */ }
+      }
+      reply(sendResponse, { ok: true });
+      return true;
+    }
+
+    default:
+      return false;
+  }
+});
+
+// A marker in the DOM, because the page cannot see this script's `chrome` object: content scripts run
+// in an isolated world. This is how the extension's presence is observable from outside, and it lets the
+// test suite verify injection rather than assume it.
+try {
+  document.documentElement.setAttribute('data-autoflow-content', api.runtime.getManifest().version);
+  if (window.top === window) document.documentElement.setAttribute('data-autoflow-top', '1');
+} catch { /* a sandboxed frame has no runtime; not fatal */ }
+
+// Tell the worker this frame is alive, so it can pick the right frame to act in.
+api.runtime.sendMessage({
+  type: 'content-ready',
+  url: location.href,
+  isTop: window.top === window,
+}).catch(() => {});

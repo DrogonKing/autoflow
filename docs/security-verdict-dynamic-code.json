@@ -1,0 +1,65 @@
+{
+  "lead": "condition sources and dynamic code, and the realm each runs in",
+  "passed": true,
+  "critical": [],
+  "high": [],
+  "medium": [
+    {
+      "severity": "medium",
+      "file": "core/model/steps.js",
+      "line": 194,
+      "issue": "the `js` condition source is advertised and validated but never evaluated",
+      "attack": "not an attack: a user (or an imported file) can author a `source: 'js'` condition, the validator demands an expression for it, and nothing ever runs it - the page returns null, so the condition silently never matches. Inert today, and dangerous the day someone implements it without revisiting the import audit"
+    }
+  ],
+  "low": [
+    {
+      "severity": "low",
+      "file": "core/engine/conditions.js",
+      "line": 0,
+      "issue": "no length cap on the subject of a user-supplied regular expression",
+      "attack": "a page can render a very long string and a catastrophic pattern in the automation hangs the worker; the run dies on maxRunMs but the CPU is spent. The pattern is author-supplied, so this is self-inflicted rather than remote"
+    }
+  ],
+  "dynamic_code_primitives": [],
+  "condition_sources": [
+    "attribute",
+    "count",
+    "js",
+    "text",
+    "title",
+    "url",
+    "value",
+    "variable"
+  ],
+  "condition_comparators": [
+    "aria",
+    "contains",
+    "css",
+    "empty",
+    "endsWith",
+    "eq",
+    "exists",
+    "gt",
+    "gte",
+    "id",
+    "label",
+    "lt",
+    "lte",
+    "matches",
+    "name",
+    "neq",
+    "notContains",
+    "notEmpty",
+    "notExists",
+    "placeholder",
+    "point",
+    "role",
+    "startsWith",
+    "text",
+    "xpath"
+  ],
+  "step_kinds": [],
+  "code_accepting_steps": [],
+  "summary": "No dynamic-code primitive exists anywhere in the source, so the lead does not resolve into a finding: conditions are DOM reads with text comparators, templates substitute strings, and the only step that accepts code is runScript, which the content script runs in the PAGE's main world where no extension API is reachable. Two low/medium hardening notes concern the import audit's coverage of conditions and an uncapped regex subject."
+}

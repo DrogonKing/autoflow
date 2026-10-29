@@ -1,0 +1,13 @@
+# Build output: produced by `npm run build`, and CI regenerates it. Committing it would mean two sources of
+# truth for the manifest.
+dist/
+dist-firefox/
+
+# Packaging output: the zips are release artifacts, attached to a tag rather than stored in the tree.
+release/
+
+node_modules/
+
+# Playwright downloads its browsers here when it installs; nothing in the repo needs them.
+.playwright/
+test-results/

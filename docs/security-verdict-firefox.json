@@ -1,0 +1,110 @@
+{
+  "surface": "firefox",
+  "passed": true,
+  "critical": [],
+  "high": [],
+  "medium": [],
+  "low": [],
+  "manifest_diff": [
+    {
+      "key": "background",
+      "chromium": {
+        "service_worker": "background.js",
+        "type": "module"
+      },
+      "firefox": {
+        "scripts": [
+          "background.js"
+        ],
+        "type": "module"
+      }
+    },
+    {
+      "key": "browser_specific_settings",
+      "chromium": "<absent>",
+      "firefox": {
+        "gecko": {
+          "id": "autoflow@drogon.site",
+          "strict_min_version": "140.0",
+          "data_collection_permissions": {
+            "required": [
+              "none"
+            ],
+            "optional": []
+          }
+        },
+        "gecko_android": {
+          "strict_min_version": "142.0"
+        }
+      }
+    },
+    {
+      "key": "minimum_chrome_version",
+      "chromium": "116",
+      "firefox": "<absent>"
+    },
+    {
+      "key": "permissions",
+      "chromium": [
+        "storage",
+        "alarms",
+        "tabs",
+        "scripting",
+        "notifications",
+        "sidePanel",
+        "downloads"
+      ],
+      "firefox": [
+        "storage",
+        "alarms",
+        "tabs",
+        "scripting",
+        "notifications",
+        "downloads"
+      ]
+    },
+    {
+      "key": "side_panel",
+      "chromium": {
+        "default_path": "panel.html"
+      },
+      "firefox": "<absent>"
+    },
+    {
+      "key": "sidebar_action",
+      "chromium": "<absent>",
+      "firefox": {
+        "default_title": "AutoFlow",
+        "default_icon": {
+          "16": "icons/16.png",
+          "32": "icons/32.png",
+          "48": "icons/48.png",
+          "128": "icons/128.png"
+        },
+        "default_panel": "panel.html",
+        "open_at_install": false
+      }
+    }
+  ],
+  "notes": [
+    "background: only `scripts` on Firefox, only `service_worker` on Chromium - each manifest states the model it actually runs",
+    "permissions: sidePanel removed on Firefox, sidebar_action added",
+    "host_permissions identical on both: ['<all_urls>']",
+    "permissions: Firefox declares ['alarms', 'downloads', 'notifications', 'scripting', 'storage', 'tabs'] - the same set the code uses, minus sidePanel",
+    "data_collection_permissions declares `none` - verified against the bundle in section C",
+    "gecko.id = autoflow@drogon.site (a stable id, so an update lands on the same install rather than a second copy)",
+    "strict_min_version 140.0 - the oldest version on which this manifest means what it says",
+    "the remaining chrome-extension:// occurrences are comments or URL construction, not identity guards",
+    "content guard rejects http/https/ftp/data/blob/file senders and accepts any *-extension:// scheme - written against the property, not against one browser's spelling",
+    "classifySender compares against runtime.getURL(''), which carries the right scheme on each browser, so the same code classifies correctly on both",
+    "zero direct chrome.* calls in the Firefox bundle - every API goes through the platform layer",
+    "ZERO network primitives in every Firefox bundle file (fetch/XHR/WebSocket/sendBeacon/EventSource/importScripts/geolocation/clipboard-read), comments stripped - the `none` declaration is true",
+    "runScript runs in the page's main world, where `fetch` is available to the script the user wrote. The EXTENSION makes no request; a script step could. That is why auditImportedAutomation strips script steps from an imported file by default, and it is the honest limit of the `none` declaration",
+    "sidePanel is referenced at background.js lines [1267, 1292] but is UNREACHABLE on Firefox: the platform layer's side surface branches on isFirefox() and returns from every path inside that branch before reaching it. A grep for the identifier reports a false positive here; the guard is what matters, and the real-browser test confirms which API Firefox actually exposes",
+    "sidebar_action is declared with a default_panel, so Firefox has a side surface to open",
+    "keyboard commands identical on both builds: {'open-panel': 'Alt+Shift+F', 'panic-stop': 'Alt+Shift+X', 'pick-element': 'Alt+Shift+P', 'start-stop': 'Alt+Shift+S'}",
+    "the panic-stop shortcut (Alt+Shift+X) is declared on Firefox too, so the emergency control is not Chromium-only",
+    "web_accessible_resources exposes only ['icons/*'] - no script, no page, no CSS. A page cannot read the panel or learn the extension's UUID from a fetchable path"
+  ],
+  "summary": "The Firefox build shares the source, so the privilege boundary, the import audit and the absence of markup sinks carry over unchanged. What was audited here is what does NOT carry over: the manifest diff, the moz-extension scheme, the callback-only chrome.* namespace, and the formal `none` data declaration. No critical or high finding."
+}

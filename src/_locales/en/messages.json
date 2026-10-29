@@ -1,0 +1,10 @@
+{
+  "extName": {
+    "message": "AutoFlow — Click, Fill, Record & Schedule",
+    "description": "The extension name shown in the browser."
+  },
+  "extDescription": {
+    "message": "Auto-click, fill and record browser automations. Schedule them by date, interval or cron. Loop, branch and drive them from CSV.",
+    "description": "The extension description shown in the store."
+  }
+}

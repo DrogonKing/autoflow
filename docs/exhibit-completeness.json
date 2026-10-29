@@ -1,0 +1,38 @@
+{
+  "all_findings_refuted_in_packet": true,
+  "findings": [
+    {
+      "n": 1,
+      "claimed": "HIGH: innerHTML sink in the shipped UI",
+      "refuted_in_packet": true
+    },
+    {
+      "n": 2,
+      "claimed": "critical: a condition accepts a code source ['js']",
+      "refuted_in_packet": true
+    },
+    {
+      "n": 3,
+      "claimed": "critical: the template engine compiles its expressions (eval)",
+      "refuted_in_packet": true
+    },
+    {
+      "n": 4,
+      "claimed": "HIGH: the Firefox bundle calls sidePanel, which does not exist on Firefox",
+      "refuted_in_packet": true
+    },
+    {
+      "n": 5,
+      "claimed": "medium x2: importAll never consults allowScripts; the audit is advisory, nothing refuses an import",
+      "refuted_in_packet": true
+    }
+  ],
+  "reviewers_dispatched": 4,
+  "reviewers_returning_a_verdict": 1,
+  "reviewer_failures": [
+    "deleg_f7b13f5d: 16 calls, 15m16s, timeout (150s cap) while composing the verdict",
+    "deleg_83797be5:  9 calls, 24m45s, timeout (150s cap) while composing the verdict",
+    "deleg_e7d3e910:  2 calls,  4m42s, timeout (90s cap) while composing the verdict"
+  ],
+  "note": "Falsification is done mechanically here rather than by a fifth dispatch: the provider is what is failing, so another reviewer would add a data point about the provider, not about the code. The claim being tested is 'a reviewer can no longer raise finding N', and that is answered by whether the refuting code is in the exhibit at a verifiable line."
+}
