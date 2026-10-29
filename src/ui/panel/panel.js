@@ -160,7 +160,20 @@ async function refreshClockSkew(force = false) {
   // which server to ask: the automation's own target site, so the comparison is with the clock that matters
   const target = state.editing?.urls?.[0];
   const url = typeof target === 'string' && /^https?:/i.test(target) ? target : null;
-  if (!url) { state.clockSkew = null; return null; }
+  if (!url) {
+    /**
+     * SAY WHY, instead of doing nothing.
+     *
+     * The measurement needs an http(s) address because the offset is read from a server's `Date` header, and a
+     * `file://` page has no server. That check existed, but it returned silently - so on the test field the user
+     * actually works with, the one control meant to catch a clock error did nothing at all and looked broken. It
+     * matters: an 8-second clock error was found on this machine by other means.
+     */
+    state.clockSkew = null;
+    state.clockSkewError = t('clock.needsHttp');
+    return null;
+  }
+  state.clockSkewError = null;
   const res = await send({ type: 'measure-clock-offset', url }).catch(() => null);
   if (!res?.ok) { state.clockSkew = null; return null; }
   await send({ type: 'save-settings', patch: { lastClockOffsetMs: res.offsetMs } });
@@ -367,6 +380,10 @@ function scheduleEditor(onChange) {
     // A measurement and its consequences, not an automatic correction. The user asked for the offset to be
     // REPORTED and, separately, for an option to apply it - so it is a warning plus a switch, never a silent
     // adjustment. It appears only for a precise schedule, because only then can whole seconds matter.
+    // why the measurement could not be taken, when it could not: saying nothing looked like a broken button
+    if (state.clockSkewError) {
+      wrap.append(el('div', { class: 'hint warn', text: state.clockSkewError }));
+    }
     if (typeof s.second === 'number' && state.clockSkew && state.clockSkew.warn) {
       wrap.append(el('div', { class: 'skew-warn' },
         el('strong', { text: t('skew.title') }),
