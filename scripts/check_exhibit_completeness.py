@@ -21,7 +21,11 @@ import json
 import pathlib
 import re
 
-ROOT = pathlib.Path("/root/autoflow")
+# Derived from this file's location. This one matters most: a hardcoded root would make the check read a
+# packet from a DIFFERENT tree than the one under test, and pass on code it never looked at.
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+if not (ROOT / "src").is_dir():
+    raise SystemExit(f"no src/ next to {ROOT} - the script is not inside a repository checkout")
 PACKET = ROOT / "docs" / "review-packet.md"
 packet = PACKET.read_text()
 

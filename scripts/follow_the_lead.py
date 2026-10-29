@@ -22,7 +22,11 @@ import json
 import pathlib
 import re
 
-SRC = pathlib.Path("/root/autoflow/src")
+# Derived from this file's location, so the audit works from any checkout path.
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+SRC = ROOT / "src"
+if not SRC.is_dir():
+    raise SystemExit(f"no src/ next to {ROOT} - the script is not inside a repository checkout")
 
 # which realm each file runs in - this is what turns "a sink" into "a privilege level"
 REALM = {

@@ -22,8 +22,14 @@ The packet is deliberately adversarial in what it includes:
 import pathlib
 import re
 
-SRC = pathlib.Path("/root/autoflow/src")
-OUT = pathlib.Path("/root/autoflow/docs/review-packet.md")
+# The repository root, derived from THIS file's location so the script works from any checkout path.
+# `__file__` is scripts/<name>.py, so the parent of its parent is the tree.
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+SRC = ROOT / "src"
+if not SRC.is_dir():
+    raise SystemExit(f"no src/ next to {ROOT} - the script is not inside a repository checkout")
+OUT = ROOT / "docs" / "review-packet.md"
+OUT.parent.mkdir(parents=True, exist_ok=True)
 
 packet = []
 notes = []

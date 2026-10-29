@@ -24,7 +24,10 @@ import json
 import pathlib
 import re
 
-ROOT = pathlib.Path("/root/autoflow")
+# Derived from this file's location, so the audit works from any checkout path.
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+if not (ROOT / "src").is_dir():
+    raise SystemExit(f"no src/ next to {ROOT} - the script is not inside a repository checkout")
 CHROME = ROOT / "dist"
 FF = ROOT / "dist-firefox"
 

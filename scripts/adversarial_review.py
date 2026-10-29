@@ -20,7 +20,12 @@ import json
 import pathlib
 import re
 
-SRC = pathlib.Path("/root/autoflow/src")
+# Derived from this file's location, so the audit works from any checkout path rather than only from the
+# one directory it was written in.
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+SRC = ROOT / "src"
+if not SRC.is_dir():
+    raise SystemExit(f"no src/ next to {ROOT} - the script is not inside a repository checkout")
 findings = []          # (severity, file, line, issue, attack)
 verified_absent = []   # attacks constructed and not possible
 
