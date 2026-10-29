@@ -31,23 +31,30 @@ export const ALL_DEFAULTS = {
 };
 
 /**
- * Which match to click next.
+ * Which match to click next, decided by IDENTITY rather than by position.
  *
- * `taken` is how many have already been clicked. Returns the index into the CURRENT list of candidates, or
- * null when there is nothing left to do. It takes a count rather than an array so it is trivially testable and
- * so the caller cannot accidentally hold a stale reference.
+ * THIS REPLACES A POSITION-BASED VERSION THAT WAS WRONG, and the failure is worth recording. The first
+ * implementation tracked a count and always took the last of what remained. That works while the list shrinks -
+ * which the original test fixture did, because its buttons removed themselves when pressed. On a page whose
+ * matches STAY PUT it takes "the last" over and over: the simulation page measured it clicking the same button
+ * 159 times until the run timed out. A real order list does not remove buttons.
  *
- * `reverse` is the default because a button that sends an order usually moves the page or shifts the list: if
- * the list is being consumed from the top, taking from the bottom means the remaining indices do not move.
- * That is the difference between clicking all ten and clicking five of them twice.
+ * So the caller keeps a set of the elements already clicked and this returns the next one that is not in it.
+ * `isVisited` is a predicate rather than the set itself so the function stays pure and a test can pass a plain
+ * Set or an array.
+ *
+ * The ORDER argument still matters, and `reverse` is still the default: taking from the end means a list that IS
+ * being consumed from the top does not shift the positions still to come.
  */
-export function nextIndex({ taken, remaining, order = 'reverse', limit = 0 }) {
-  if (!Number.isFinite(remaining) || remaining <= 0) return null;
+export function pickNext({ candidates, isVisited, order = 'reverse', taken = 0, limit = 0 } = {}) {
+  if (!Array.isArray(candidates) || candidates.length === 0) return null;
   if (limit > 0 && taken >= limit) return null;
-  if (order === 'forward') return 0;                    // always the first of what is left
-  if (order === 'as-is') return taken < remaining ? taken : null;
-  // reverse: the LAST of what is left, so consuming from the end cannot shift the indices still to come
-  return remaining - 1;
+  const unvisited = candidates.filter((el) => !isVisited(el));
+  if (unvisited.length === 0) return null;        // every match has been clicked: done, not "keep going"
+  if (order === 'forward') return unvisited[0];
+  if (order === 'as-is') return unvisited[0];
+  // reverse: the LAST unvisited one, so consuming from the end cannot shift what is left
+  return unvisited[unvisited.length - 1];
 }
 
 /**

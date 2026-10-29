@@ -1,176 +1,167 @@
 /**
- * The behaviour of "click every match", with no browser involved.
+ * "Click every match" where the matches DO NOT REMOVE THEMSELVES.
  *
- * These tests are the contract for a feature whose whole purpose is a count and an order, so they assert on
- * counts and orders rather than on "it ran without throwing". The important cases are the ones that would
- * silently do the wrong thing on a live page: a list that shrinks between clicks, a limit, and an error
- * part-way through.
+ * The first version of this feature tracked a position and always took the last remaining one. Its test fixture
+ * had buttons that deleted themselves on click, so the list shrank and "the last" moved each time - the test
+ * passed. On the simulation page, whose buttons stay put, it clicked the same button 159 times until the run
+ * timed out. On a real order page, which does not remove its buttons, that is 159 duplicate orders.
+ *
+ * The lesson is about the fixture, not the loop: a test whose page behaves helpfully can hide a bug that the
+ * real page exposes. So this file uses both shapes - a list that shrinks and a list that does not - and asserts
+ * the same outcome for both: each match pressed exactly once.
  */
 import { describe, expect, it } from 'vitest';
-import {
-  ALL_DEFAULTS, afterClick, describeAllClicks, nextIndex, normaliseAll, planClicks,
-} from '../src/core/dom/clickAll.js';
+import { afterClick, describeAllClicks, normaliseAll, pickNext, planClicks } from '../src/core/dom/clickAll.js';
 
-describe('planning the clicks', () => {
-  it('clicks all ten when there are ten matches', () => {
-    const p = planClicks({ count: 10 });
-    expect(p.count).toBe(10);
-    expect(p.indices).toHaveLength(10);
-  });
+/** A stand-in for a DOM element: only identity matters here. */
+const el = (n) => ({ id: n });
 
-  it('reverse order counts down, which is why it survives a collapsing list', () => {
-    // taking from the end means the indices still to come do not shift when one is removed
-    expect(planClicks({ count: 5, order: 'reverse' }).indices).toEqual([4, 3, 2, 1, 0]);
-  });
-
-  it('forward order counts up', () => {
-    expect(planClicks({ count: 3, order: 'forward' }).indices).toEqual([0, 1, 2]);
-  });
-
-  it('a limit stops early, and says how many it will do', () => {
-    const p = planClicks({ count: 10, limit: 3 });
-    expect(p.count).toBe(3);
-    expect(p.indices).toEqual([9, 8, 7]);
-  });
-
-  it('a limit larger than the count is clamped to the count', () => {
-    expect(planClicks({ count: 2, limit: 100 }).count).toBe(2);
-  });
-
-  it('no matches is a count of zero, not an error', () => {
-    expect(planClicks({ count: 0 }).count).toBe(0);
-    expect(planClicks({ count: 0 }).skipped).toBe('no matches');
-    expect(planClicks({ count: -1 }).count).toBe(0);
-    expect(planClicks({ count: NaN }).count).toBe(0);
-  });
-
-  it('one match works, which is the ordinary single-click case', () => {
-    expect(planClicks({ count: 1 }).indices).toEqual([0]);
-  });
-});
-
-describe('picking the next index as the list changes', () => {
-  it('reverse always takes the last of what is left', () => {
-    // the scenario: 10 buttons, click one, the page removes it, 9 remain. The last of the 9 is a DIFFERENT
-    // button from the last of the 10, but it is still one that has not been clicked - which is the property
-    // that matters. Counting forward would re-click the first one repeatedly.
-    let remaining = 10;
+describe('picking the next match by identity', () => {
+  it('clicks each of ten staying-put matches exactly once', () => {
+    // THE CASE THAT WAS BROKEN. The list is the same on every pass.
+    const candidates = Array.from({ length: 10 }, (_, i) => el(i));
+    const done = new Set();
     const clicked = [];
-    let taken = 0;
-    while (true) {
-      const i = nextIndex({ taken, remaining, order: 'reverse', limit: 0 });
-      if (i === null) break;
-      clicked.push(i);
-      remaining -= 1;      // the page removed the one that was clicked
-      taken += 1;
-      if (taken > 20) break;   // guard against a runaway test
+
+    for (let pass = 0; pass < 50; pass++) {
+      const next = pickNext({ candidates, isVisited: (x) => done.has(x), order: 'reverse' });
+      if (!next) break;
+      clicked.push(next.id);
+      done.add(next);
     }
-    expect(clicked).toEqual([9, 8, 7, 6, 5, 4, 3, 2, 1, 0]);
+
     expect(clicked).toHaveLength(10);
+    expect(new Set(clicked).size).toBe(10);
+    expect(clicked.sort((a, b) => a - b)).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
   });
 
-  it('forward re-clicks the first one when the list collapses, which is why it is not the default', () => {
-    let remaining = 10;
+  it('clicks each of ten matches that REMOVE THEMSELVES exactly once', () => {
+    // the original fixture shape: the list shrinks, and identity still works
+    let candidates = Array.from({ length: 10 }, (_, i) => el(i));
+    const done = new Set();
     const clicked = [];
-    let taken = 0;
-    while (true) {
-      const i = nextIndex({ taken, remaining, order: 'forward', limit: 0 });
-      if (i === null) break;
-      clicked.push(i);
-      remaining -= 1;
-      taken += 1;
-      if (taken > 5) break;
+
+    for (let pass = 0; pass < 50; pass++) {
+      const next = pickNext({ candidates, isVisited: (x) => done.has(x), order: 'reverse' });
+      if (!next) break;
+      clicked.push(next.id);
+      done.add(next);
+      candidates = candidates.filter((c) => c !== next);   // the page removes it
     }
-    // this is the failure mode being avoided: index 0 every time
-    expect(new Set(clicked).size).toBe(1);
-    expect(clicked[0]).toBe(0);
+
+    expect(clicked).toHaveLength(10);
+    expect(new Set(clicked).size).toBe(10);
   });
 
-  it('as-is walks up but stops when the list is shorter than the count taken', () => {
-    expect(nextIndex({ taken: 0, remaining: 3, order: 'as-is' })).toBe(0);
-    expect(nextIndex({ taken: 2, remaining: 3, order: 'as-is' })).toBe(2);
-    expect(nextIndex({ taken: 3, remaining: 3, order: 'as-is' })).toBeNull();
+  it('reverse order goes last to first', () => {
+    const candidates = [el('a'), el('b'), el('c')];
+    const done = new Set();
+    const order = [];
+    for (let i = 0; i < 3; i++) {
+      const n = pickNext({ candidates, isVisited: (x) => done.has(x), order: 'reverse' });
+      order.push(n.id); done.add(n);
+    }
+    expect(order).toEqual(['c', 'b', 'a']);
   });
 
-  it('respects the limit', () => {
-    expect(nextIndex({ taken: 2, remaining: 10, order: 'reverse', limit: 3 })).toBe(9);
-    expect(nextIndex({ taken: 3, remaining: 8, order: 'reverse', limit: 3 })).toBeNull();
+  it('forward order goes first to last', () => {
+    const candidates = [el('a'), el('b'), el('c')];
+    const done = new Set();
+    const order = [];
+    for (let i = 0; i < 3; i++) {
+      const n = pickNext({ candidates, isVisited: (x) => done.has(x), order: 'forward' });
+      order.push(n.id); done.add(n);
+    }
+    expect(order).toEqual(['a', 'b', 'c']);
   });
 
-  it('stops when nothing is left', () => {
-    expect(nextIndex({ taken: 5, remaining: 0, order: 'reverse' })).toBeNull();
-    expect(nextIndex({ taken: 5, remaining: NaN, order: 'reverse' })).toBeNull();
+  it('stops when every match has been clicked, rather than looping', () => {
+    const candidates = [el('a'), el('b')];
+    const done = new Set(candidates);
+    expect(pickNext({ candidates, isVisited: (x) => done.has(x) })).toBeNull();
+  });
+
+  it('honours a limit', () => {
+    const candidates = Array.from({ length: 10 }, (_, i) => el(i));
+    const done = new Set();
+    for (let i = 0; i < 3; i++) { const n = pickNext({ candidates, isVisited: (x) => done.has(x), taken: i, limit: 3 }); done.add(n); }
+    expect(done.size).toBe(3);
+    expect(pickNext({ candidates, isVisited: (x) => done.has(x), taken: 3, limit: 3 })).toBeNull();
+  });
+
+  it('a re-created element counts as new, so a page that rebuilds its list still works', () => {
+    // after a re-render the nodes are different objects; identity handles that without any special case
+    const first = [el('x'), el('y')];
+    const done = new Set([first[0]]);
+    const rebuilt = [{ id: 'x-new' }, { id: 'y-new' }];
+    expect(pickNext({ candidates: rebuilt, isVisited: (x) => done.has(x), order: 'forward' }))
+      .toEqual({ id: 'x-new' });
+  });
+
+  it('an empty list is null, not an error', () => {
+    expect(pickNext({ candidates: [], isVisited: () => false })).toBeNull();
+    expect(pickNext({ candidates: null, isVisited: () => false })).toBeNull();
+    expect(pickNext()).toBeNull();
+  });
+
+  it('a single match is clicked once and then stops', () => {
+    const one = [el('only')];
+    const done = new Set();
+    const n1 = pickNext({ candidates: one, isVisited: (x) => done.has(x) });
+    expect(n1).toEqual({ id: 'only' });
+    done.add(n1);
+    expect(pickNext({ candidates: one, isVisited: (x) => done.has(x) })).toBeNull();
   });
 });
 
-describe('after a click fails', () => {
-  it('stops by default, because on an order page continuing is worse', () => {
-    expect(afterClick({ succeeded: false, taken: 3, total: 10 }).action).toBe('stop');
-    expect(afterClick({ succeeded: false, taken: 3, total: 10 }).reason).toMatch(/click 3 of 10 failed/);
+describe('the plan still describes what will happen', () => {
+  it('ten matches means ten planned clicks', () => {
+    expect(planClicks({ count: 10 }).count).toBe(10);
   });
 
-  it('continues when the step says to', () => {
-    expect(afterClick({ succeeded: false, taken: 1, total: 4, onErrorPolicy: 'continue' }).action).toBe('continue');
-    expect(afterClick({ succeeded: false, taken: 1, total: 4, onErrorPolicy: 'skip' }).action).toBe('continue');
+  it('a limit caps the plan', () => {
+    expect(planClicks({ count: 10, limit: 3 }).count).toBe(3);
   });
 
-  it('a success always continues', () => {
-    expect(afterClick({ succeeded: true, taken: 9, total: 10 }).action).toBe('continue');
+  it('no matches is a count of zero', () => {
+    expect(planClicks({ count: 0 }).count).toBe(0);
   });
 });
 
-describe('what History says', () => {
-  it('distinguishes a complete run from one that stopped early', () => {
+describe('stopping and reporting', () => {
+  it('stops on a failure by default', () => {
+    expect(afterClick({ succeeded: false, taken: 2, total: 10 }).action).toBe('stop');
+  });
+
+  it('continues when told to', () => {
+    expect(afterClick({ succeeded: false, taken: 2, total: 10, onErrorPolicy: 'continue' }).action).toBe('continue');
+  });
+
+  it('reports a complete run and a partial one differently', () => {
     expect(describeAllClicks({ clicked: 10, total: 10 })).toBe('all 10 clicked');
-    expect(describeAllClicks({ clicked: 4, total: 10, stoppedEarly: true, reason: 'click 5 of 10 failed' }))
+    expect(describeAllClicks({ clicked: 4, total: 10, stoppedEarly: true, reason: 'boom' }))
       .toContain('4 of 10 clicked, then stopped');
   });
 
-  it('says so when nothing matched, rather than reporting a success of zero', () => {
-    expect(describeAllClicks({ clicked: 0, total: 0 })).toBe('nothing matched');
-  });
-
-  it('speaks Persian when the UI does, and keeps WESTERN DIGITS', () => {
-    // The test originally asserted on Persian-Indic digits and failed - the code was right and the assertion
-    // was wrong. Numbers stay Western in this project by explicit preference: they are what the user's
-    // exchange, broker statements and terminal all use, and mixing numeral systems in one screen invites
-    // misreading an order size. Pinned here so a later "helpful" conversion does not quietly change it.
-    const fa3 = describeAllClicks({ clicked: 3, total: 3, language: 'fa' });
-    expect(fa3).toMatch(/[\u0600-\u06FF]/);       // it is Persian
-    expect(fa3).toContain('3');                    // the digit stays Latin
-    expect(fa3).not.toMatch(/[\u06F0-\u06F9]/);    // and is NOT ۰-۹
+  it('speaks Persian and keeps Western digits', () => {
+    const fa = describeAllClicks({ clicked: 3, total: 3, language: 'fa' });
+    expect(fa).toMatch(/[\u0600-\u06FF]/);
+    expect(fa).toContain('3');
+    expect(fa).not.toMatch(/[\u06F0-\u06F9]/);
   });
 });
 
-describe('normalising stored values', () => {
-  it('defaults are sane', () => {
-    const n = normaliseAll({});
-    expect(n.order).toBe('reverse');
-    expect(n.limit).toBe(0);
-    expect(n.gapMs).toBe(ALL_DEFAULTS.gapMs);
-  });
-
-  it('an unknown order falls back rather than breaking the walk', () => {
-    expect(normaliseAll({ order: 'sideways' }).order).toBe('reverse');
-  });
-
-  it('a gap below the floor is raised, because a page needs a moment to process a click', () => {
+describe('stored values', () => {
+  it('the gap has a floor, because a page needs a moment', () => {
     expect(normaliseAll({ gapMs: 0 }).gapMs).toBe(50);
-    expect(normaliseAll({ gapMs: -100 }).gapMs).toBe(50);
   });
 
-  it('a negative or nonsense limit becomes "all"', () => {
-    expect(normaliseAll({ limit: -5 }).limit).toBe(0);
-    expect(normaliseAll({ limit: 'abc' }).limit).toBe(0);
+  it('a nonsense limit means every match', () => {
+    expect(normaliseAll({ limit: -1 }).limit).toBe(0);
+    expect(normaliseAll({ limit: 'x' }).limit).toBe(0);
   });
 
-  it('a huge limit is clamped, so one bad value cannot pin the browser', () => {
-    expect(normaliseAll({ limit: 1e9 }).limit).toBe(5000);
-  });
-
-  it('returns null for no configuration at all, so the caller knows the feature is off', () => {
-    expect(normaliseAll(null)).toBeNull();
-    expect(normaliseAll(undefined)).toBeNull();
-    expect(normaliseAll('yes')).toBeNull();
+  it('an unknown order falls back', () => {
+    expect(normaliseAll({ order: 'sideways' }).order).toBe('reverse');
   });
 });

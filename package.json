@@ -1,6 +1,6 @@
 {
   "name": "autoflow",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "private": true,
   "type": "module",
   "description": "AutoFlow \u2014 auto-click, fill, record and schedule browser automations.",
@@ -27,7 +27,9 @@
     "test:guard": "node scripts/verify-build-guard.mjs",
     "audit:security": "python3 scripts/adversarial_review.py",
     "audit:firefox": "python3 scripts/firefox_security_audit.py",
-    "package": "node scripts/package.mjs"
+    "package": "node scripts/package.mjs",
+    "test:sim": "node scripts/sim-test.mjs",
+    "sim": "bash tools/sim/serve.sh"
   },
   "devDependencies": {
     "esbuild": "^0.28.2",

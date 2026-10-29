@@ -58,6 +58,44 @@ export function isVisible(el) {
  * overlay. The last check is what stops an automation clicking into a cookie banner.
  */
 /**
+ * Every element a step could act on, filtered the same way `findElement` filters.
+ *
+ * Needed by "click every match": that loop must be able to see the WHOLE candidate list, because the decision of
+ * which one to take next is about identity, not position. `findElement` returns one element by index, which is
+ * enough to click one thing and not enough to click ten without repeating.
+ *
+ * The filters are applied exactly as in `findElement` - visibility, actionability, and the clickable preference -
+ * so a list produced here matches what a single click would have chosen from.
+ */
+export function findAll(root, finder, opts = {}) {
+  const requireVisible = opts.requireVisible !== false;
+  const requireActionable = opts.requireActionable === true;
+
+  const { elements: primary, how } = resolveStrategy(root, finder);
+  let pool = primary;
+  if (pool.length === 0 && Array.isArray(finder.chain) && finder.chain.length) {
+    for (const sel of finder.chain) {
+      try {
+        const els = queryAll(root, sel);
+        if (els.length) { pool = els; break; }
+      } catch { /* a chain entry that no longer parses is skipped, as in findElement */ }
+    }
+  }
+  let candidates = pool;
+  if (requireVisible) {
+    const visible = candidates.filter(isVisible);
+    if (visible.length) candidates = visible;
+  }
+  if (requireActionable) {
+    const actionable = candidates.filter(isActionable);
+    if (actionable.length) candidates = actionable;
+    const clickable = candidates.filter(isClickableTarget);
+    if (clickable.length) candidates = clickable;
+  }
+  return { elements: candidates, how, total: pool.length };
+}
+
+/**
  * Is this the kind of element a person would click, or just an element with the right text?
  *
  * WHY THIS EXISTS. A Persian trading terminal shows a column header `خرید` above the order book and an action

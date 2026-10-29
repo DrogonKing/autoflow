@@ -11,8 +11,8 @@
 
 import { api } from '../platform/api.js';
 import { safeSend } from '../platform/serialise.js';
-import { findElement, describeElement, buildFinder, isVisible } from '../core/dom/finder.js';
-import { afterClick, describeAllClicks, nextIndex, normaliseAll } from '../core/dom/clickAll.js';
+import { findElement, findAll, describeElement, buildFinder, isVisible } from '../core/dom/finder.js';
+import { afterClick, describeAllClicks, normaliseAll, pickNext } from '../core/dom/clickAll.js';
 import {
   realClick, fillElement, selectOption, pressKeys, scrollAction, ActionError,
 } from '../core/dom/actions.js';
@@ -57,35 +57,50 @@ async function clickEveryMatch(step, all) {
   let stoppedEarly = false;
   let reason = '';
 
-  for (let taken = 0; taken < CEILING; taken++) {
-    const found = findElement(document, step.finder, {
-      requireVisible: true,
-      requireActionable: true,
-    });
-    // how many matched on THIS pass, not at the start
-    const remaining = found.candidates ?? (found.element ? 1 : 0);
-    const idx = nextIndex({ taken, remaining, order: all.order, limit: all.limit });
-    if (idx === null) break;
+  /**
+   * The elements already clicked, BY IDENTITY.
+   *
+   * A WeakSet, not a set of indices. An index is only meaningful while the list is being consumed: on a page
+   * whose matches stay put, "the last one" is the same element every time. That is not hypothetical - this
+   * loop, in its first version, clicked one button 159 times on the simulation page until the run timed out.
+   * Identity is the thing that is actually true: has this element been pressed.
+   *
+   * Weak so a node the page discards is not kept alive, and so an element the page re-creates counts as new.
+   */
+  const done = new WeakSet();
+  let total = 0;
 
-    // pick the element at that position, freshly
-    const again = findElement(document, { ...step.finder, index: idx }, {
-      requireVisible: true,
-      requireActionable: true,
+  for (let pass = 0; pass < CEILING; pass++) {
+    // the whole candidate list on this pass, filtered the same way a single click would be
+    const found = findAll(document, step.finder, { requireVisible: true, requireActionable: true });
+    total = found.elements.length;
+    const el = pickNext({
+      candidates: found.elements,
+      isVisited: (x) => done.has(x),
+      order: all.order,
+      taken: clicked,
+      limit: all.limit,
     });
-    if (!again.element) { stoppedEarly = true; reason = `match ${idx} disappeared`; break; }
+    if (!el) break;                    // nothing left unvisited: finished, not stuck
 
     let ok = true;
     try {
-      realClick(again.element, { button: step.button, clickCount: step.clickCount ?? 1 });
+      realClick(el, { button: step.button, clickCount: step.clickCount ?? 1 });
+      done.add(el);
     } catch (e) {
       ok = false;
       reason = String(e?.message ?? e);
     }
+
     const decision = afterClick({
-      succeeded: ok, taken: taken + 1, total: remaining, onErrorPolicy: step.onError,
+      succeeded: ok, taken: clicked + 1, total, onErrorPolicy: step.onError,
     });
     if (ok) clicked += 1;
-    if (decision.action === 'stop') { stoppedEarly = true; reason = decision.reason ?? reason; break; }
+    if (decision.action === 'stop') {
+      stoppedEarly = true;
+      reason = decision.reason ?? reason;
+      break;
+    }
 
     // give the page a moment to process the click before looking again
     if (all.gapMs > 0 && Date.now() - started < 120_000) {
@@ -94,12 +109,13 @@ async function clickEveryMatch(step, all) {
   }
 
   return {
-    how: `${clicked} of ${all.limit > 0 ? Math.min(all.limit, clicked) : clicked} clicked (${all.order})`,
+    how: `${clicked} of ${total} clicked (${all.order})`,
     clicked,
+    total,
     stoppedEarly,
     summary: describeAllClicks({
       clicked,
-      total: clicked + (stoppedEarly ? 1 : 0),
+      total: Math.max(total, clicked),
       stoppedEarly,
       reason,
       language: globalThis.document?.documentElement?.getAttribute('data-autoflow-lang'),

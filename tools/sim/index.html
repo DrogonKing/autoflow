@@ -1,0 +1,273 @@
+<!doctype html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>میدان تست اتوفلو</title>
+<style>
+  /* Dark, high contrast, and deliberately large targets: this page is aimed with a mouse by a person and by a
+     picker overlay, so small elements would make the test about the page rather than about the clicker. */
+  :root {
+    --bg: #0d1117;
+    --panel: #161b22;
+    --line: #30363d;
+    --text: #e6edf3;
+    --dim: #8b949e;
+    --hit: #2ea043;
+    --hot: #f0883e;
+    --blue: #388bfd;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 18px;
+    background: var(--bg); color: var(--text);
+    font-family: "Vazirmatn", "Segoe UI", Tahoma, system-ui, sans-serif;
+    /* digits must not be reordered or shaped: a time of 13:52:10:02 is read left to right even in RTL */
+    font-variant-numeric: tabular-nums;
+  }
+  h1 { font-size: 17px; margin: 0 0 4px; font-weight: 600; }
+  .sub { color: var(--dim); font-size: 12px; margin-bottom: 14px; }
+
+  /* the big clock: the reference the user compares every logged time against */
+  .clock {
+    display: flex; align-items: baseline; gap: 10px;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+    padding: 12px 16px; margin-bottom: 16px;
+  }
+  .clock b { font-size: 30px; letter-spacing: 1px; direction: ltr; font-weight: 700; }
+  .clock .cc { color: var(--hot); }
+  .clock span { color: var(--dim); font-size: 12px; }
+
+  .grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 18px; }
+  .pad {
+    position: relative; cursor: pointer; user-select: none;
+    background: var(--panel); border: 2px solid var(--line); border-radius: 12px;
+    padding: 16px 12px; text-align: center; transition: border-color .08s, background .08s, transform .06s;
+  }
+  .pad:hover { border-color: var(--blue); }
+  .pad.hit { border-color: var(--hit); background: #0f2d18; transform: scale(.985); }
+  .pad .n { font-size: 26px; font-weight: 700; }
+  .pad .lbl { color: var(--dim); font-size: 11px; margin-top: 2px; }
+  .pad .count {
+    position: absolute; top: 6px; inset-inline-start: 8px;
+    background: var(--line); color: var(--text); font-size: 11px;
+    border-radius: 20px; padding: 1px 7px; min-width: 20px;
+  }
+  .pad .count.on { background: var(--hit); }
+  .pad .when {
+    margin-top: 8px; font-size: 13px; direction: ltr; letter-spacing: .5px;
+    color: var(--dim); min-height: 18px;
+  }
+  .pad .when.on { color: var(--hit); font-weight: 700; }
+
+  .row-of-same { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 18px; }
+  .same {
+    cursor: pointer; user-select: none; text-align: center;
+    background: #1c2128; border: 2px dashed var(--line); border-radius: 10px; padding: 14px 8px;
+    font-size: 13px;
+  }
+  .same:hover { border-color: var(--hot); }
+  .same.hit { border-style: solid; border-color: var(--hit); background: #0f2d18; }
+  .same .when { margin-top: 6px; font-size: 12px; direction: ltr; color: var(--dim); min-height: 16px; }
+  .same .when.on { color: var(--hit); font-weight: 700; }
+
+  .bar { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+  .bar h2 { font-size: 13px; margin: 0; font-weight: 600; color: var(--dim); }
+  button.reset {
+    background: transparent; color: var(--text); border: 1px solid var(--line);
+    border-radius: 8px; padding: 5px 12px; cursor: pointer; font-family: inherit; font-size: 12px;
+  }
+  button.reset:hover { border-color: var(--hot); color: var(--hot); }
+
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th, td { padding: 5px 8px; border-bottom: 1px solid var(--line); text-align: right; }
+  th { color: var(--dim); font-weight: 500; }
+  td.t { direction: ltr; text-align: left; letter-spacing: .5px; }
+  td.delta { direction: ltr; text-align: left; color: var(--dim); }
+  tbody tr:first-child td { color: var(--hit); }
+  .empty { color: var(--dim); text-align: center; padding: 18px; font-size: 12px; }
+</style>
+</head>
+<body>
+
+<h1>میدان تست اتوفلو</h1>
+<div class="sub">هر کلیک را با زمان صدم ثانیه ثبت می‌کند. زمان از لحظه‌ای گرفته می‌شود که صفحه کلیک را دریافت می‌کند.</div>
+
+<div class="clock">
+  <b id="clock">--:--:--<span class="cc">:--</span></b>
+  <span>ساعت زنده — با این مقایسه کن</span>
+</div>
+
+<div class="grid" id="pads">
+  <!-- four distinguishable points: enough to prove several steps fire separately and in the right order -->
+  <div class="pad" data-target="نقطه ۱" id="pad1">
+    <div class="count" data-count>0</div>
+    <div class="n">۱</div>
+    <div class="lbl">نقطه یک</div>
+    <div class="when" data-when>—</div>
+  </div>
+  <div class="pad" data-target="نقطه ۲" id="pad2">
+    <div class="count" data-count>0</div>
+    <div class="n">۲</div>
+    <div class="lbl">نقطه دو</div>
+    <div class="when" data-when>—</div>
+  </div>
+  <div class="pad" data-target="نقطه ۳" id="pad3">
+    <div class="count" data-count>0</div>
+    <div class="n">۳</div>
+    <div class="lbl">نقطه سه</div>
+    <div class="when" data-when>—</div>
+  </div>
+  <div class="pad" data-target="نقطه ۴" id="pad4">
+    <div class="count" data-count>0</div>
+    <div class="n">۴</div>
+    <div class="lbl">نقطه چهار</div>
+    <div class="when" data-when>—</div>
+  </div>
+</div>
+
+<div class="bar">
+  <h2>سه دکمهٔ هم‌نام — برای تست «همهٔ تطابق‌ها»</h2>
+</div>
+<div class="row-of-same" id="sames">
+  <div class="same" data-target="هم‌نام ۱" id="same1">ارسال پی در پی سفارش<div class="when" data-when>—</div></div>
+  <div class="same" data-target="هم‌نام ۲" id="same2">ارسال پی در پی سفارش<div class="when" data-when>—</div></div>
+  <div class="same" data-target="هم‌نام ۳" id="same3">ارسال پی در پی سفارش<div class="when" data-when>—</div></div>
+</div>
+
+<div class="bar">
+  <h2>ثبت کلیک‌ها</h2>
+  <button class="reset" id="reset">پاک کردن</button>
+  <span class="sub" id="summary" style="margin:0"></span>
+</div>
+
+<table>
+  <thead>
+    <tr>
+      <th style="width:44px">#</th>
+      <th style="width:110px">زمان</th>
+      <th>هدف</th>
+      <th style="width:90px">فاصله (ms)</th>
+    </tr>
+  </thead>
+  <tbody id="log"></tbody>
+</table>
+<div class="empty" id="empty">هنوز کلیکی ثبت نشده.</div>
+
+<script>
+(() => {
+  'use strict';
+
+  /**
+   * A click log with centisecond resolution, written by the page itself.
+   *
+   * WHY THE PAGE TIMES IT AND NOT THE EXTENSION: the interesting question is when the BROWSER dispatched the
+   * click, not when the extension thought it had. If the extension reports its own timestamp, a bug in the
+   * extension also produces the timestamp that would hide it. The handler here is the ground truth.
+   */
+  const pad = (n, w = 2) => String(n).padStart(w, '0');
+
+  /** 13:52:10:02 - hours, minutes, seconds, hundredths. Hundredths, not milliseconds: the user reads this. */
+  function stamp(ms) {
+    const d = new Date(ms);
+    return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}:${pad(Math.floor(d.getMilliseconds() / 10))}`;
+  }
+
+  const log = [];
+  let lastAt = null;
+  let counter = 0;
+
+  const tbody = document.getElementById('log');
+  const empty = document.getElementById('empty');
+  const summary = document.getElementById('summary');
+
+  function renderLog() {
+    tbody.textContent = '';
+    for (const e of log.slice(-200).reverse()) {
+      const tr = document.createElement('tr');
+      const a = document.createElement('td'); a.textContent = String(e.n);
+      const b = document.createElement('td'); b.className = 't'; b.textContent = e.at;
+      const c = document.createElement('td'); c.textContent = e.target;
+      const d = document.createElement('td'); d.className = 'delta';
+      d.textContent = e.delta === null ? '—' : String(e.delta);
+      tr.append(a, b, c, d);
+      tbody.append(tr);
+    }
+    empty.hidden = log.length > 0;
+
+    if (!log.length) { summary.textContent = ''; return; }
+    const first = log[0];
+    const last = log[log.length - 1];
+    const span = last.ms - first.ms;
+    summary.textContent = `${log.length} کلیک · از ${first.at} تا ${last.at} · ${span}ms`;
+  }
+
+  function record(target, el) {
+    const now = Date.now();
+    const entry = {
+      n: ++counter,
+      ms: now,
+      at: stamp(now),
+      target,
+      delta: lastAt === null ? null : now - lastAt,
+    };
+    lastAt = now;
+    log.push(entry);
+
+    // per-target: count and last time
+    if (el) {
+      const c = el.querySelector('[data-count]');
+      if (c) { c.textContent = String(Number(c.textContent) + 1); c.classList.add('on'); }
+      const w = el.querySelector('[data-when]');
+      if (w) { w.textContent = entry.at; w.classList.add('on'); }
+      el.classList.add('hit');
+      setTimeout(() => el.classList.remove('hit'), 220);
+    }
+
+    renderLog();
+
+    // also exposed for a headless test to read, so a test does not have to parse the DOM
+    window.__clicks = log;
+  }
+
+  // One delegated handler rather than one per element: it keeps the page honest about ordering, and a click on
+  // a child node (the label inside a pad) still resolves to the pad.
+  document.addEventListener('click', (e) => {
+    const el = e.target.closest('[data-target]');
+    if (el) record(el.dataset.target, el);
+  }, true);
+
+  // the live clock, on animation frames so the hundredths are smooth rather than stuttering
+  const clockEl = document.getElementById('clock');
+  function tick() {
+    const now = Date.now();
+    const d = new Date(now);
+    clockEl.innerHTML = `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
+      + `<span class="cc">:${pad(Math.floor(d.getMilliseconds() / 10))}</span>`;
+    requestAnimationFrame(tick);
+  }
+  tick();
+
+  document.getElementById('reset').addEventListener('click', (e) => {
+    e.stopPropagation();
+    log.length = 0;
+    counter = 0;
+    lastAt = null;
+    window.__clicks = [];
+    for (const el of document.querySelectorAll('[data-target]')) {
+      el.classList.remove('hit');
+      const c = el.querySelector('[data-count]');
+      if (c) { c.textContent = '0'; c.classList.remove('on'); }
+      const w = el.querySelector('[data-when]');
+      if (w) { w.textContent = '—'; w.classList.remove('on'); }
+    }
+    renderLog();
+  });
+
+  // named for the picker and for the docs
+  window.__sim = { stamp, log: () => log, reset: () => document.getElementById('reset').click() };
+  window.__clicks = log;
+})();
+</script>
+</body>
+</html>
