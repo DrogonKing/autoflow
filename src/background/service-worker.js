@@ -22,7 +22,7 @@ import {
   recordEvent, clearEvents, flushEvents, readEvents,
 } from './storage.js';
 import {
-  rescheduleAll, scheduleOne, cancelOne, automationIdFromAlarm, ALARM_PREFIX, listScheduled,
+  rescheduleAll, scheduleOne, cancelOne, automationIdFromAlarm, ALARM_PREFIX, listScheduled, startLatencyMs,
 } from './alarms.js';
 import { nextRun, wantsPreciseTiming, PRECISE_WAKE_MS } from '../core/schedule/schedule.js';
 import { clockOffset } from '../core/clock/skew.js';
@@ -693,7 +693,20 @@ api.alarms.onAlarm.addListener(async (alarm) => {
        */
       const now = Date.now();
       const next = nextRun(automation.schedule, now);
-      if (next && next - now <= PRECISE_WAKE_MS + 5000) {
+      /**
+       * THE WINDOW MUST GROW WITH THE MARGIN.
+       *
+       * This threshold was `PRECISE_WAKE_MS + 5000`, a fixed 6.5s. Once the wake margin became adaptive and could
+       * reach 20s, an alarm armed 20s early woke the worker with the target 20s away - outside this window - so the
+       * code concluded it was early for a FUTURE occurrence, set `atMs = null` and fired immediately. The precise
+       * path was skipped exactly when it was needed most.
+       *
+       * The window is now the margin that was actually used, which the alarm handler can compute from the same
+       * latency sample `scheduleOne` uses, plus slack for the wake itself.
+       */
+      // the SAME formula as scheduleOne - two numbers that must agree, so they are derived from one sample the same way
+      const expectedMargin = Math.min(await startLatencyMs() + PRECISE_WAKE_MS, 20_000);
+      if (next && next - now <= expectedMargin + 5000) {
         atMs = next;                            // early, as designed
       } else {
         // was there a target we just missed? ask for the occurrence at or before now
@@ -733,6 +746,33 @@ api.alarms.onAlarm.addListener(async (alarm) => {
      * is what the alarm's wake margin adapts to. Without it the margin stayed a constant guess.
      */
     const alarmFiredAt = Date.now();
+    /**
+     * REFUSE A STORM.
+     *
+     * Measured failure mode: nine firings one second apart for the same automation, from a re-arm that kept asking
+     * for the occurrence that had just failed. Each firing looked reasonable in isolation and the whole thing was
+     * useless - no clicks, and the user only saw "it did not work".
+     *
+     * More than three firings inside ten seconds for one automation cannot be legitimate: the shortest schedule the
+     * model allows is a whole second, and even that would not be armed this way. The firing is recorded and dropped,
+     * which stops the storm while leaving evidence of it.
+     */
+    const recent = (globalThis.__recentFirings ??= new Map());
+    const history = (recent.get(id) ?? []).filter((t) => alarmFiredAt - t < 10_000);
+    history.push(alarmFiredAt);
+    recent.set(id, history);
+    if (history.length > 3) {
+      recordEvent({ kind: 'storm-refused', automationId: id, firingsIn10s: history.length });
+      return;
+    }
+
+    /**
+     * The instant this firing was FOR. `atMs` when the precise path resolved it; otherwise the alarm's own scheduled
+     * time, which for a non-precise schedule IS the target. Used by the failure path to re-arm for the NEXT occurrence
+     * rather than for the one that just failed.
+     */
+    const attemptedTarget = Number.isFinite(atMs) ? atMs
+      : (Number.isFinite(alarm.scheduledTime) ? alarm.scheduledTime : null);
     const runWhenSlotIsFree = (extra = {}) =>
       startAutomation(id, { tabId, trigger: 'schedule', atMs, firedAt: alarmFiredAt, ...extra });
 
@@ -762,7 +802,25 @@ api.alarms.onAlarm.addListener(async (alarm) => {
     try {
       const again = await getAutomation(id);
       if (again?.enabled !== false && again?.schedule && again.schedule.kind !== 'manual') {
-        await scheduleOne(again);
+        /**
+         * RE-ARM FOR THE NEXT OCCURRENCE, NOT FOR THE ONE THAT JUST FAILED.
+         *
+         * `scheduleOne(x)` means "the next occurrence from now", and when the failure happens BEFORE the target that
+         * is the SAME occurrence, seconds away. So a failing start re-armed the instant it had just failed, the alarm
+         * fired again, failed again - a storm of alarms that consumed the very second it was aiming at. Measured: nine
+         * firings one second apart and not a single click.
+         *
+         * Asking from one millisecond after the failed target makes the next occurrence the following one. A second
+         * guard refuses to re-arm at all if that computation lands back in the past, so no arithmetic mistake here can
+         * ever produce a storm again.
+         */
+        const after = Number.isFinite(attemptedTarget) ? attemptedTarget + 1 : Date.now();
+        const armed = await scheduleOne(again, { now: Math.max(after, Date.now()) });
+        if (!armed?.scheduled || (armed.target ?? armed.at) <= Date.now()) {
+          recordEvent({ kind: 'arm-skipped', automationId: id, note: 'the next occurrence did not resolve to the future' });
+        } else {
+          recordEvent({ kind: 're-armed', automationId: id, target: armed.target, afterFailedTarget: attemptedTarget ?? null });
+        }
       }
     } catch { /* the re-arm failing must not replace the original error */ }
     await recordRun({

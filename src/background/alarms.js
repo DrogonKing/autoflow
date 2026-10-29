@@ -43,14 +43,39 @@ export async function rescheduleAll(automations, { now = Date.now() } = {}) {
       continue;
     }
     const precise = wantsPreciseTiming(a.schedule);
-    // No clock correction is applied. The measured offset is REPORTED only: applying it would move an order by
-    // a value whose own uncertainty is half a second, which is worse than leaving it alone.
-    const base = precise ? Math.max(at - PRECISE_WAKE_MS, now + 500) : at;
+    /**
+     * THE SAME MARGIN AS scheduleOne, from the same latency sample.
+     *
+     * This used to be `Math.max(at - PRECISE_WAKE_MS, now + 500)` - the fixed constant - while `scheduleOne` had
+     * already been made adaptive. So every worker restart, which is the normal state between alarms, quietly put
+     * every automation back on the guess that could not cover the machine's measured start latency. One rule, two
+     * implementations, and they disagreed.
+     *
+     * No clock correction is applied. The measured offset is REPORTED only: applying it would move an order by a
+     * value whose own uncertainty is half a second, which is worse than leaving it alone.
+     */
+    const observed = await startLatencyMs();
+    const margin = Math.min(observed + PRECISE_WAKE_MS, 20_000);
+    const base = precise ? Math.max(at - margin, now + 500) : at;
     const when = Math.max(base, now + 1000);
+
+    /**
+     * A TARGET THAT PASSED WHILE THE BROWSER WAS CLOSED IS NOT SILENTLY SKIPPED.
+     *
+     * `nextRun` returns the NEXT occurrence, so yesterday's - or this morning's - slot vanished without a trace when
+     * the machine was off or the extension was not loaded. For a window that opens once a day that is the whole
+     * purpose of the feature. There is no way to click a window that has closed, so the honest thing is to record
+     * that it was missed and why, and to say so in the panel, rather than to arm tomorrow and look healthy.
+     */
+    const previous = nextRun(a.schedule, now - MISSED_LOOKBACK_MS);
+    const missed = previous !== null && now - previous > 1000 && now - previous <= MISSED_LOOKBACK_MS;
+
     await api.alarms.create(name, { when });
+    // ONE row per automation: the miss is a property of this arming, not a second schedule
     results.push({
       id: a.id, name: a.name, ok: true, at: when, target: at, precise,
       description: describeSchedule(a.schedule),
+      ...(missed ? { missed: true, missedAt: previous, missedByMs: now - previous } : {}),
     });
   }
 
@@ -73,6 +98,14 @@ export async function rescheduleAll(automations, { now = Date.now() } = {}) {
  */
 /** Key for the last observed worker start latency, in storage.local so it survives a worker restart. */
 const START_LATENCY_KEY = 'scheduledStartLatencyMs';
+
+/**
+ * How far back to look for an occurrence that was missed while the extension was not running.
+ *
+ * A day and a bit: enough to notice that this morning's window went by, short enough that a schedule left alone for
+ * a month does not report thirty misses at once.
+ */
+const MISSED_LOOKBACK_MS = 26 * 60 * 60 * 1000;
 
 /**
  * The latest measured gap between an alarm firing and the scheduled run actually reaching its first step.
@@ -132,7 +165,19 @@ export async function scheduleOne(automation, { now = Date.now() } = {}) {
    * of to the machine it was written on.
    */
   const observed = await startLatencyMs();
-  const margin = Math.min(Math.max(PRECISE_WAKE_MS, observed + 1000), 20_000);
+  /**
+   * The margin must be STRICTLY greater than the observed latency, and the extra is not decoration.
+   *
+   * A margin equal to the latency means the worker wakes exactly on the target: there is no time left to wait, the
+   * precise path in the page is skipped, and the click is a best-effort shot whose accuracy is the alarm's own jitter.
+   * MEASURED with a margin of 6000 against a 6000ms latency: 0ms of early arrival, and the "waits for the target"
+   * branch never ran. The whole point of waking early is to have something left to wait for.
+   *
+   * So the margin is the start latency PLUS `PRECISE_WAKE_MS`. That constant was always "how much lead the precise
+   * wait needs"; keeping it as the ADDEND rather than as a floor means the precise wait always has exactly that much
+   * room, on any machine, and the floor is no longer dead code dominated by a larger slack.
+   */
+  const margin = Math.min(observed + PRECISE_WAKE_MS, 20_000);
   const base = precise ? Math.max(at - margin, now + 500) : at;
   const when = Math.max(base, now + 1000);
   await api.alarms.create(name, { when });
