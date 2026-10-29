@@ -37,6 +37,15 @@
 /** A `Date` header only has second resolution, so a smaller difference is not distinguishable from noise. */
 export const DATE_HEADER_RESOLUTION_MS = 1000;
 
+/**
+ * Half the header's resolution: the expected truncation, added back to every server stamp.
+ *
+ * Not a fudge factor. A truncation to whole seconds is uniformly distributed within the second, so its mean is half
+ * the interval; adding half the interval makes the estimate unbiased. Without it every reading leaned about 500ms
+ * one way, and a machine whose clock was exactly right was told its clock was wrong in half of all measurements.
+ */
+export const DATE_HEADER_HALF_MS = DATE_HEADER_RESOLUTION_MS / 2;
+
 /** Warn only when the skew could actually move a schedule by whole seconds. */
 export const DEFAULT_WARN_THRESHOLD_MS = 1000;
 
@@ -53,7 +62,15 @@ export function clockOffset({ t0, t1, serverStamp }) {
   const rttMs = Math.max(0, t1 - t0);
   // the server stamped at roughly the midpoint of the exchange
   const estimatedAtServerStamp = t0 + rttMs / 2;
-  const offsetMs = Math.round(serverStamp - estimatedAtServerStamp);
+  /**
+   * The stamp is corrected for the header's truncation BEFORE it is compared.
+   *
+   * `+ DATE_HEADER_HALF_MS` removes the -500ms mean bias: without it, a machine whose clock is exactly right is
+   * reported as being ahead of the server in half of all measurements, and the direction of the advice is a coin
+   * flip. This does not improve the resolution - that stays +/-500ms, which is why the warning threshold is a whole
+   * second - it only stops the reading from leaning one way.
+   */
+  const offsetMs = Math.round(serverStamp + DATE_HEADER_HALF_MS - estimatedAtServerStamp);
   // the header's own resolution dominates the error; the round trip adds up to half of itself
   const uncertaintyMs = Math.round(DATE_HEADER_RESOLUTION_MS / 2 + rttMs / 2);
   return {

@@ -207,7 +207,6 @@ describe('background message handler — sender classification', () => {
     'export-all',
     'store-data-rows',
     'add-upload-file',
-    'read-file-for-upload',
     'cancel-alarms',
     'schedule-one',
     'diagnostics',

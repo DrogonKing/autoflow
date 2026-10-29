@@ -7,34 +7,101 @@
  */
 import { describe, expect, it } from 'vitest';
 import {
-  DATE_HEADER_RESOLUTION_MS, DEFAULT_WARN_THRESHOLD_MS, clockOffset,
+  DATE_HEADER_HALF_MS, DATE_HEADER_RESOLUTION_MS, DEFAULT_WARN_THRESHOLD_MS, clockOffset,
   describeSkew, normaliseSkewSettings, shouldWarn,
 } from '../src/core/clock/skew.js';
 
+/**
+ * WHY EVERY EXPECTATION BELOW CARRIES `+ DATE_HEADER_HALF_MS`.
+ *
+ * The `Date` header truncates to whole seconds, so a stamp of 3000 means a moment somewhere in [3000, 3100) - on
+ * average 3050. Comparing the raw stamp against the midpoint of the exchange therefore produced a fixed -500ms bias,
+ * and a machine whose clock was exactly right was reported as wrong in about half of all measurements.
+ *
+ * The correction is now inside `clockOffset`, so these fixtures state the bias explicitly. They previously pinned the
+ * biased numbers as correct, which is why a green test suite coexisted with a 50% wrong sign.
+ */
 describe('measuring the offset', () => {
-  it('a server 2s ahead gives +2000, i.e. this machine is behind', () => {
-    // sent at 1000, 100ms round trip, server stamped 3000 -> server is ahead by 2000 + half the rtt
-    const r = clockOffset({ t0: 1000, t1: 1100, serverStamp: 3050 });
-    expect(r.offsetMs).toBe(2000);
+  it('a server 2s ahead gives about +2000, i.e. this machine is behind', () => {
+    /**
+     * A single sample cannot be EXACT, and asserting that it is would be asserting something untrue.
+     *
+     * The header resolves to a whole second, so one reading is only good to +/-500ms. The correction removes the
+     * LEAN (the mean bias); it cannot remove the resolution. What this test may therefore assert is the direction and
+     * that the answer is inside the header's own precision - not a specific millisecond.
+     */
+    // sent at 1000, 100ms round trip, midpoint 1050; the server's true time there is 3050, truncated to 3000
+    const r = clockOffset({ t0: 1000, t1: 1100, serverStamp: 3000 });
     expect(r.offsetMs).toBeGreaterThan(0);
+    expect(Math.abs(r.offsetMs - 2000)).toBeLessThanOrEqual(DATE_HEADER_RESOLUTION_MS / 2 + 50);
     expect(r.rttMs).toBe(100);
   });
 
   it('a server 2s behind gives a negative offset', () => {
-    const r = clockOffset({ t0: 10_000, t1: 10_100, serverStamp: 8050 });
-    expect(r.offsetMs).toBe(-2000);
+    // server true time at the midpoint is 8100, truncated to 8000
+    const r = clockOffset({ t0: 10_000, t1: 10_100, serverStamp: 8000 });
+    expect(r.offsetMs).toBeLessThan(0);
+    expect(Math.abs(r.offsetMs - (-2000))).toBeLessThanOrEqual(DATE_HEADER_RESOLUTION_MS / 2 + 50);
   });
 
   it('half the round trip is credited to the server stamp', () => {
-    // 400ms round trip: the stamp is assumed to be from t0+200. A stamp matching that is offset 0.
-    const r = clockOffset({ t0: 5000, t1: 5400, serverStamp: 5200 });
+    // 400ms round trip: the stamp is assumed to be from t0+200, and the truncation adds another 500
+    const r = clockOffset({ t0: 5000, t1: 5400, serverStamp: 4700 });
     expect(r.offsetMs).toBe(0);
   });
 
   it('a zero round trip still works', () => {
-    const r = clockOffset({ t0: 7000, t1: 7000, serverStamp: 7000 });
+    const r = clockOffset({ t0: 7000, t1: 7000, serverStamp: 6500 });
     expect(r.offsetMs).toBe(0);
     expect(r.rttMs).toBe(0);
+  });
+
+  it('THE REPORTED BUG: a clock that is exactly right is not systematically reported as wrong', () => {
+    /**
+     * This is the finding, reproduced as an average rather than as one lucky fixture.
+     *
+     * With the clocks synchronized, the server truncates its stamp DOWN to the whole second, so a single sample lands
+     * anywhere in [-1000, 0) - mean -500. That mean was the bug: it made "your clock is ahead" the answer in about
+     * half of all measurements even when the clock was perfect. Sweeping every sub-second phase and averaging is the
+     * only honest way to test an unbiasedness correction, because any single phase has an error of up to 500ms by
+     * construction.
+     */
+    const offsets = [];
+    for (let phase = 0; phase < 1000; phase += 1) {
+      // the client's clock is exact; the server is exact too and stamps floor(time / 1000) * 1000
+      const t = 7000 + phase;
+      const r = clockOffset({ t0: t, t1: t, serverStamp: Math.floor(t / 1000) * 1000 });
+      offsets.push(r.offsetMs);
+    }
+    const mean = offsets.reduce((a, b) => a + b, 0) / offsets.length;
+    console.log(`  mean offset over all 1000 phases: ${mean.toFixed(2)}ms`);
+
+    // unbiased: the average is near zero, not -500
+    expect(Math.abs(mean)).toBeLessThan(60);
+    expect(mean).toBeGreaterThan(-120);
+
+    // and the sign is balanced, which is what the report measured as 50.4% wrong
+    const saysAhead = offsets.filter((x) => x > 0).length;
+    const saysBehind = offsets.filter((x) => x < 0).length;
+    console.log(`  says ahead: ${saysAhead}  says behind: ${saysBehind}  exact: ${offsets.length - saysAhead - saysBehind}`);
+    expect(Math.abs(saysAhead - saysBehind)).toBeLessThan(120);
+  });
+
+  it('without the correction the same sweep leans one way - proving the constant is load-bearing', () => {
+    // the old arithmetic, reproduced here so the fix cannot be quietly removed
+    const biased = [];
+    for (let phase = 0; phase < 1000; phase += 1) {
+      const t = 7000 + phase;
+      const stamp = Math.floor(t / 1000) * 1000;
+      biased.push(Math.round(stamp - t));       // no +500
+    }
+    const mean = biased.reduce((a, b) => a + b, 0) / biased.length;
+    console.log(`  mean with no correction: ${mean.toFixed(2)}ms`);
+    expect(mean).toBeLessThan(-400);            // the -500 lean the report measured
+  });
+
+  it('the correction is exactly half the header resolution', () => {
+    expect(DATE_HEADER_HALF_MS).toBe(DATE_HEADER_RESOLUTION_MS / 2);
   });
 
   it('a negative round trip is clamped rather than trusted', () => {

@@ -8,36 +8,36 @@ import { describe, it, expect } from 'vitest';
 import { compare, evaluateCondition, describeCondition, ConditionError } from '../src/core/engine/conditions.js';
 
 describe('compare — string comparators', () => {
-  it('eq and neq', () => {
+  it('eq and neq', async () => {
     expect(compare('eq', 'abc', 'abc')).toBe(true);
     expect(compare('eq', 'abc', 'abd')).toBe(false);
     expect(compare('neq', 'abc', 'abd')).toBe(true);
   });
 
-  it('is case-insensitive unless asked otherwise', () => {
+  it('is case-insensitive unless asked otherwise', async () => {
     expect(compare('eq', 'ABC', 'abc')).toBe(true);
     expect(compare('eq', 'ABC', 'abc', { caseSensitive: true })).toBe(false);
     expect(compare('contains', 'Hello World', 'WORLD')).toBe(true);
     expect(compare('contains', 'Hello World', 'WORLD', { caseSensitive: true })).toBe(false);
   });
 
-  it('contains and notContains', () => {
+  it('contains and notContains', async () => {
     expect(compare('contains', 'hello world', 'lo wo')).toBe(true);
     expect(compare('notContains', 'hello', 'xyz')).toBe(true);
   });
 
-  it('startsWith and endsWith', () => {
+  it('startsWith and endsWith', async () => {
     expect(compare('startsWith', 'https://x.com', 'https://')).toBe(true);
     expect(compare('endsWith', 'file.pdf', '.pdf')).toBe(true);
     expect(compare('endsWith', 'file.pdf', '.doc')).toBe(false);
   });
 
-  it('matches uses a regular expression', () => {
+  it('matches uses a regular expression', async () => {
     expect(compare('matches', 'order 12345', '^order \\d+$')).toBe(true);
     expect(compare('matches', 'nope', '^order \\d+$')).toBe(false);
   });
 
-  it('reports an invalid regex instead of quietly returning false', () => {
+  it('reports an invalid regex instead of quietly returning false', async () => {
     // A broken pattern is a user mistake worth reporting, not a condition that never matches.
     expect(() => compare('matches', 'x', '[')).toThrow(ConditionError);
     expect(() => compare('matches', 'x', '[')).toThrow(/invalid/);
@@ -45,32 +45,32 @@ describe('compare — string comparators', () => {
 });
 
 describe('compare — numeric comparators', () => {
-  it('compares as numbers, not strings', () => {
+  it('compares as numbers, not strings', async () => {
     // The classic bug: "9" > "10" is true lexicographically.
     expect(compare('gt', '9', '10')).toBe(false);
     expect(compare('lt', '9', '10')).toBe(true);
   });
 
-  it('gt, gte, lt, lte', () => {
+  it('gt, gte, lt, lte', async () => {
     expect(compare('gt', '10', '9')).toBe(true);
     expect(compare('gte', '10', '10')).toBe(true);
     expect(compare('lt', '9', '10')).toBe(true);
     expect(compare('lte', '10', '10')).toBe(true);
   });
 
-  it('handles decimals and negatives', () => {
+  it('handles decimals and negatives', async () => {
     expect(compare('gt', '1.5', '1.4')).toBe(true);
     expect(compare('lt', '-5', '-4')).toBe(true);
   });
 
-  it('refuses to compare non-numbers with a clear message', () => {
+  it('refuses to compare non-numbers with a clear message', async () => {
     expect(() => compare('gt', 'abc', '10')).toThrow(/can only compare numbers/);
     expect(() => compare('gt', '10', 'abc')).toThrow(/can only compare numbers/);
   });
 });
 
 describe('compare — existence comparators', () => {
-  it('exists and notExists', () => {
+  it('exists and notExists', async () => {
     expect(compare('exists', 'anything')).toBe(true);
     expect(compare('exists', null)).toBe(false);
     expect(compare('exists', undefined)).toBe(false);
@@ -78,7 +78,7 @@ describe('compare — existence comparators', () => {
     expect(compare('notExists', 'x')).toBe(false);
   });
 
-  it('empty and notEmpty', () => {
+  it('empty and notEmpty', async () => {
     expect(compare('empty', '')).toBe(true);
     expect(compare('empty', '   ')).toBe(true);
     expect(compare('empty', null)).toBe(true);
@@ -86,7 +86,7 @@ describe('compare — existence comparators', () => {
     expect(compare('notEmpty', 'x')).toBe(true);
   });
 
-  it('boolean flags come through as true only when the caller says so', () => {
+  it('boolean flags come through as true only when the caller says so', async () => {
     expect(compare('visible', true)).toBe(true);
     expect(compare('visible', false)).toBe(false);
     expect(compare('checked', true)).toBe(true);
@@ -94,19 +94,19 @@ describe('compare — existence comparators', () => {
 });
 
 describe('compare — count comparators', () => {
-  it('countEq, countGt, countLt', () => {
+  it('countEq, countGt, countLt', async () => {
     expect(compare('countEq', 3, '3')).toBe(true);
     expect(compare('countGt', 3, '2')).toBe(true);
     expect(compare('countLt', 3, '4')).toBe(true);
   });
 
-  it('rejects a non-numeric count', () => {
+  it('rejects a non-numeric count', async () => {
     expect(() => compare('countGt', 'many', '2')).toThrow(/compares counts/);
   });
 });
 
 describe('compare — unknown comparator', () => {
-  it('throws rather than returning undefined', () => {
+  it('throws rather than returning undefined', async () => {
     expect(() => compare('sortof', 'a', 'b')).toThrow(/unknown comparator/);
   });
 });
@@ -114,70 +114,70 @@ describe('compare — unknown comparator', () => {
 describe('evaluateCondition', () => {
   const read = (obs) => () => obs;
 
-  it('compares element text', () => {
+  it('compares element text', async () => {
     const c = {
       finder: { strategy: 'css', selector: '#x' },
       source: 'text', comparator: 'eq', value: 'Ready',
     };
-    expect(evaluateCondition(c, { read: read({ value: 'Ready', found: true, flags: {} }) })).toBe(true);
-    expect(evaluateCondition(c, { read: read({ value: 'Busy', found: true, flags: {} }) })).toBe(false);
+    expect(await evaluateCondition(c, { read: read({ value: 'Ready', found: true, flags: {} }) })).toBe(true);
+    expect(await evaluateCondition(c, { read: read({ value: 'Busy', found: true, flags: {} }) })).toBe(false);
   });
 
-  it('a missing element makes a value comparison false, not an error', () => {
+  it('a missing element makes a value comparison false, not an error', async () => {
     // waitFor depends on this: "not there yet" must be a normal false.
     const c = {
       finder: { strategy: 'css', selector: '#x' },
       source: 'text', comparator: 'eq', value: 'Ready',
     };
-    expect(evaluateCondition(c, { read: read({ value: null, found: false, flags: {} }) })).toBe(false);
+    expect(await evaluateCondition(c, { read: read({ value: null, found: false, flags: {} }) })).toBe(false);
   });
 
-  it('exists works on a missing element', () => {
+  it('exists works on a missing element', async () => {
     const c = { finder: { strategy: 'css', selector: '#x' }, source: 'text', comparator: 'exists' };
-    expect(evaluateCondition(c, { read: read({ found: true, value: 'x', flags: {} }) })).toBe(true);
-    expect(evaluateCondition(c, { read: read({ found: false, value: null, flags: {} }) })).toBe(false);
+    expect(await evaluateCondition(c, { read: read({ found: true, value: 'x', flags: {} }) })).toBe(true);
+    expect(await evaluateCondition(c, { read: read({ found: false, value: null, flags: {} }) })).toBe(false);
   });
 
-  it('flags drive the visibility comparators', () => {
+  it('flags drive the visibility comparators', async () => {
     const c = { finder: { strategy: 'css', selector: '#x' }, source: 'text', comparator: 'visible' };
-    expect(evaluateCondition(c, { read: read({ found: true, value: '', flags: { visible: true } }) })).toBe(true);
-    expect(evaluateCondition(c, { read: read({ found: true, value: '', flags: { visible: false } }) })).toBe(false);
+    expect(await evaluateCondition(c, { read: read({ found: true, value: '', flags: { visible: true } }) })).toBe(true);
+    expect(await evaluateCondition(c, { read: read({ found: true, value: '', flags: { visible: false } }) })).toBe(false);
   });
 
-  it('counts matches', () => {
+  it('counts matches', async () => {
     const c = { finder: { strategy: 'css', selector: '.row' }, source: 'count', comparator: 'countGt', value: '2' };
-    expect(evaluateCondition(c, { read: read({ count: 5, found: true, flags: {} }) })).toBe(true);
-    expect(evaluateCondition(c, { read: read({ count: 1, found: true, flags: {} }) })).toBe(false);
+    expect(await evaluateCondition(c, { read: read({ count: 5, found: true, flags: {} }) })).toBe(true);
+    expect(await evaluateCondition(c, { read: read({ count: 1, found: true, flags: {} }) })).toBe(false);
   });
 
-  it('compares the page url without needing a finder', () => {
+  it('compares the page url without needing a finder', async () => {
     const c = { source: 'url', comparator: 'contains', value: '/dashboard' };
-    expect(evaluateCondition(c, { read: read({ value: 'https://a.com/dashboard?x=1' }) })).toBe(true);
+    expect(await evaluateCondition(c, { read: read({ value: 'https://a.com/dashboard?x=1' }) })).toBe(true);
   });
 
-  it('compares a variable, reading it from vars and NOT from the page', () => {
+  it('compares a variable, reading it from vars and NOT from the page', async () => {
     // This test previously asserted the opposite - that a variable condition reads through `read`, i.e. from
     // the page - and it passed because the stub returned a value. The real page returns `{ value: null }` for
     // a variable, so the assertion encoded a bug: a variable condition could never match in the browser. The
     // `read` stub here deliberately returns something different, to prove it is not consulted.
     const c = { source: 'variable', variable: 'status', comparator: 'eq', value: 'ok' };
-    expect(evaluateCondition(c, { read: read({ value: 'FROM-THE-PAGE' }), vars: { status: 'ok' } })).toBe(true);
-    expect(evaluateCondition(c, { read: read({ value: 'ok' }), vars: { status: 'ok' } })).toBe(true);
+    expect(await evaluateCondition(c, { read: read({ value: 'FROM-THE-PAGE' }), vars: { status: 'ok' } })).toBe(true);
+    expect(await evaluateCondition(c, { read: read({ value: 'ok' }), vars: { status: 'ok' } })).toBe(true);
     // and with no vars it does not match, rather than somehow picking up the page value
-    expect(evaluateCondition(c, { read: read({ value: 'ok' }) })).toBe(false);
+    expect(await evaluateCondition(c, { read: read({ value: 'ok' }) })).toBe(false);
   });
 
-  it('interpolates the expected value when vars are given', () => {
+  it('interpolates the expected value when vars are given', async () => {
     const c = {
       finder: { strategy: 'css', selector: '#x' },
       source: 'text', comparator: 'eq', value: '${expected}',
     };
     expect(
-      evaluateCondition(c, { read: read({ value: 'yes', found: true, flags: {} }), vars: { expected: 'yes' } }),
+      await evaluateCondition(c, { read: read({ value: 'yes', found: true, flags: {} }), vars: { expected: 'yes' } }),
     ).toBe(true);
   });
 
-  it('a template that cannot resolve falls back to a literal, not an abort', () => {
+  it('a template that cannot resolve falls back to a literal, not an abort', async () => {
     const c = {
       finder: { strategy: 'css', selector: '#x' },
       source: 'text', comparator: 'eq', value: '${missing}',
@@ -192,53 +192,53 @@ describe('evaluateCondition', () => {
 describe('evaluateCondition — combining', () => {
   const read = () => ({ value: 'yes', found: true, flags: {} });
 
-  it('AND by default', () => {
+  it('AND by default', async () => {
     const c = {
       finder: { strategy: 'css', selector: '#a' }, source: 'text', comparator: 'eq', value: 'yes',
       combine: 'all',
       also: [{ finder: { strategy: 'css', selector: '#b' }, source: 'text', comparator: 'eq', value: 'yes' }],
     };
-    expect(evaluateCondition(c, { read })).toBe(true);
+    expect(await evaluateCondition(c, { read })).toBe(true);
   });
 
-  it('AND fails when a sub-condition fails', () => {
+  it('AND fails when a sub-condition fails', async () => {
     let i = 0;
     const c = {
       finder: { strategy: 'css', selector: '#a' }, source: 'text', comparator: 'eq', value: 'yes',
       also: [{ finder: { strategy: 'css', selector: '#b' }, source: 'text', comparator: 'eq', value: 'no' }],
     };
     const r = (obs) => () => obs;
-    expect(evaluateCondition(c, { read: r({ value: 'yes', found: true, flags: {} }) })).toBe(false);
+    expect(await evaluateCondition(c, { read: r({ value: 'yes', found: true, flags: {} }) })).toBe(false);
   });
 
-  it('OR succeeds when any part holds', () => {
+  it('OR succeeds when any part holds', async () => {
     const c = {
       finder: { strategy: 'css', selector: '#a' }, source: 'text', comparator: 'eq', value: 'no',
       combine: 'any',
       also: [{ finder: { strategy: 'css', selector: '#b' }, source: 'text', comparator: 'eq', value: 'yes' }],
     };
-    expect(evaluateCondition(c, { read })).toBe(true);
+    expect(await evaluateCondition(c, { read })).toBe(true);
   });
 
-  it('validates the tree before evaluating, so a bad sub-condition is caught', () => {
+  it('validates the tree before evaluating, so a bad sub-condition is caught', async () => {
     const c = {
       finder: { strategy: 'css', selector: '#a' }, source: 'text', comparator: 'eq', value: 'yes',
       also: [{ finder: { strategy: 'css', selector: '#b' }, source: 'text', comparator: 'nonsense' }],
     };
-    expect(() => evaluateCondition(c, { read })).toThrow();
+    await expect(evaluateCondition(c, { read })).rejects.toThrow();
   });
 
-  it('a numeric comparator inside a sub-condition is validated up front', () => {
+  it('a numeric comparator inside a sub-condition is validated up front', async () => {
     const c = {
       finder: { strategy: 'css', selector: '#a' }, source: 'text', comparator: 'eq', value: 'x',
       also: [{ finder: { strategy: 'css', selector: '#b' }, source: 'count', comparator: 'countGt', value: 'abc' }],
     };
-    expect(() => evaluateCondition(c, { read })).toThrow(/compares counts|not one/);
+    await expect(evaluateCondition(c, { read })).rejects.toThrow(/compares counts|not one/);
   });
 });
 
 describe('describeCondition', () => {
-  it('reads like a sentence', () => {
+  it('reads like a sentence', async () => {
     expect(describeCondition({
       finder: { strategy: 'css', selector: '#submit' }, source: 'text', comparator: 'eq', value: 'Go',
     })).toMatch(/element #submit.*equals.*Go/i);
@@ -251,7 +251,7 @@ describe('describeCondition', () => {
       .toMatch(/variable n exists/);
   });
 
-  it('describes each finder strategy', () => {
+  it('describes each finder strategy', async () => {
     for (const f of [
       { strategy: 'css', selector: 'a' },
       { strategy: 'xpath', xpath: '//a' },
@@ -270,7 +270,7 @@ describe('describeCondition', () => {
     }
   });
 
-  it('mentions the join for a combined condition', () => {
+  it('mentions the join for a combined condition', async () => {
     const c = {
       finder: { strategy: 'css', selector: '#a' }, source: 'text', comparator: 'exists', combine: 'any',
       also: [{ finder: { strategy: 'css', selector: '#b' }, source: 'text', comparator: 'exists' }],
@@ -278,7 +278,7 @@ describe('describeCondition', () => {
     expect(describeCondition(c)).toMatch(/OR/);
   });
 
-  it('says always for a missing condition', () => {
+  it('says always for a missing condition', async () => {
     expect(describeCondition(null)).toBe('always');
   });
 });

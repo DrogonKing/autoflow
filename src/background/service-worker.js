@@ -12,7 +12,7 @@
 
 import { Runner } from '../core/engine/runner.js';
 import { api } from '../platform/api.js';
-import { cloneableOrString } from '../platform/serialise.js';
+import { cloneableOrString, bytesToBase64 } from '../platform/serialise.js';
 import { validateAutomation } from '../core/model/steps.js';
 import {
   listAutomations, getAutomation, saveAutomation, deleteAutomation, duplicateAutomation,
@@ -104,7 +104,11 @@ async function sendToTab(tabId, message, { injectIfMissing = true } = {}) {
       files: ['content.js'],
     });
     await new Promise((r) => setTimeout(r, 200));
-    return withTimeout(api.tabs.sendMessage(tabId, message), 20_000, `message ${message.type} (retry)`);
+    // the RETRY must send what was actually intended to be sent. `message` is the caller's raw object, which
+    // `cloneableOrString` was applied to for the wire; sending the raw one again could fail on the same value that
+    // the sanitising exists to handle, and the retry would then fail for a reason unrelated to the
+    // "content script was missing" case it is there for.
+    return withTimeout(api.tabs.sendMessage(tabId, safeMessage), 20_000, `message ${message.type} (retry)`);
   }
 }
 
@@ -291,7 +295,14 @@ function makeHost(tabId, { stopFlag, onTrace, opts }) {
           let url = step.url;
           if (!url) {
             const blob = new Blob([String(step.content ?? '')], { type: step.mime ?? 'text/plain' });
-            url = URL.createObjectURL(blob);
+            /**
+             * A DATA URL, not a blob URL.
+             *
+             * `URL.createObjectURL` does not exist in a Manifest V3 service worker - there is no document and no
+             * blob registry - so any download step that carried content threw. A data URL is just a string and works
+             * from the worker. It is base64, so it is about a third larger; that is the price of it working at all.
+             */
+            url = `data:${step.mimeType || 'application/octet-stream'};base64,${await bytesToBase64(blob)}`;
           }
           const id = await api.downloads.download({
             url,
@@ -613,7 +624,28 @@ api.alarms.onAlarm.addListener(async (alarm) => {
     const patterns = automation.urls?.length ? automation.urls : [];
     if (patterns.length) {
       const tabs = await api.tabs.query({});
-      const match = tabs.find((t) => patterns.some((p) => (t.url ?? '').includes(p.replace(/\*/g, ''))));
+      /**
+       * A pattern is turned into a REGEX, not into a literal with the stars deleted.
+       *
+       * The old code removed the stars and used `includes`, so `https://x.test/order/*` became a search for
+       * `https://x.test/order/` - a different URL space than the pattern described - and a pattern of a single star
+       * became the empty string, which matched EVERY tab. A regex keeps the star meaning "anything here", which is
+       * what the field says it does.
+       */
+      const escapeForRegex = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const asRegex = (pattern) => {
+        const body = String(pattern).split('*').map(escapeForRegex).join('.*');
+        return new RegExp(`^${body}$`, 'i');
+      };
+      const match = tabs.find((tab) => {
+        const url = tab.url ?? '';
+        return patterns.some((pattern) => {
+          if (asRegex(pattern).test(url)) return true;
+          // a saved pattern with no wildcard is treated as a prefix, because a live tab URL almost never equals it
+          // character for character
+          return !String(pattern).includes('*') && url.startsWith(String(pattern));
+        });
+      });
       if (match) tabId = match.id;
       else if (patterns[0] && !patterns[0].includes('*')) {
         const created = await api.tabs.create({ url: patterns[0], active: false });
@@ -695,6 +727,20 @@ api.alarms.onAlarm.addListener(async (alarm) => {
    recordEvent({ kind: 'alarm-late', automationId: id, lateByMs: lateBy });
  }
   } catch (e) {
+    /**
+     * RE-ARM DESPITE THE FAILURE.
+     *
+     * The next occurrence was only armed on the success path, so a start that failed once silently ended the
+     * schedule: the automation never fired again and nothing said so. A schedule is a standing instruction; a failed
+     * run is one missed attempt, not a reason to cancel the instruction. The failure is still recorded, and the
+     * re-arm is best-effort so it cannot mask the original error.
+     */
+    try {
+      const again = await getAutomation(id);
+      if (again?.enabled !== false && again?.schedule && again.schedule.kind !== 'manual') {
+        await scheduleOne(again);
+      }
+    } catch { /* the re-arm failing must not replace the original error */ }
     await recordRun({
       id: `run${Date.now().toString(36)}`,
       automationId: id,
@@ -800,6 +846,12 @@ const CONTENT_SCRIPT_MESSAGES = new Set([
   'element-picked',
   'element-pick-cancelled',
   'run-status',
+  /**
+   * `read-file-for-upload` was missing here, so the content script's request was refused and the upload step could
+   * never work. It is safe to allow: it takes a NAME from the extension's own stored upload list and returns bytes
+   * for that name only, so a page cannot use it to read anything the user did not already store in the extension.
+   */
+  'read-file-for-upload',
 ]);
 
 function classifySender(sender) {
@@ -817,6 +869,14 @@ function classifySender(sender) {
   }
   if (anyExtensionScheme) return 'extension-page';
   if (/^https?:\/\//i.test(url)) return 'content-script';
+  /**
+   * A page on another scheme is a PAGE, not this extension talking to itself.
+   *
+   * `file://` and `ftp://` fell through to 'internal', which is the most privileged class - so a page opened from
+   * disk could send any message the panel can. The test field the user works with is served over file://, which is
+   * how this matters in practice and not just in theory.
+   */
+  if (/^(file|ftp|data|blob):/i.test(url)) return 'content-script';
   // No URL at all: an internal caller (the worker's own alarm handler, or an injected script).
   return 'internal';
 }
@@ -871,6 +931,16 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       case 'get-active-run':
         return { ok: true, run: publicActiveRun() };
 
+      /**
+       * Measure the offset between this machine and a server, from THREE samples spread over time.
+       *
+       * The samples used to be taken back to back, milliseconds apart, so their sub-second phase was identical and
+       * the median of three removed nothing - it only made the reading look stable. A short pause between samples
+       * moves the phase, at the cost of about 300ms of latency for a control the user pressed on purpose.
+       *
+       * A TIMEOUT is now applied to each request. Without one, a slow or hanging server left the panel waiting
+       * forever, which is a worse outcome than a failed measurement.
+       */
       case 'measure-clock-offset': {
         /**
          * Compare this machine's clock with a server's, using one same-origin HEAD request.
@@ -890,8 +960,25 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         }
         const samples = [];
         for (let i = 0; i < 3; i++) {
+          /**
+           * A TIMEOUT per request, and a PAUSE between samples.
+           *
+           * Without a timeout, a slow or hanging server left the panel waiting forever - a failed measurement is a
+           * better outcome than a control that never returns. Without the pause, the three samples were taken
+           * milliseconds apart, so their sub-second phase was identical and the median removed nothing: it made the
+           * reading look stable without making it more accurate. A pause of about a tenth of a second moves the
+           * phase enough for the median to mean something, at a cost of ~200ms on a button the user pressed.
+           */
+          if (i > 0) await new Promise((r) => setTimeout(r, 30 + i * 57));
           const t0 = Date.now();
-          const res = await fetch(url, { method: 'HEAD', cache: 'no-store', credentials: 'omit' });
+          const res = await fetch(url, {
+            method: 'HEAD',
+            cache: 'no-store',
+            credentials: 'omit',
+            signal: typeof AbortSignal !== 'undefined' && AbortSignal.timeout
+              ? AbortSignal.timeout(8000)
+              : undefined,
+          });
           const header = res.headers.get('date');
           const t1 = Date.now();
           if (!header) throw new Error('the server sent no Date header');

@@ -165,7 +165,19 @@ export class Runner {
     if (delay > 0) await this.host.sleep(delay);
 
     const started = this.host.now();
-    const attempts = (step.retries ?? state.opts.stepRetries ?? 0) + 1;
+    /**
+     * A BLOCK STEP IS NEVER RETRIED.
+     *
+     * Retrying wraps `#dispatch`, and for `loop`/`if`/`while` a dispatch executes the ENTIRE body. So one transient
+     * error inside a five-iteration loop re-ran the iterations that had already succeeded: measured as 8 clicks from
+     * a 5-iteration loop. A retry is meant to repeat a single atom; repeating a block is a second execution of work
+     * that already happened, which for an order page is worse than failing.
+     *
+     * The body's own steps still retry individually, which is where a transient failure actually lives.
+     */
+    const isBlock = step.kind === 'loop' || step.kind === 'if' || step.kind === 'foreach'
+      || Array.isArray(step.then) || Array.isArray(step.else);
+    const attempts = isBlock ? 1 : (step.retries ?? state.opts.stepRetries ?? 0) + 1;
     let lastError;
 
     for (let attempt = 1; attempt <= attempts; attempt++) {

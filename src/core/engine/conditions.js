@@ -122,12 +122,15 @@ export function compare(comparator, observed, expected, opts = {}) {
  * Evaluate a whole condition tree against an observation.
  *
  * @param {Object} condition
- * @param {{read: (condition: Object) => {value: *, found: boolean}, vars?: Object}} ctx
- *   `read` is supplied by the caller and knows how to look at the page. Keeping it a callback is what
- *   lets this file be tested with plain objects and run unchanged in a content script.
- * @returns {boolean}
+ * @param {{read: (condition: Object) => ({value: *, found: boolean} | Promise<{value: *, found: boolean}>),
+ *          vars?: Object}} ctx
+ *   `read` is supplied by the caller and knows how to look at the page. Keeping it a callback is what lets this
+ *   file be tested with plain objects and run unchanged in a content script. It is AWAITED, because in the worker
+ *   it reads through a message to the tab and therefore returns a Promise - reading `.value` off that Promise was
+ *   the bug that made every page condition false.
+ * @returns {Promise<boolean>}
  */
-export function evaluateCondition(condition, ctx) {
+export async function evaluateCondition(condition, ctx) {
   validateCondition(condition);
   const caseSensitive = condition.caseSensitive === true;
 
@@ -162,10 +165,11 @@ export function evaluateCondition(condition, ctx) {
      * null for it. It is kept in the model because a saved automation may carry one, and a test pins the
      * behaviour so that executing it would have to be a deliberate change rather than an accident.
      */
-    const observed = ctx.read(condition);
+    // awaited: `read` reaches the page through the worker, so it returns a Promise there
+    const observed = await ctx.read(condition);
     result = compare(condition.comparator, observed.value, resolveExpected(condition, ctx), { caseSensitive });
   } else {
-    const obs = ctx.read(condition);
+    const obs = await ctx.read(condition);
     if (condition.comparator === 'countEq' || condition.comparator === 'countGt' || condition.comparator === 'countLt') {
       result = compare(condition.comparator, obs.count, resolveExpected(condition, ctx), { caseSensitive });
     } else if (['visible', 'hidden', 'checked', 'unchecked', 'enabled', 'disabled'].includes(condition.comparator)) {
@@ -189,7 +193,10 @@ export function evaluateCondition(condition, ctx) {
 
   if (Array.isArray(condition.also) && condition.also.length) {
     const combine = condition.combine === 'any' ? 'any' : 'all';
-    const rest = condition.also.map((sub) => evaluateCondition(sub, ctx));
+    // awaited one at a time rather than with Promise.all: a nested tree reads the page, and firing every branch at
+    // once would send one message per sub-condition when the answer is already decided
+    const rest = [];
+    for (const sub of condition.also) rest.push(await evaluateCondition(sub, ctx));
     if (combine === 'any') {
       // the primary condition participates: "this OR any of those"
       return result || rest.some(Boolean);

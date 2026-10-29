@@ -100,6 +100,27 @@ export function safeSend(send, payload, label = 'the reply') {
  * Used for the direction service worker -> content script, where the payload is a step the runner built
  * and could in principle have been given a value from a page or from user input.
  */
+/**
+ * A Blob's bytes as base64, for a data URL.
+ *
+ * Needed because `URL.createObjectURL` does not exist in a Manifest V3 service worker, so a download step that
+ * carried content had no URL to hand to the downloads API. Chunked rather than one `String.fromCharCode(...bytes)`
+ * call: the spread form blows the argument limit at a few tens of kilobytes, which a downloaded file easily exceeds.
+ */
+export function bytesToBase64(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error('could not read the blob for download'));
+    reader.onload = () => {
+      const result = String(reader.result ?? '');
+      // FileReader gives `data:<type>;base64,<payload>`; only the payload is wanted
+      const comma = result.indexOf(',');
+      resolve(comma >= 0 ? result.slice(comma + 1) : '');
+    };
+    reader.readAsDataURL(blob);
+  });
+}
+
 export function cloneableOrString(value) {
   try {
     if (typeof structuredClone === 'function') {

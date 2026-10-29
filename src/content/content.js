@@ -52,7 +52,14 @@ function reply(sendResponse, payload) {
  */
 async function clickEveryMatch(step, all) {
   const started = Date.now();
-  const CEILING = 200;                 // hard stop regardless of configuration
+  /**
+   * The hard stop, and it is now REPORTED rather than silent.
+   *
+   * It used to stop at 200 while the panel validated up to 5000, so a limit of 3000 announced "all 200 clicked"
+   * with `stoppedEarly: false` - a completed run as far as anyone could see. When the ceiling is reached the result
+   * now says so, because "I stopped" and "I finished" are different answers to a question about orders.
+   */
+  const CEILING = 200;
   let clicked = 0;
   let stoppedEarly = false;
   let reason = '';
@@ -78,12 +85,17 @@ async function clickEveryMatch(step, all) {
    */
   let total = 0;
   let firstPassTotal = 0;
+  let hitCeiling = false;
 
   for (let pass = 0; pass < CEILING; pass++) {
     // the whole candidate list on this pass, filtered the same way a single click would be
     const found = findAll(document, step.finder, { requireVisible: true, requireActionable: true });
     total = found.elements.length;
     if (pass === 0) firstPassTotal = total;
+    if (pass === CEILING - 1 && (found.elements ?? []).length > 1) {
+      // the ceiling is a safety stop, not a completion: say so rather than letting the result read as "all of them"
+      hitCeiling = true;
+    }
     const el = pickNext({
       candidates: found.elements,
       isVisited: (x) => done.has(x),
@@ -121,10 +133,14 @@ async function clickEveryMatch(step, all) {
   }
 
   return {
-    how: `${clicked} of ${Math.max(firstPassTotal, clicked)} clicked (${all.order})`,
+    how: `${clicked} of ${Math.max(firstPassTotal, clicked)} clicked (${all.order})`
+      + (hitCeiling ? ` - STOPPED AT THE CEILING of ${CEILING}` : ''),
     clicked,
     total: Math.max(firstPassTotal, clicked),
-    stoppedEarly,
+    // the ceiling is a different outcome from "finished", and a caller that cannot tell them apart will report a
+    // truncated run as a complete one
+    hitCeiling,
+    stoppedEarly: stoppedEarly || hitCeiling,
     summary: describeAllClicks({
       clicked,
       total: Math.max(firstPassTotal, clicked),

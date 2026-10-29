@@ -25,50 +25,50 @@ const pageHost = () => ({
 });
 
 describe('variable conditions', () => {
-  it('reads a variable from vars rather than asking the page', () => {
+  it('reads a variable from vars rather than asking the page', async () => {
     const vars = { status: 'ready' };
-    const ok = evaluateCondition(
+    const ok = await evaluateCondition(
       { source: 'variable', variable: 'status', comparator: 'eq', value: 'ready' },
       { vars, read: pageHost().readCondition },
     );
     expect(ok).toBe(true);
   });
 
-  it('matches the variable it names, not a different one', () => {
+  it('matches the variable it names, not a different one', async () => {
     const vars = { a: 'one', b: 'two' };
-    expect(evaluateCondition(
+    expect(await evaluateCondition(
       { source: 'variable', variable: 'a', comparator: 'eq', value: 'one' },
       { vars, read: pageHost().readCondition },
     )).toBe(true);
-    expect(evaluateCondition(
+    expect(await evaluateCondition(
       { source: 'variable', variable: 'b', comparator: 'eq', value: 'one' },
       { vars, read: pageHost().readCondition },
     )).toBe(false);
   });
 
-  it('supports a numeric comparison on a variable', () => {
+  it('supports a numeric comparison on a variable', async () => {
     const vars = { n: '42' };
-    expect(evaluateCondition(
+    expect(await evaluateCondition(
       { source: 'variable', variable: 'n', comparator: 'gt', value: '10' },
       { vars, read: pageHost().readCondition },
     )).toBe(true);
   });
 
-  it('treats a missing variable as not matching rather than throwing', () => {
+  it('treats a missing variable as not matching rather than throwing', async () => {
     expect(() => evaluateCondition(
       { source: 'variable', variable: 'nope', comparator: 'eq', value: 'x' },
       { vars: {}, read: pageHost().readCondition },
     )).not.toThrow();
-    expect(evaluateCondition(
+    expect(await evaluateCondition(
       { source: 'variable', variable: 'nope', comparator: 'eq', value: 'x' },
       { vars: {}, read: pageHost().readCondition },
     )).toBe(false);
   });
 
-  it('the expected value is itself templated from vars', () => {
+  it('the expected value is itself templated from vars', async () => {
     // A condition like `variable status eq ${wanted}` is the useful shape for a data-driven run.
     const vars = { status: 'ready', wanted: 'ready' };
-    expect(evaluateCondition(
+    expect(await evaluateCondition(
       { source: 'variable', variable: 'status', comparator: 'eq', value: '${wanted}' },
       { vars, read: pageHost().readCondition },
     )).toBe(true);
@@ -76,14 +76,14 @@ describe('variable conditions', () => {
 });
 
 describe('a js condition source', () => {
-  it('does NOT execute code - it is inert data', () => {
+  it('does NOT execute code - it is inert data', async () => {
     // `steps.js` validates that `c.js` is present when source is 'js', so a user CAN author one. Nothing
     // evaluates it: conditions.js routes it through ctx.read, and the page returns null for it. This test
     // pins that behaviour so it is a decision rather than an accident.
     let executed = false;
     const evil = 'executed = true; return "pwned"';
     const vars = {};
-    const result = evaluateCondition(
+    const result = await evaluateCondition(
       { source: 'js', js: evil, comparator: 'eq', value: 'pwned' },
       {
         vars,

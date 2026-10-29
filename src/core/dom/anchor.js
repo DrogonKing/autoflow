@@ -95,7 +95,15 @@ export function findAnchor(el, doc = el?.ownerDocument) {
     // then any other data-* with a unique value, since many apps invent their own names
     for (const a of cur.attributes ?? []) {
       if (!a.name.startsWith('data-')) continue;
-      if (/reactid|react-root|v-|ng-|aria-owns/i.test(a.name)) continue;
+      /**
+       * Vendor-generated attributes are skipped, but ANCHORED to the start of the name.
+       *
+       * The pattern used to be `/v-|ng-/` unanchored, so it matched those two characters ANYWHERE in the name and
+       * silently discarded useful attributes: measured with the old pattern, `data-nav-id`, `data-dev-id`,
+       * `data-pricing-plan`, `data-loading-key` and `data-setting-id` were all skipped, and a page using any of them
+       * as its identifier simply could not be anchored.
+       */
+      if (/^(reactid|react-root|data-reactid|v-|ng-|aria-owns)/i.test(a.name)) continue;
       // the extension marks the document itself; anchoring to a marker on <html> produces a selector that is
       // positional all the way down while LOOKING anchored, which is worse than no anchor at all
       if (a.name.startsWith('data-autoflow-')) continue;
