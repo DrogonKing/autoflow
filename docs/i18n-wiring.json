@@ -1,0 +1,16 @@
+{
+  "wired": {
+    "panel": 39,
+    "options": 7
+  },
+  "hardcoded_remaining": {
+    "panel": [
+      "text: do not roll over to the next day if today\\'s time has already passed",
+      "text: URL",
+      "placeholder: https://… or ${row.url}",
+      "placeholder: value or ${…}",
+      "text: Click an element on the page…"
+    ],
+    "options": []
+  }
+}

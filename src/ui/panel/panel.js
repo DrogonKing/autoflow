@@ -14,6 +14,16 @@ import { STEP_KINDS, STEP_LABELS, BLOCK_KINDS, makeStep, countSteps } from '../.
 import { describeCondition } from '../../core/engine/conditions.js';
 import { readCsv } from '../../core/io/csv.js';
 import { api } from '../../platform/api.js';
+import { applyToDocument, translator } from '../../core/i18n/i18n.js';
+
+/**
+ * The visible name of a step kind.
+ *
+ * Falls back to the model's own English label, so a kind added to the model before the catalogue still reads
+ * as "Fill field" rather than as "step.fill". The model remains the source of truth for which kinds exist;
+ * the catalogue only decides what they are called.
+ */
+const kindLabel = (kind) => (t.has(`step.${kind}`) ? t(`step.${kind}`) : (STEP_LABELS[kind] ?? kind));
 
 const el = (tag, props = {}, ...children) => {
   const node = document.createElement(tag);
@@ -46,6 +56,17 @@ const send = (msg) => api.runtime.sendMessage(msg)
   .then((res) => res ?? { ok: false, error: 'no response' })
   .catch((e) => ({ ok: false, error: String(e?.message ?? e) }));
 
+/**
+ * The translator, and why it is module scope rather than passed down.
+ *
+ * Every view calls `t('key')`. Threading it through every function would touch a hundred signatures for one
+ * value that is fixed for the lifetime of a render, so it lives here and is rebuilt whenever the render
+ * begins. `t` is reassigned (not mutated) so a stale closure cannot hold an old language.
+ *
+ * It starts as English so a string rendered before settings arrive is readable rather than a raw key.
+ */
+let t = translator('en');
+
 const state = {
   automations: [],
   settings: {},
@@ -65,6 +86,13 @@ const state = {
 
 const fmtTime = (ms) => (ms ? new Date(ms).toLocaleString() : '-');
 
+/**
+ * "in 3 days" / "2 min ago", in the current language.
+ *
+ * Pluralisation is handled per language rather than with an `s` suffix. English needs one/other; Persian does
+ * not inflect after a number at all, so appending an `s` there would be nonsense. Keeping the rule with the
+ * language is why this is not a single template string.
+ */
 function relTime(ms) {
   if (!ms) return '-';
   const d = ms - Date.now();
@@ -72,20 +100,28 @@ function relTime(ms) {
   const mins = Math.round(abs / 60000);
   const hours = Math.round(abs / 3600000);
   const days = Math.round(abs / 86400000);
-  const unit = days >= 1 ? `${days} day${days === 1 ? '' : 's'}`
-    : hours >= 1 ? `${hours} hour${hours === 1 ? '' : 's'}`
-    : mins >= 1 ? `${mins} min`
-    : 'under a minute';
-  return d >= 0 ? `in ${unit}` : `${unit} ago`;
+  const fa = t.language === 'fa';
+  let unit;
+  if (days >= 1) {
+    unit = fa ? `${days} روز` : `${days} day${days === 1 ? '' : 's'}`;
+  } else if (hours >= 1) {
+    unit = fa ? `${hours} ساعت` : `${hours} hour${hours === 1 ? '' : 's'}`;
+  } else if (mins >= 1) {
+    unit = fa ? `${mins} دقیقه` : `${mins} min`;
+  } else {
+    unit = fa ? 'کمتر از یک دقیقه' : 'under a minute';
+  }
+  if (d >= 0) return fa ? `${unit} دیگر` : `in ${unit}`;
+  return fa ? `${unit} پیش` : `${unit} ago`;
 }
 
 const REASON_LABEL = {
-  finished: 'Finished',
-  'stopped-by-user': 'Stopped',
-  'step-error': 'Failed',
-  'run-timeout': 'Timed out',
-  'step-limit': 'Step limit',
-  aborted: 'Aborted',
+  finished: 'history.ok',
+  'stopped-by-user': 'history.stopped',
+  'step-error': 'history.failed',
+  'run-timeout': 'history.timedOut',
+  'step-limit': 'history.stepLimit',
+  aborted: 'history.aborted',
 };
 
 async function refresh() {
@@ -94,6 +130,27 @@ async function refresh() {
   const active = await send({ type: 'get-active-run' });
   if (active?.ok) state.activeRun = active.run;
   render();
+}
+
+/**
+ * Pick up the language preference and apply it to the document.
+ *
+ * Called before the first render: `dir` and the font stack have to be set before content is painted, or a
+ * Persian panel flickers left-to-right for a frame. Re-decided on every settings change so switching language
+ * re-renders in place without a reload.
+ */
+async function applyLanguage() {
+  const res = await send({ type: 'get-settings' }).catch(() => null);
+  if (res?.ok) state.settings = res.settings ?? {};
+  const preference = state.settings?.language ?? 'system';
+  const browserLanguage = globalThis.navigator?.language ?? 'en';
+  // resolveLanguage is imported through the translator helper so the rule lives in one place
+  const { resolveLanguage } = await import('../../core/i18n/i18n.js');
+  const language = resolveLanguage(preference, browserLanguage);
+  t = translator(language);
+  applyToDocument(document, language);
+  state.language = language;
+  return language;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -119,7 +176,7 @@ function scheduleEditor(onChange) {
   };
 
   const kindRow = el('div', { class: 'row' },
-    el('label', { text: 'When' }),
+    el('label', { text: t('field.when') }),
     el('select', {
       class: 'grow',
       onchange: (e) => setKind(e.target.value),
@@ -144,7 +201,7 @@ function scheduleEditor(onChange) {
     const pad = (n) => String(n).padStart(2, '0');
     const local = `${dt.getFullYear()}-${pad(dt.getMonth() + 1)}-${pad(dt.getDate())}T${pad(dt.getHours())}:${pad(dt.getMinutes())}`;
     wrap.append(el('div', { class: 'row' },
-      el('label', { text: 'At' }),
+      el('label', { text: t('field.at') }),
       el('input', {
         type: 'datetime-local', class: 'grow', value: local,
         onchange: (e) => {
@@ -163,7 +220,7 @@ function scheduleEditor(onChange) {
     const unit = mss % 3_600_000 === 0 ? 'hours' : mss % 60_000 === 0 ? 'minutes' : 'seconds';
     const divisor = { hours: 3_600_000, minutes: 60_000, seconds: 1000 }[unit];
     wrap.append(el('div', { class: 'row' },
-      el('label', { text: 'Every' }),
+      el('label', { text: t('field.every') }),
       number(Math.round(mss / divisor), { min: '1', class: 'small' }, (v) => {
         state.editing.schedule = { ...s, everyMs: Math.max(1000, Number(v) * divisor) };
         onChange();
@@ -178,7 +235,7 @@ function scheduleEditor(onChange) {
     ));
     // an interval without a stop is a schedule that runs forever; offer the bound
     wrap.append(el('div', { class: 'row' },
-      el('label', { text: 'Stop after' }),
+      el('label', { text: t('field.stopAfter') }),
       el('input', {
         type: 'datetime-local', class: 'grow',
         value: s.stopAt ? new Date(s.stopAt - new Date(s.stopAt).getTimezoneOffset() * 60000).toISOString().slice(0, 16) : '',
@@ -193,7 +250,7 @@ function scheduleEditor(onChange) {
 
   if (s.kind === 'daily' || s.kind === 'weekly' || s.kind === 'monthly') {
     if (s.kind === 'weekly') {
-      const row = el('div', { class: 'row wrap' }, el('label', { text: 'Days' }));
+      const row = el('div', { class: 'row wrap' }, el('label', { text: t('field.days') }));
       for (let i = 0; i < 7; i++) {
         const on = (s.days ?? []).includes(i);
         row.append(el('button', {
@@ -213,16 +270,16 @@ function scheduleEditor(onChange) {
     }
     if (s.kind === 'monthly') {
       wrap.append(el('div', { class: 'row' },
-        el('label', { text: 'Day' }),
+        el('label', { text: t('field.day') }),
         number(s.day ?? 1, { min: '1', max: '28', class: 'small' }, (v) => {
           state.editing.schedule = { ...s, day: Math.min(28, Math.max(1, Number(v))) };
           onChange();
         }),
-        el('span', { class: 'hint', text: '1–28, so every month has it' }),
+        el('span', { class: 'hint', text: t('sched.monthlyDayHint') }),
       ));
     }
     wrap.append(el('div', { class: 'row' },
-      el('label', { text: 'Time' }),
+      el('label', { text: t('field.time') }),
       el('input', {
         type: 'time', class: 'grow', value: `${String(s.hour ?? 9).padStart(2, '0')}:${String(s.minute ?? 0).padStart(2, '0')}`,
         onchange: (e) => {
@@ -238,19 +295,19 @@ function scheduleEditor(onChange) {
 
   if (s.kind === 'cron') {
     wrap.append(el('div', { class: 'row' },
-      el('label', { text: 'Expression' }),
+      el('label', { text: t('field.expression') }),
       el('input', {
-        class: 'grow', value: s.expression ?? '', placeholder: 'minute hour day month weekday',
+        class: 'grow', value: s.expression ?? '', placeholder: t('sched.cronPlaceholder'),
         onchange: (e) => {
           state.editing.schedule = { kind: 'cron', expression: e.target.value };
           onChange();
         },
       }),
     ));
-    wrap.append(el('div', { class: 'hint', text: 'Five fields, in your local time. e.g.  0 9 * * 1-5  = weekdays at 09:00' }));
+    wrap.append(el('div', { class: 'hint', text: t('sched.cronHelp') }));
     wrap.append(el('div', {
       class: 'hint',
-      text: 'Six fields supported when you need an exact second:  ss mm hh day month weekday. '
+      text: t('sched.cronSecondsHelp')
         + 'e.g.  0 0 9 * * 1-5  = weekdays at 09:00:00',
     }));
   }
@@ -266,11 +323,8 @@ function scheduleEditor(onChange) {
           onChange();
         },
       }),
-      el('label', { for: 'same-day', text: 'Today only' }),
-      el('span', {
-        class: 'hint',
-        text: 'do not roll over to the next day if today\'s time has already passed',
-      }),
+      el('label', { for: 'same-day', text: t('field.todayOnly') }),
+      el('span', { class: 'hint', text: t('timer.noRollover') }),
     ));
   }
 
@@ -292,7 +346,7 @@ function scheduleEditor(onChange) {
       el('div', { class: 'preview-label', text: label }),
       ...upcoming.map((t) => el('div', { class: 'preview-next', text: `next: ${fmtTime(t)}  (${relTime(t)})` })),
       upcoming.length === 0 && state.editing.schedule.kind !== 'manual'
-        ? el('div', { class: 'preview-warn', text: 'this schedule will not fire again' })
+        ? el('div', { class: 'preview-warn', text: t('sched.willNotFire') })
         : null,
     ));
   } catch (e) {
@@ -311,20 +365,20 @@ function stepRow(step, list, index, rerender) {
   const row = el('div', { class: 'step' });
 
   const header = el('div', { class: 'step-head' },
-    el('span', { class: `step-kind k-${step.kind}`, text: STEP_LABELS[step.kind] ?? step.kind }),
+    el('span', { class: `step-kind k-${step.kind}`, text: kindLabel(step.kind) }),
     el('span', { class: 'step-summary', text: summariseStep(step) }),
     el('span', { class: 'spacer' }),
-    el('button', { class: 'icon', title: 'Move up', text: '↑', onclick: () => {
+    el('button', { class: 'icon', title: t('action.moveUp'), text: t('ui.moveUp'), onclick: () => {
       if (index === 0) return;
       [list[index - 1], list[index]] = [list[index], list[index - 1]];
       rerender();
     } }),
-    el('button', { class: 'icon', title: 'Move down', text: '↓', onclick: () => {
+    el('button', { class: 'icon', title: t('action.moveDown'), text: t('ui.moveDown'), onclick: () => {
       if (index >= list.length - 1) return;
       [list[index + 1], list[index]] = [list[index], list[index + 1]];
       rerender();
     } }),
-    el('button', { class: 'icon danger', title: 'Delete', text: '✕', onclick: () => {
+    el('button', { class: 'icon danger', title: t('action.delete'), text: t('ui.close'), onclick: () => {
       list.splice(index, 1);
       rerender();
     } }),
@@ -339,26 +393,32 @@ function stepRow(step, list, index, rerender) {
   if (needsElement) {
     const finder = step.finder ?? { strategy: 'css', selector: '' };
     body.append(el('div', { class: 'row' },
-      el('label', { text: 'Find' }),
+      el('label', { text: t('field.find') }),
       el('select', {
         onchange: (e) => { step.finder = { ...finder, strategy: e.target.value }; rerender(); },
       }, ...['css', 'xpath', 'text', 'id', 'name', 'label', 'placeholder', 'aria', 'role', 'point']
-        .map((s) => el('option', { value: s, text: s, selected: finder.strategy === s }))),
+        .map((s) => el('option', {
+          value: s,
+          // The value stays the raw token, because that is what the finder matches on; only the visible label
+          // is translated. A strategy with no catalogue entry falls back to the token, which is still correct.
+          text: t.has(`find.${s}`) ? t(`find.${s}`) : s,
+          selected: finder.strategy === s,
+        }))),
       el('input', {
         class: 'grow mono',
         value: finder.selector ?? finder.xpath ?? finder.text ?? finder.id ?? finder.name ??
                finder.label ?? finder.placeholder ?? finder.aria ?? finder.role ?? '',
-        placeholder: 'selector, path or text',
+        placeholder: t('field.selector'),
         onchange: (e) => {
-          const key = { css: 'selector', xpath: 'xpath', text: 'text', id: 'id', name: 'name',
-            label: 'label', placeholder: 'placeholder', aria: 'aria', role: 'role' }[finder.strategy];
+          const key = { css: 'selector', xpath: 'xpath', text: t('find.text'), id: 'id', name: 'name',
+            label: 'label', placeholder: t('find.placeholder'), aria: 'aria', role: 'role' }[finder.strategy];
           if (key) step.finder = { ...finder, [key]: e.target.value };
           rerender();
         },
       }),
       el('button', {
-        class: 'pick', text: '⌖ Pick',
-        title: 'Click an element on the page',
+        class: 'pick', text: t('ui.pick'),
+        title: t('ui.pickTitle'),
         onclick: async () => {
           state.pickTarget = step.id;
           const res = await send({ type: 'pick-element' });
@@ -374,99 +434,99 @@ function stepRow(step, list, index, rerender) {
   // ---- kind-specific fields
   if (step.kind === 'fill') {
     body.append(el('div', { class: 'row' },
-      el('label', { text: 'Value' }),
+      el('label', { text: t('field.value') }),
       el('input', {
         class: 'grow', value: step.value ?? '',
-        placeholder: 'text, or ${variable} or ${row.column}',
+        placeholder: t('ph.template'),
         onchange: (e) => { step.value = e.target.value; rerender(); },
       }),
     ));
   }
   if (step.kind === 'click') {
     body.append(el('div', { class: 'row' },
-      el('label', { text: 'Button' }),
+      el('label', { text: t('field.button') }),
       el('select', { onchange: (e) => { step.button = e.target.value; rerender(); } },
         ...['left', 'right', 'middle'].map((b) => el('option', { value: b, text: b, selected: (step.button ?? 'left') === b }))),
-      el('label', { text: 'Clicks' }),
+      el('label', { text: t('field.clicks') }),
       el('select', { onchange: (e) => { step.clickCount = Number(e.target.value); rerender(); } },
         ...[1, 2, 3].map((n) => el('option', { value: String(n), text: String(n), selected: (step.clickCount ?? 1) === n }))),
     ));
   }
   if (step.kind === 'check') {
     body.append(el('div', { class: 'row' },
-      el('label', { text: 'State' }),
+      el('label', { text: t('field.state') }),
       el('select', { onchange: (e) => { step.checked = e.target.value === 'true'; rerender(); } },
-        el('option', { value: 'true', text: 'Check', selected: step.checked === true }),
-        el('option', { value: 'false', text: 'Uncheck', selected: step.checked !== true })),
+        el('option', { value: 'true', text: t('step.check'), selected: step.checked === true }),
+        el('option', { value: 'false', text: t('step.uncheck'), selected: step.checked !== true })),
     ));
   }
   if (step.kind === 'select') {
     body.append(el('div', { class: 'row' },
-      el('label', { text: 'Option' }),
+      el('label', { text: t('field.option') }),
       el('input', {
-        class: 'grow', value: step.value ?? '', placeholder: 'option value or visible text',
+        class: 'grow', value: step.value ?? '', placeholder: t('ph.optionValue'),
         onchange: (e) => { step.value = e.target.value; rerender(); },
       }),
     ));
   }
   if (step.kind === 'wait') {
     body.append(el('div', { class: 'row' },
-      el('label', { text: 'Wait' }),
+      el('label', { text: t('step.wait') }),
       el('input', {
         type: 'number', class: 'small', value: String(step.ms ?? 1000), min: '0',
         onchange: (e) => { step.ms = Math.max(0, Number(e.target.value)); rerender(); },
       }),
-      el('span', { class: 'hint', text: 'ms' }),
+      el('span', { class: 'hint', text: t('hint.ms') }),
     ));
   }
   if (step.kind === 'goto' || step.kind === 'newTab') {
     body.append(el('div', { class: 'row' },
-      el('label', { text: 'URL' }),
+      el('label', { text: t('field.url') }),
       el('input', {
-        class: 'grow mono', value: step.url ?? '', placeholder: 'https://… or ${row.url}',
+        class: 'grow mono', value: step.url ?? '', placeholder: t('ph.url'),
         onchange: (e) => { step.url = e.target.value; rerender(); },
       }),
     ));
   }
   if (step.kind === 'key') {
     body.append(el('div', { class: 'row' },
-      el('label', { text: 'Keys' }),
+      el('label', { text: t('field.keys') }),
       el('input', {
         class: 'grow mono', value: Array.isArray(step.keys) ? step.keys.join('+') : (step.keys ?? ''),
-        placeholder: 'e.g. ctrl+shift+t',
+        placeholder: t('ph.keyChord'),
         onchange: (e) => { step.keys = e.target.value; rerender(); },
       }),
-      el('label', { text: 'Gap' }),
+      el('label', { text: t('field.gap') }),
       el('input', {
         type: 'number', class: 'small', value: String(step.gapMs ?? 0), min: '0',
         onchange: (e) => { step.gapMs = Number(e.target.value); rerender(); },
       }),
-      el('span', { class: 'hint', text: 'ms between keys' }),
+      el('span', { class: 'hint', text: t('hint.msBetweenKeys') }),
     ));
   }
   if (step.kind === 'scroll') {
     body.append(el('div', { class: 'row' },
-      el('label', { text: 'By' }),
+      el('label', { text: t('hint.by') }),
       el('input', {
         type: 'number', class: 'small', value: String(step.y ?? 0),
         onchange: (e) => { step.y = Number(e.target.value); rerender(); },
       }),
-      el('span', { class: 'hint', text: 'px vertical (negative scrolls up)' }),
+      el('span', { class: 'hint', text: t('hint.scrollPx') }),
     ));
   }
   if (step.kind === 'setVariable') {
     body.append(el('div', { class: 'row' },
-      el('label', { text: 'Name' }),
+      el('label', { text: t('field.name') }),
       el('input', { class: 'small mono', value: step.name ?? '', onchange: (e) => { step.name = e.target.value; rerender(); } }),
       el('input', {
-        class: 'grow', value: step.value ?? '', placeholder: 'value or ${…}',
+        class: 'grow', value: step.value ?? '', placeholder: t('ph.anyValue'),
         onchange: (e) => { step.value = e.target.value; rerender(); },
       }),
     ));
   }
   if (step.kind === 'extract') {
     body.append(el('div', { class: 'row' },
-      el('label', { text: 'Into' }),
+      el('label', { text: t('field.into') }),
       el('input', { class: 'small mono', value: step.name ?? '', onchange: (e) => { step.name = e.target.value; rerender(); } }),
       el('select', { onchange: (e) => { step.source = e.target.value; rerender(); } },
         ...['text', 'value', 'attribute', 'html', 'count'].map((s) =>
@@ -475,9 +535,9 @@ function stepRow(step, list, index, rerender) {
   }
   if (step.kind === 'notify') {
     body.append(el('div', { class: 'row' },
-      el('label', { text: 'Message' }),
+      el('label', { text: t('field.message') }),
       el('input', {
-        class: 'grow', value: step.message ?? '', placeholder: 'text or ${variable}',
+        class: 'grow', value: step.message ?? '', placeholder: t('ph.textOrVariable'),
         onchange: (e) => { step.message = e.target.value; rerender(); },
       }),
     ));
@@ -485,7 +545,7 @@ function stepRow(step, list, index, rerender) {
   if (step.kind === 'runScript') {
     body.append(el('textarea', {
       class: 'code', rows: '3', value: step.code ?? '',
-      placeholder: 'JavaScript run in the page. Return a value to store it.',
+      placeholder: t('ph.script'),
       onchange: (e) => { step.code = e.target.value; },
     }));
   }
@@ -493,14 +553,14 @@ function stepRow(step, list, index, rerender) {
   // ---- loops and branches
   if (step.kind === 'loop') {
     body.append(el('div', { class: 'row' },
-      el('label', { text: 'Type' }),
+      el('label', { text: t('field.type') }),
       el('select', { onchange: (e) => { step.loopType = e.target.value; rerender(); } },
         ...[['count', 'a number of times'], ['while', 'while a condition holds'], ['forEach', 'for each item in a list']]
           .map(([v, t]) => el('option', { value: v, text: t, selected: (step.loopType ?? 'count') === v }))),
     ));
     if ((step.loopType ?? 'count') === 'count') {
       body.append(el('div', { class: 'row' },
-        el('label', { text: 'Times' }),
+        el('label', { text: t('field.times') }),
         el('input', {
           type: 'number', class: 'small', value: String(step.count ?? 1), min: '1',
           onchange: (e) => { step.count = Math.max(1, Number(e.target.value)); rerender(); },
@@ -509,21 +569,21 @@ function stepRow(step, list, index, rerender) {
     }
     if (step.loopType === 'forEach') {
       body.append(el('div', { class: 'row' },
-        el('label', { text: 'List' }),
+        el('label', { text: t('field.list') }),
         el('input', {
-          class: 'grow mono', value: step.listVariable ?? '', placeholder: 'variable holding a list (or the CSV rows)',
+          class: 'grow mono', value: step.listVariable ?? '', placeholder: t('ph.listVariable'),
           onchange: (e) => { step.listVariable = e.target.value; rerender(); },
         }),
       ));
     }
     if (step.loopType === 'while') {
       body.append(el('div', { class: 'row' },
-        el('label', { text: 'Max' }),
+        el('label', { text: t('field.max') }),
         el('input', {
           type: 'number', class: 'small', value: String(step.maxIterations ?? 100), min: '1',
           onchange: (e) => { step.maxIterations = Math.max(1, Number(e.target.value)); rerender(); },
         }),
-        el('span', { class: 'hint', text: 'iterations — required, so it cannot run forever' }),
+        el('span', { class: 'hint', text: t('hint.loopIterations') }),
       ));
       body.append(conditionEditor(step, 'condition', rerender));
     }
@@ -532,8 +592,8 @@ function stepRow(step, list, index, rerender) {
   if (step.kind === 'if') {
     body.append(conditionEditor(step, 'condition', rerender));
     body.append(el('div', { class: 'row' },
-      el('label', { text: 'Runs for' }),
-      el('span', { class: 'hint', text: 'current: loop index, iteration, total, first, last' }),
+      el('label', { text: t('field.runsFor') }),
+      el('span', { class: 'hint', text: t('hint.loopVars') }),
     ));
   }
 
@@ -546,29 +606,29 @@ function stepRow(step, list, index, rerender) {
     if (step.kind === 'if') {
       const elseList = step.else ?? [];
       if (!step.else) step.else = elseList;
-      body.append(el('div', { class: 'sub-label', text: 'otherwise' }));
+      body.append(el('div', { class: 'sub-label', text: t('hint.otherwise') }));
       body.append(stepsEditor(elseList, rerender, 'else'));
     }
   }
 
   // ---- shared options
   body.append(el('div', { class: 'row opts' },
-    el('label', { text: 'Delay' }),
+    el('label', { text: t('field.delay') }),
     el('input', {
-      type: 'number', class: 'tiny', value: String(step.delayMs ?? ''), placeholder: '—', min: '0',
+      type: 'number', class: 'tiny', value: String(step.delayMs ?? ''), placeholder: t('ph.empty'), min: '0',
       onchange: (e) => { step.delayMs = e.target.value === '' ? undefined : Number(e.target.value); },
     }),
-    el('span', { class: 'hint', text: 'ms before' }),
-    el('label', { text: 'Retries' }),
+    el('span', { class: 'hint', text: t('field.delayUnit') }),
+    el('label', { text: t('field.retries') }),
     el('input', {
-      type: 'number', class: 'tiny', value: String(step.retries ?? ''), placeholder: '—', min: '0', max: '50',
+      type: 'number', class: 'tiny', value: String(step.retries ?? ''), placeholder: t('ph.empty'), min: '0', max: '50',
       onchange: (e) => { step.retries = e.target.value === '' ? undefined : Number(e.target.value); },
     }),
-    el('label', { text: 'On error' }),
+    el('label', { text: t('field.onError') }),
     el('select', { onchange: (e) => { step.onError = e.target.value || undefined; } },
-      el('option', { value: '', text: 'stop the run', selected: !step.onError }),
-      el('option', { value: 'continue', text: 'continue', selected: step.onError === 'continue' }),
-      el('option', { value: 'skip', text: 'skip this step', selected: step.onError === 'skip' })),
+      el('option', { value: '', text: t('onError.stop'), selected: !step.onError }),
+      el('option', { value: 'continue', text: t('onError.continue'), selected: step.onError === 'continue' }),
+      el('option', { value: 'skip', text: t('onError.skip'), selected: step.onError === 'skip' })),
   ));
 
   row.append(body);
@@ -580,7 +640,7 @@ function conditionEditor(host, key, rerender) {
   host[key] = c;
   const wrap = el('div', { class: 'cond' });
   wrap.append(el('div', { class: 'row' },
-    el('label', { text: 'If' }),
+    el('label', { text: t('step.if') }),
     el('select', {
       onchange: (e) => {
         const [source, comparator] = e.target.value.split('|');
@@ -613,9 +673,9 @@ function conditionEditor(host, key, rerender) {
   if (c.comparator !== 'exists' && c.comparator !== 'notExists' &&
       !['visible', 'hidden', 'checked', 'unchecked', 'enabled', 'disabled', 'empty', 'notEmpty'].includes(c.comparator)) {
     wrap.append(el('div', { class: 'row' },
-      el('label', { text: 'Value' }),
+      el('label', { text: t('field.value') }),
       el('input', {
-        class: 'grow', value: c.value ?? '', placeholder: 'compare against, or ${variable}',
+        class: 'grow', value: c.value ?? '', placeholder: t('ph.compareAgainst'),
         onchange: (e) => { c.value = e.target.value; rerender(); },
       }),
     ));
@@ -658,9 +718,10 @@ function stepsEditor(list, rerender, label) {
 
   const addRow = el('div', { class: 'row add' },
     el('select', { class: 'grow', id: 'add-kind' },
-      ...STEP_KINDS.map((k) => el('option', { value: k, text: STEP_LABELS[k] ?? k }))),
+      ...STEP_KINDS.map((k) => el('option', { value: k, text: kindLabel(k) })),
+    ),
     el('button', {
-      class: 'primary', text: '+ Add step',
+      class: 'primary', text: t('hint.addStep'),
       onclick: (e) => {
         const sel = e.currentTarget.previousElementSibling;
         const kind = sel.value;
@@ -695,7 +756,7 @@ function automationsView(rerender) {
 
   wrap.append(el('div', { class: 'row' },
     el('button', {
-      class: 'primary grow', text: '+ New automation',
+      class: 'primary grow', text: t('nav.newAutomation'),
       onclick: async () => {
         const a = {
           id: `a${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
@@ -712,8 +773,8 @@ function automationsView(rerender) {
       },
     }),
     el('button', {
-      class: 'grow', text: '⌖ Pick & record',
-      title: 'Pick elements on the page to build steps automatically',
+      class: 'grow', text: t('nav.pickAndRecord'),
+      title: t('hint.pickTitleLong'),
       onclick: async () => {
         const res = await send({ type: 'pick-element' });
         if (!res.ok) alert(res.error ?? 'could not start the picker');
@@ -729,7 +790,7 @@ function automationsView(rerender) {
         el('div', { class: 'hint', text: `${state.activeRun.steps ?? 0} steps · started ${relTime(state.activeRun.startedAt)}` }),
       ),
       el('button', {
-        class: 'danger', text: 'Stop',
+        class: 'danger', text: t('action.stop'),
         onclick: async () => { await send({ type: 'stop-run' }); await refresh(); },
       }),
     ));
@@ -737,8 +798,8 @@ function automationsView(rerender) {
 
   if (state.automations.length === 0) {
     wrap.append(el('div', { class: 'empty' },
-      el('p', { text: 'No automations yet.' }),
-      el('p', { class: 'hint', text: 'Create one, add steps, then pick elements on the page to fill them in.' }),
+      el('p', { text: t('empty.automations') }),
+      el('p', { class: 'hint', text: t('empty.automationsHint') }),
     ));
     return wrap;
   }
@@ -760,7 +821,7 @@ function automationsView(rerender) {
       el('div', { class: 'card-head' },
         el('input', {
           type: 'checkbox', checked: a.enabled !== false,
-          title: 'Enable or disable',
+          title: t('action.enableOrDisable'),
           onchange: async (e) => {
             await send({ type: 'save-automation', automation: { ...a, enabled: e.target.checked } });
             await send({ type: 'reschedule' });
@@ -777,7 +838,7 @@ function automationsView(rerender) {
       ),
       el('div', { class: 'card-actions' },
         el('button', {
-          class: 'primary', text: '▶ Run now',
+          class: 'primary', text: t('ui.runNow'),
           onclick: async (e) => {
             e.currentTarget.disabled = true;
             const res = await send({ type: 'start-run', automationId: a.id });
@@ -786,18 +847,18 @@ function automationsView(rerender) {
           },
         }),
         el('button', {
-          class: state.editing?.id === a.id ? 'active' : '', text: '✎ Edit',
+          class: state.editing?.id === a.id ? 'active' : '', text: t('ui.edit'),
           onclick: async () => {
             state.editing = state.editing?.id === a.id ? null : JSON.parse(JSON.stringify(a));
             rerender();
           },
         }),
         el('button', {
-          text: '⧉', title: 'Duplicate',
+          text: t('ui.duplicateGlyph'), title: t('action.duplicate'),
           onclick: async () => { await send({ type: 'duplicate-automation', id: a.id }); await refresh(); },
         }),
         el('button', {
-          class: 'danger', text: '🗑', title: 'Delete',
+          class: 'danger', text: t('ui.deleteGlyph'), title: t('action.delete'),
           onclick: async () => {
             if (!confirm(`Delete "${a.name}"?`)) return;
             await send({ type: 'delete-automation', id: a.id });
@@ -811,26 +872,26 @@ function automationsView(rerender) {
       const ed = state.editing;
       wrap.append(el('div', { class: 'editor' },
         el('div', { class: 'row' },
-          el('label', { text: 'Name' }),
+          el('label', { text: t('field.name') }),
           el('input', {
             class: 'grow', value: ed.name,
             onchange: (e) => { ed.name = e.target.value; },
           }),
         ),
         el('div', { class: 'row' },
-          el('label', { text: 'Sites' }),
+          el('label', { text: t('field.sites') }),
           el('input', {
             class: 'grow mono', value: (ed.urls ?? []).join(', '),
-            placeholder: 'leave empty to run anywhere; e.g. example.com/*',
+            placeholder: t('ph.siteScope'),
             onchange: (e) => { ed.urls = e.target.value.split(',').map((s) => s.trim()).filter(Boolean); },
           }),
         ),
         scheduleEditor(rerender),
-        el('div', { class: 'sub-label', text: 'Steps' }),
+        el('div', { class: 'sub-label', text: t('field.steps') }),
         stepsEditor(ed.steps, rerender, null),
         el('div', { class: 'row' },
           el('button', {
-            class: 'primary grow', text: 'Save',
+            class: 'primary grow', text: t('action.save'),
             onclick: async () => {
               const res = await send({ type: 'save-automation', automation: ed });
               if (!res.ok) { alert(res.error ?? 'could not save'); return; }
@@ -839,7 +900,7 @@ function automationsView(rerender) {
               await refresh();
             },
           }),
-          el('button', { text: 'Cancel', onclick: () => { state.editing = null; rerender(); } }),
+          el('button', { text: t('action.cancel'), onclick: () => { state.editing = null; rerender(); } }),
         ),
       ));
     }
@@ -850,7 +911,7 @@ function automationsView(rerender) {
 function dataView(rerender) {
   const wrap = el('div');
   wrap.append(el('div', { class: 'row' },
-    el('label', { text: 'CSV file' }),
+    el('label', { text: t('data.csvFile') }),
     el('input', {
       type: 'file', accept: '.csv,.tsv,.txt',
       onchange: async (e) => {
@@ -882,9 +943,9 @@ function dataView(rerender) {
     if (state.csv.rows.length > 8) {
       wrap.append(el('div', { class: 'hint', text: `…and ${state.csv.rows.length - 8} more` }));
     }
-    wrap.append(el('div', { class: 'hint', text: 'Use ${row.column} or ${column} in any step. A loop of type "for each item in a list" over "rows" walks the file.' }));
+    wrap.append(el('div', { class: 'hint', text: t('data.usage') }));
   } else {
-    wrap.append(el('div', { class: 'empty' }, el('p', { class: 'hint', text: 'Load a CSV to drive an automation with data. Rows are kept only while the browser is open.' })));
+    wrap.append(el('div', { class: 'empty' }, el('p', { class: 'hint', text: t('data.explainer') })));
   }
   return wrap;
 }
@@ -906,7 +967,7 @@ function scheduledView() {
     .sort((x, y) => (x.next ?? Infinity) - (y.next ?? Infinity));
 
   if (items.length === 0) {
-    wrap.append(el('div', { class: 'empty' }, el('p', { class: 'hint', text: 'Nothing is scheduled. Give an automation a schedule and it will appear here.' })));
+    wrap.append(el('div', { class: 'empty' }, el('p', { class: 'hint', text: t('schedule.empty') })));
     return wrap;
   }
 
@@ -930,12 +991,12 @@ function scheduledView() {
 function historyView() {
   const wrap = el('div');
   if (!state.runs.length) {
-    wrap.append(el('div', { class: 'empty' }, el('p', { class: 'hint', text: 'No runs recorded yet.' })));
+    wrap.append(el('div', { class: 'empty' }, el('p', { class: 'hint', text: t('empty.runs') })));
     return wrap;
   }
   wrap.append(el('div', { class: 'row' },
     el('span', { class: 'grow hint', text: `${state.runs.length} recent runs` }),
-    el('button', { text: 'Clear', onclick: async () => { await send({ type: 'clear-runs' }); await refresh(); } }),
+    el('button', { text: t('action.clear'), onclick: async () => { await send({ type: 'clear-runs' }); await refresh(); } }),
   ));
   for (const r of state.runs.slice(0, 40)) {
     const bad = r.reason !== 'finished';
@@ -943,7 +1004,12 @@ function historyView() {
       el('div', { class: 'card-head' },
         el('span', { class: 'name', text: r.name ?? '(unknown)' }),
         el('span', { class: 'spacer' }),
-        el('span', { class: `badge ${bad ? 'bad' : 'ok'}`, text: REASON_LABEL[r.reason] ?? r.reason }),
+        el('span', {
+          class: `badge ${bad ? 'bad' : 'ok'}`,
+          // REASON_LABEL now holds keys, so the lookup goes through the translator; a reason with no entry
+          // falls back to the raw reason rather than to a blank badge
+          text: REASON_LABEL[r.reason] ? t(REASON_LABEL[r.reason]) : r.reason,
+        }),
       ),
       el('div', { class: 'card-meta' },
         el('span', { class: 'hint', text: `${fmtTime(r.finishedAt)} · ${r.steps ?? 0} steps · ${Math.round((r.elapsedMs ?? 0) / 1000)}s · ${r.trigger ?? 'manual'}` }),
@@ -971,21 +1037,21 @@ function render() {
   root.replaceChildren();
 
   root.append(el('header', { class: 'app-head' },
-    el('span', { class: 'logo', text: '◧' }),
-    el('span', { class: 'title', text: 'AutoFlow' }),
+    el('span', { class: 'logo', text: t('ui.panelGlyph') }),
+    el('span', { class: 'title', text: t('app.name') }),
     el('span', { class: 'spacer' }),
     el('button', {
-      class: 'icon', title: 'Options',
-      text: '⚙',
+      class: 'icon', title: t('nav.options'),
+      text: t('ui.gearGlyph'),
       onclick: () => api.runtime.openOptionsPage(),
     }),
   ));
 
   const nav = el('nav', { class: 'tabs' });
-  for (const [id, label] of [['automations', 'Automations'], ['scheduled', 'Scheduled'], ['data', 'Data'], ['history', 'History']]) {
+  for (const [id, key] of [['automations', 'tab.automations'], ['scheduled', 'tab.scheduled'], ['data', 'tab.data'], ['history', 'tab.history']]) {
     nav.append(el('button', {
       class: state.tab === id ? 'active' : '',
-      text: label,
+      text: t(key),
       onclick: () => { state.tab = id; render(); },
     }));
   }
@@ -1001,9 +1067,9 @@ function render() {
   // A pick that lands anywhere gets applied to the step waiting for it.
   if (state.pickTarget) {
     root.append(el('div', { class: 'picking-banner' },
-      el('span', { text: 'Click an element on the page…' }),
+      el('span', { text: t('hint.picking') }),
       el('button', {
-        text: 'Cancel',
+        text: t('action.cancel'),
         onclick: async () => { state.pickTarget = null; await send({ type: 'cancel-picking' }); render(); },
       }),
     ));
@@ -1053,6 +1119,15 @@ async function boot() {
   if (a?.ok) state.automations = a.automations;
   if (s?.ok) state.settings = s.settings;
   if (runs?.ok) state.runs = runs.runs;
+
+  // BEFORE the first render: `dir` and the font have to be on <html> before content is painted, or the panel
+  // paints left-to-right for a frame and then jumps.
+  const { resolveLanguage } = await import('../../core/i18n/i18n.js');
+  const language = resolveLanguage(state.settings?.language, globalThis.navigator?.language);
+  t = translator(language);
+  applyToDocument(document, language);
+  state.language = language;
+
   const active = await send({ type: 'get-active-run' });
   if (active?.ok) state.activeRun = active.run;
   render();

@@ -34,6 +34,14 @@ export const DEFAULT_SETTINGS = {
   stopOnTabBlur: false,
   /** Show the on-page status badge while a run is active. */
   showStatusBadge: true,
+  /**
+   * UI language: 'system' follows the browser, otherwise a catalogue code.
+   *
+   * Stored as a preference rather than resolved here, because the resolution rule (a region subtag like
+   * `fa-IR` mapping to `fa`, and an unsupported language falling back to English) is shared with the UI and
+   * belongs in one tested place. This stores what the user chose, not what it resolved to.
+   */
+  language: 'system',
 };
 
 /**

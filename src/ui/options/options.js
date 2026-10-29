@@ -6,6 +6,11 @@
  */
 
 import { api } from '../../platform/api.js';
+import { applyToDocument, resolveLanguage, translator } from '../../core/i18n/i18n.js';
+import { LANGUAGES } from '../../core/i18n/catalogue.js';
+
+/** Rebuilt before each render; starts as English so a pre-settings paint is readable. */
+let t = translator('en');
 
 const el = (tag, props = {}, ...children) => {
   const node = document.createElement(tag);
@@ -50,40 +55,76 @@ function settingsSection() {
   );
 
   return el('section', {},
-    el('h2', { text: 'Settings' }),
+    el('h2', { text: t('tab.settings') }),
     el('div', { class: 'row' },
-      el('label', { text: 'Theme' }),
+      el('label', { text: t('opt.theme') }),
       el('select', {
         onchange: async (e) => {
           state.settings = (await send({ type: 'save-settings', patch: { theme: e.target.value } })).settings ?? state.settings;
           document.body.classList.toggle('light', e.target.value === 'light');
         },
       },
-        el('option', { value: 'dark', text: 'Dark', selected: s.theme !== 'light' }),
-        el('option', { value: 'light', text: 'Light', selected: s.theme === 'light' })),
+        el('option', { value: 'dark', text: t('opt.dark'), selected: s.theme !== 'light' }),
+        el('option', { value: 'light', text: t('opt.light'), selected: s.theme === 'light' })),
     ),
     el('div', { class: 'row' },
-      el('label', { text: 'Keep' }),
+      el('label', { text: t('field.keep') }),
       el('input', {
         type: 'number', class: 'small', value: String(s.runHistoryLimit ?? 50), min: '1', max: '500',
         onchange: async (e) => {
           state.settings = (await send({ type: 'save-settings', patch: { runHistoryLimit: Number(e.target.value) } })).settings ?? state.settings;
         },
       }),
-      el('span', { class: 'hint', text: 'run records in history' }),
+      el('span', { class: 'hint', text: t('opt.historyLimitHint') }),
     ),
-    toggle('shortcutsEnabled', 'Keyboard shortcuts', 'Alt+Shift+S to start or stop, Alt+Shift+X to stop everything'),
-    toggle('showStatusBadge', 'Show progress badge', 'a small indicator while a run is active'),
-    toggle('stopOnTabBlur', 'Stop when the tab loses focus', 'useful when an automation must not run in the background'),
+    // Language sits with Appearance because that is where a user looks for it, and it changes the whole
+    // document rather than just this page.
+    el('div', { class: 'row' },
+      el('label', { text: t('opt.language') }),
+      el('select', {
+        id: 'language',
+        onchange: async (e) => {
+          state.settings = (await send({ type: 'save-settings', patch: { language: e.target.value } })).settings ?? state.settings;
+          // Re-apply and re-render in place. A language change that needed a reload would be a worse
+          // experience than the one this is replacing, and the panel picks the change up on its own.
+          await applyLanguage();
+          render();
+        },
+      },
+        ...LANGUAGES.map((l) => el('option', {
+          value: l.code,
+          text: l.code === 'system' ? t('opt.languageSystem') : l.label,
+          selected: (s.language ?? 'system') === l.code,
+        }))),
+      el('span', { class: 'hint', text: t('opt.languageHint') }),
+    ),
+    toggle('shortcutsEnabled', t('opt.shortcuts'), t('opt.shortcutsHint')),
+    toggle('showStatusBadge', t('opt.showStatusBadge'), t('opt.showStatusBadgeHint')),
+    toggle('stopOnTabBlur', t('opt.stopOnTabBlur'), t('opt.stopOnTabBlurHint')),
   );
+}
+
+/**
+ * Resolve the stored preference and apply it, then rebuild `t`.
+ *
+ * `dir` is set on <html> rather than on a container, so the scrollbar, the selects and the document flow all
+ * mirror together. Setting it on a wrapper mirrors the text but leaves the native controls LTR, which looks
+ * broken rather than translated.
+ */
+async function applyLanguage() {
+  const language = resolveLanguage(state.settings?.language, globalThis.navigator?.language);
+  t = translator(language);
+  applyToDocument(document, language);
+  state.language = language;
+  return language;
 }
 
 function backupSection() {
   return el('section', {},
-    el('h2', { text: 'Backup' }),
+    el('h2', { text: t('opt.backup') }),
     el('div', { class: 'row' },
       el('button', {
-        class: 'primary', text: '⭳ Export all automations',
+        class: 'primary', text: t('opt.exportAll'),
         onclick: async () => {
           const res = await send({ type: 'export-all' });
           if (!res.ok) { toast(res.error, true); return; }
@@ -97,7 +138,7 @@ function backupSection() {
           toast(`Exported ${res.document.automations.length} automations`);
         },
       }),
-      el('label', { class: 'primary', for: 'import-file', text: '⭱ Import',
+      el('label', { class: 'primary', for: 'import-file', text: t('opt.importGlyph'),
         style: 'background:#2962ff;border:1px solid #2962ff;color:#fff;padding:5px 7px;border-radius:6px;cursor:pointer;font-size:12px' }),
       el('input', {
         type: 'file', id: 'import-file', accept: '.json', style: 'display:none',
@@ -157,24 +198,24 @@ function backupSection() {
         },
       }),
     ),
-    el('p', { class: 'hint', text: 'The backup is a plain JSON file. Importing merges by default; automations with the same id are kept separately.' }),
+    el('p', { class: 'hint', text: t('opt.backupHint') }),
   );
 }
 
 function diagnosticsSection() {
   const d = state.diagnostics;
   return el('section', {},
-    el('h2', { text: 'Diagnostics' }),
+    el('h2', { text: t('opt.diagnostics') }),
     el('div', { class: 'row' },
       el('button', {
-        text: '↻ Refresh',
+        text: t('opt.refresh'),
         onclick: async () => {
           state.diagnostics = (await send({ type: 'diagnostics' })).diagnostics;
           render();
         },
       }),
       el('button', {
-        text: '⧉ Copy',
+        text: t('opt.copyGlyph'),
         onclick: async () => {
           await navigator.clipboard.writeText(JSON.stringify(state.diagnostics, null, 2));
           toast('Copied');
@@ -183,7 +224,7 @@ function diagnosticsSection() {
     ),
     d
       ? el('pre', { class: 'trace', text: JSON.stringify(d, null, 2) })
-      : el('p', { class: 'hint', text: 'Press Refresh to collect environment and state information. This is what to include when reporting a problem.' }),
+      : el('p', { class: 'hint', text: t('opt.diagnosticsHelp') }),
   );
 }
 
@@ -191,7 +232,7 @@ function automationsSection() {
   return el('section', {},
     el('h2', { text: `Automations (${state.automations.length})` }),
     state.automations.length === 0
-      ? el('p', { class: 'hint', text: 'None yet. Create one from the side panel.' })
+      ? el('p', { class: 'hint', text: t('opt.noneYet') })
       : el('div', {}, ...state.automations.map((a) => el('div', { class: 'row' },
           el('span', { class: 'grow', text: a.name }),
           el('span', { class: 'hint', text: `${(a.steps ?? []).length} steps` }),
@@ -204,14 +245,17 @@ function render() {
   root.replaceChildren();
   document.body.classList.toggle('light', state.settings.theme === 'light');
 
-  root.append(el('h1', { text: 'AutoFlow' }));
-  root.append(el('p', { class: 'hint', text: 'Auto-click, fill and record browser automations, on a schedule.' }));
+  root.append(el('h1', { text: t('app.name') }));
+  root.append(el('p', { class: 'hint', text: t('opt.subtitle') }));
   root.append(settingsSection());
   root.append(automationsSection());
   root.append(backupSection());
   root.append(diagnosticsSection());
-  root.append(el('p', { class: 'hint', text: `Version ${api.runtime.getManifest().version}`
-    + ` · ${api.side.kind() === 'sidebar' ? 'Firefox sidebar' : 'Chrome side panel'}` }));
+  // The build name is itself useful information: it is how a user can tell, without a manifest, which
+  // archive they loaded. Kept in the catalogue so it reads naturally in either language.
+  root.append(el('p', { class: 'hint',
+    text: `${t('opt.version')} ${api.runtime.getManifest().version} · `
+      + (api.side.kind() === 'sidebar' ? 'Firefox sidebar' : 'Chrome side panel') }));
 }
 
 async function refresh() {
@@ -221,4 +265,16 @@ async function refresh() {
   render();
 }
 
-refresh();
+/**
+ * Resolve the language BEFORE the first render.
+ *
+ * Rendering first and correcting afterwards would paint the whole page in the wrong language and then swap it,
+ * which reads as a flash of the wrong content. `applyLanguage` is awaited, so the first paint is already
+ * correct - including `dir`, which cannot be fixed afterwards without a visible reflow.
+ */
+(async () => {
+  const s = await send({ type: 'get-settings' }).catch(() => null);
+  if (s?.ok) state.settings = s.settings;
+  await applyLanguage();
+  await refresh();
+})();
