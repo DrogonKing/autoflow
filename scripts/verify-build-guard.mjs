@@ -21,6 +21,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
+import { waitForUnpackedExtensionId } from './lib/extension-id.mjs';
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const RELEASE = path.join(ROOT, 'release');
@@ -43,8 +44,16 @@ zipfile.ZipFile(${JSON.stringify(path.join(RELEASE, zipName))}).extractall(${JSO
   return dest;
 }
 
+/**
+ * Launch a FRESH profile each time, inside the workspace.
+ *
+ * A persistent profile keeps extension state between runs, and the toolbar bug being tested here only showed
+ * up on a first install - `onInstalled` had not taken effect yet. Reusing a warm profile would have hidden it.
+ * Being inside the workspace also means a CI runner can always write it.
+ */
 async function loadIn(buildDir, { headless = true } = {}) {
-  const ctx = await chromium.launchPersistentContext('', {
+  const profile = mkdtempSync(path.join(os.tmpdir(), 'autoflow-profile-'));
+  const ctx = await chromium.launchPersistentContext(profile, {
     headless,
     executablePath: existsSync(CHROME) ? CHROME : undefined,
     args: [
@@ -54,7 +63,20 @@ async function loadIn(buildDir, { headless = true } = {}) {
       '--disable-dev-shm-usage',
     ],
   });
+  ctx.__profile = profile;
   return ctx;
+}
+
+/**
+ * The extension's id, read from the profile rather than from `chrome://extensions`.
+ *
+ * That page works in this machine's desktop Chrome and fails on the Chromium Playwright installs on CI:
+ *   page.goto: net::ERR_INVALID_URL at chrome://extensions
+ * Reading the profile works on both.
+ */
+async function extensionIdFor(ctx, buildDir) {
+  const found = await waitForUnpackedExtensionId(ctx.__profile, buildDir);
+  return found?.id ?? null;
 }
 
 /** Find OUR extension id, not a Chrome component extension's. */
@@ -88,21 +110,11 @@ console.log(`  contents: ${execFileSync('ls', [ffDir]).toString().trim().split('
 
 {
   const ctx = await loadIn(ffDir);
-  // there is no service worker on this build, so the extension id has to come from somewhere else:
-  // open an extension page by asking chrome://extensions for the id.
-  const page = await ctx.newPage();
-  await page.goto('chrome://extensions');
-  await page.waitForTimeout(2500);
-  const id = await page.evaluate(() => {
-    const mgr = document.querySelector('extensions-manager');
-    const list = mgr?.shadowRoot?.querySelector('extensions-item-list');
-    for (const it of list?.shadowRoot?.querySelectorAll('extensions-item') ?? []) {
-      const name = it.shadowRoot?.querySelector('#name')?.textContent ?? '';
-      if (/autoflow/i.test(name)) return it.getAttribute('id');
-    }
-    return null;
-  });
-  check('Chrome accepted the Firefox build', !!id, id ? `extension id ${id}` : 'not listed');
+  // This build has NO service worker, so the id cannot come from one. It is read from the profile, which also
+  // proves Chrome accepted and registered the extension.
+  const id = await extensionIdFor(ctx, ffDir);
+  check('Chrome accepted the Firefox build', !!id,
+    id ? `extension id ${id} (from the profile, and no service worker, as expected)` : 'not registered');
 
   if (id) {
     const p = await ctx.newPage();
@@ -148,6 +160,7 @@ console.log(`  contents: ${execFileSync('ls', [crDir]).toString().trim().split('
 {
   const ctx = await loadIn(crDir);
   const found = await ourExtension(ctx);
+  if (found && !found.id) found.id = await extensionIdFor(ctx, crDir);
   check('the service worker runs', !!found?.worker, found?.worker?.url() ?? 'no worker');
 
   if (found?.worker) {

@@ -104,11 +104,15 @@ jobs:
           sys.exit(1 if errs else 0)
           PY
 
+      # No pipes here. `python3 script.py | tail -20` reports the exit status of `tail`, so a script that
+      # died was reported as a passing step - which is exactly what happened: adversarial_review.py hit a
+      # PermissionError on a hardcoded path and CI still went green on this step.
       - name: security audits (static, deterministic)
         run: |
-          python3 scripts/adversarial_review.py | tail -20
-          python3 scripts/firefox_security_audit.py | tail -20
-          python3 scripts/follow_the_lead.py | tail -20
+          set -o pipefail
+          python3 scripts/adversarial_review.py
+          python3 scripts/firefox_security_audit.py
+          python3 scripts/follow_the_lead.py
 
       - name: the review packet must be complete and correctly numbered
         run: |

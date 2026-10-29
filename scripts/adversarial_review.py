@@ -363,5 +363,10 @@ verdict = {
         "storage is code execution, and the audit only stops an ACCIDENTAL smuggled script, by design."
     ),
 }
-pathlib.Path("/root/autoflow/docs/security-verdict.json").write_text(json.dumps(verdict, indent=2) + "\n")
+# Derived from this file's location, not hardcoded. A hardcoded path made the CI write to
+# /root/autoflow/... which does not exist in a runner, and the workflow's `| tail -20` swallowed the exit code -
+# so the step reported success while the script had died. Patched last, and the last one to be fixed.
+_OUT = pathlib.Path(__file__).resolve().parent.parent / "docs" / "security-verdict.json"
+_OUT.parent.mkdir(parents=True, exist_ok=True)
+_OUT.write_text(json.dumps(verdict, indent=2) + "\n")
 print(f"\nwrote docs/security-verdict.json  (passed={verdict['passed']})")
