@@ -23,12 +23,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Node 22, not 20, and this is a real constraint rather than a preference: jsdom 30 declares
+      # `engines: node ^22.22.2 || ^24.15.0 || >=26`, and the undici it pulls in needs ^22.19.0 for
+      # `zlib.createZstdDecompress`. On Node 20 that call is undefined and jsdom throws 11 unhandled
+      # "Cannot read properties of undefined (reading 'bind')" errors, so `vitest run` exits 1 even though
+      # every test passes. Found by CI on the first push - the local tree runs Node 24, where it never appears.
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
           cache: npm
 
       - run: npm ci
+
+      - name: check the Node version this project needs
+        run: node scripts/preflight.mjs
 
       - name: unit tests
         run: npx vitest run

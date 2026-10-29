@@ -4,9 +4,16 @@
   "private": true,
   "type": "module",
   "description": "AutoFlow — auto-click, fill, record and schedule browser automations.",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "//engines": "Advisory, NOT enforced with engine-strict, because dependency declarations are stricter than behaviour: jsdom 30 and its css-color dep both declare ^22.22.2 || ^24.15.0 || >=26, so enforcing would refuse Node 22.22.0 - which was measured passing 381/381. The real requirement is zlib.createZstdDecompress (Node 22.19), checked by scripts/preflight.mjs which runs before the tests. Measured: Node 20.19 FAILS (unhandled jsdom errors, vitest exits 1 while every test reports passed), 22.22.0 PASSES, 24.22.2 PASSES. Node 23 and 25 untested.",
   "scripts": {
+    "preflight": "node scripts/preflight.mjs",
+    "pretest": "node scripts/preflight.mjs",
     "test": "vitest run",
     "test:watch": "vitest",
+    "pretest:browser": "node scripts/preflight.mjs",
     "test:browser": "node scripts/browser-test.mjs",
     "test:e2e": "node scripts/e2e-test.mjs",
     "test:all": "vitest run && npm run build && node scripts/browser-test.mjs && node scripts/e2e-test.mjs",
