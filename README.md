@@ -159,3 +159,65 @@ src/
 tests/             314 unit tests
 scripts/           build, icons, browser tests, packaging
 ```
+---
+
+## Building from GitHub
+
+CI runs on every push and produces both zips. A tag produces a release with them attached.
+
+```
+git clone <repo>                              # or download the source zip
+cd autoflow
+npm ci                                        # from package-lock.json, the step CI uses
+npm run build:all                             # dist/ (Chrome/Edge) + dist-firefox/ (Firefox)
+
+npm run package                               # release/autoflow.zip + autoflow-firefox.zip + source
+```
+
+| Job step | What it proves |
+|---|---|
+| `npx vitest run` | 381 unit tests |
+| `npm run build:all` | both targets build from the checkout alone |
+| manifest check | `manifest_version: 3` on both, and every file each manifest references exists |
+| `web-ext lint` | Mozilla's own linter: 0 errors, 0 warnings |
+| the three audits | static security scans, deterministic, one exits non-zero on a critical or high |
+| the packet + exhibit checks | the review packet is complete and every line number in it matches the source |
+| `npm run package` | the three zips, with `manifest.json` at the root of each |
+
+### Verifying the build without trusting it
+
+The zips are ordinary zip files with `manifest.json` at the root, so a reviewer can read any file in them:
+
+```
+unzip -l release/autoflow.zip
+unzip -p release/autoflow.zip manifest.json      # the actual manifest that ships
+```
+
+And the no-network claim is a test, not a promise. `scripts/firefox-security-test.mjs` starts an HTTP server,
+runs a full automation against a page on it, and counts every request the server receives:
+
+```
+the run produced ZERO requests to the probe origin      0 during the run
+the probe server saw 2 requests in total:
+   GET /             <- the test page load itself
+   GET /favicon.ico  <- the browser asking for a favicon
+```
+
+### What CI does NOT run, and why
+
+The browser tests are a **local** gate: `npm run test:browser`, `test:e2e`, `test:firefox`, and
+`test:security` need a real Chromium or Firefox plus geckodriver. They are doable on a GitHub runner but make
+the job minutes long and flaky, and a flaky gate gets ignored. What CI proves is that the code builds, the
+logic is correct, both manifests are well formed, and Mozilla's linter accepts the Firefox build. The
+browser-level behaviour was verified on this machine: 20 load checks and 27 end-to-end checks in Chromium,
+31 functional and 10 security checks in Firefox 159.
+
+### Bumping the version
+
+The version lives in four files that different consumers read, so a partial bump ships a manifest, a package
+and a filename that disagree. Use the script:
+
+```
+scripts/bump-version.sh 1.1.0     # package.json, src/manifest.json, options page, README
+git tag v1.1.0 && git push --tags # the release workflow attaches the zips
+```
