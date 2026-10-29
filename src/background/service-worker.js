@@ -405,17 +405,48 @@ async function setBadge(state) {
 // events
 // ---------------------------------------------------------------------------------------------
 
+/**
+ * Set the click behaviour, at MODULE LOAD as well as on install.
+ *
+ * `onInstalled` fires once per install/update. `openPanelOnActionClick` was measured still `false` in a fresh
+ * Chrome, so relying on that one event left the toolbar button dead - which is the reported bug. The worker
+ * runs at extension load and after every wake, so doing it here as well makes the state self-healing rather
+ * than dependent on a single event that had evidently not taken effect.
+ *
+ * Idempotent, so running it repeatedly costs nothing.
+ */
+async function ensureClickOpensPanel() {
+  try {
+    const ok = await api.side.enableOpenOnClick();
+    if (!ok) console.info('[autoflow] setPanelBehavior unavailable; api.action.onClicked will open it');
+    return ok;
+  } catch (e) {
+    // worth a line in the console: a failure here is why a toolbar button can look dead
+    console.warn('[autoflow] could not set the panel click behaviour:', String(e?.message || e));
+    return false;
+  }
+}
+
 api.runtime.onInstalled.addListener(async (details) => {
-  const automations = await listAutomations();
-  await rescheduleAll(automations);
-  // Chromium: the side panel. Firefox: the sidebar. The platform layer picks.
-  await api.side.enableOpenOnClick();
+  // Each step is wrapped, because throwing here aborted the rest: `await rescheduleAll(...)` above the
+  // panel call meant one failure stopped the other, and the panel call was what the user could see.
+  try {
+    const automations = await listAutomations();
+    await rescheduleAll(automations);
+  } catch (e) {
+    console.warn('[autoflow] rescheduling at install failed:', String(e?.message || e));
+  }
+
+  await ensureClickOpensPanel();
 
   if (details.reason === 'install') {
     // open the options page once, so a new user sees what this is rather than an empty panel
     api.tabs.create({ url: api.runtime.getURL('options.html') }).catch(() => {});
   }
 });
+
+// also at load and on every worker wake, so the behaviour is never left unset
+ensureClickOpensPanel();
 
 api.runtime.onStartup.addListener(async () => {
   // every alarm is re-derived from storage: an alarm set before a restart cannot be trusted
@@ -499,9 +530,42 @@ api.commands.onCommand.addListener(async (command) => {
   }
 });
 
+/**
+ * Open the side panel / sidebar when the toolbar button is clicked.
+ *
+ * On CHROMIUM this handler must NOT open the panel itself. `setPanelBehavior({ openPanelOnActionClick: true })`
+ * already makes the browser open it, so a second mechanism exists for a single click - and the browser has
+ * consumed the user gesture by then, so `sidePanel.open()` is rejected with
+ *
+ *     "`sidePanel.open()` may only be called in response to a user gesture."
+ *
+ * That rejection was unhandled and surfaced to the user as an extension ERROR BADGE on the toolbar icon, for a
+ * button that otherwise looked broken. Measured in a real Chrome, not inferred.
+ *
+ * Firefox has no `setPanelBehavior`, so on Firefox this handler IS the mechanism.
+ */
 api.action.onClicked.addListener(async (tab) => {
-  if (tab?.windowId !== undefined) {
-    await api.side.open({ windowId: tab.windowId });
+  /**
+   * Try to open it, on BOTH platforms, and never let a failure escape.
+   *
+   * Why not "return early on Chromium, the browser handles it": that relies on
+   * `setPanelBehavior({ openPanelOnActionClick: true })` having taken effect. It is set in `onInstalled`,
+   * and it was MEASURED still `false` shortly after a fresh load - a race, and if it loses, an early return
+   * leaves the toolbar button dead. That is the bug being fixed, reintroduced by the fix for it.
+   *
+   * So the handler always attempts the open, and treats a rejection as a non-event:
+   *
+   *   - flag ON  -> the browser already opened the panel, this call is rejected, we swallow it. Correct
+   *                 outcome, no error badge.
+   *   - flag OFF -> this call is the only mechanism, and it works because `onClicked` IS a user gesture.
+   *
+   * Either way the user gets a panel. The `.catch` in the platform layer already turns a documented
+   * rejection into `false`, so nothing unhandled reaches the console or the badge.
+   */
+  try {
+    await api.side.open({ windowId: tab?.windowId });
+  } catch {
+    // a click that cannot open the panel is not worth an error badge; the user can simply click again
   }
 });
 

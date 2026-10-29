@@ -118,6 +118,17 @@ jobs:
       - name: package the artifacts
         run: npm run package
 
+      # This step exists because the guard test found a real product bug that all 381 unit tests, 20 load
+      # checks, 27 end-to-end checks and 31 Firefox checks missed: `isFirefox()` returned true on modern
+      # Chromium because Chrome now exposes a `browser` namespace, which disabled the side panel outright.
+      # The others verified that APIs EXISTED; this one verifies the shipped archives WORK, by loading each
+      # in the browser it is built for and checking the outcome.
+      - name: install a browser and the driver
+        run: npx playwright install --with-deps chromium
+
+      - name: the shipped archives work in the browser they are built for
+        run: xvfb-run -a --server-args="-screen 0 1400x900x24" node scripts/verify-build-guard.mjs
+
       - uses: actions/upload-artifact@v4
         with:
           name: autoflow-extension-zips

@@ -1,6 +1,23 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
+<!--
+  Which browser is this build for, and does it match?
+
+  This runs INLINE and SYNCHRONOUSLY, before anything else, on purpose:
+
+    - it must work when the background script does not run, which is exactly the case on the mismatched
+      build (Chromium does not execute `background.scripts` in Manifest V3), so it cannot depend on the
+      service worker or on a runtime message;
+    - it must not wait for a DOMContentLoaded that may already have fired;
+    - it must not be deferred, or the user sees a working-looking panel first and the warning after.
+
+  The discriminator is `chrome.sidebarAction`, which exists in Firefox and not in Chromium. Feature detection
+  rather than user-agent sniffing, because the user agent is a string anyone can change and this decision is
+  about which APIs are actually present.
+-->
+<script src="build-banner.js"></script>
+
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>AutoFlow</title>

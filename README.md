@@ -236,9 +236,9 @@ https://github.com/DrogonKing/autoflow/releases/latest
 Direct downloads (once the repo is public, or with access to it):
 
 ```
-.../releases/download/v1.0.1/autoflow-chrome.zip     Chrome, Edge, Brave, Opera
-.../releases/download/v1.0.1/autoflow-firefox.zip    Firefox
-.../releases/download/v1.0.1/autoflow-source.zip     full source, tests included
+.../releases/download/v1.0.2/autoflow-chrome.zip     Chrome, Edge, Brave, Opera
+.../releases/download/v1.0.2/autoflow-firefox.zip    Firefox
+.../releases/download/v1.0.2/autoflow-source.zip     full source, tests included
 ```
 
 ### Which file do I download?

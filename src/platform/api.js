@@ -33,9 +33,51 @@ export function ns() {
  * Firefox ships both namespaces, so the presence of `browser.runtime` is the reliable signal. Checking the
  * user agent is the fallback and is only used for the sidebar, where the two APIs have different names.
  */
+/**
+ * Is this Firefox?
+ *
+ * DO NOT test for the `browser` namespace. Chrome 145 exposes one too - with `runtime.id` - so
+ * `typeof browser !== 'undefined'` reports CHROME as Firefox. Measured inside this extension running in a
+ * real Chrome 145:
+ *
+ *     typeof_browser            "object"
+ *     browser_has_runtime       "object"
+ *     browser_runtime_id        "idlidpnnmpdniiibhcoehlhgflmhddeo"   <- our own extension's id
+ *     typeof_chrome_sidePanel   "object"
+ *     typeof_chrome_sidebarAction  undefined
+ *     ua_has_firefox            false
+ *
+ * The consequence was total, not cosmetic: `isFirefox()` returned true, so
+ *
+ *   - `side.kind()` returned 'sidebar', and the build emitted `sidebar_action` instead of `side_panel`
+ *   - `enableOpenOnClick()` hit `if (isFirefox()) return false` and never set `openPanelOnActionClick`
+ *   - `side.open()` reached for `sidebarAction`, which Chromium does not implement
+ *
+ * ...so the toolbar button did nothing on every modern Chromium. The user reported exactly that.
+ *
+ * The reliable discriminator is an API only one engine implements:
+ *
+ *   `runtime.getBrowserInfo`   Firefox only. Chrome has never implemented it, and it needs no permission.
+ *   `sidebarAction`            Firefox only; Chromium has `sidePanel` instead.
+ *
+ * Both are capabilities rather than names, and both are checked before the user agent, which is a string
+ * anyone can set and the least trustworthy signal of the three.
+ */
 export function isFirefox() {
   try {
-    if (typeof globalThis.browser !== 'undefined' && globalThis.browser?.runtime) return true;
+    const c = globalThis.chrome;
+    const b = globalThis.browser;
+
+    // Firefox-only, and unambiguous: Chrome does not implement runtime.getBrowserInfo.
+    if (typeof c?.runtime?.getBrowserInfo === 'function') return true;
+    if (typeof b?.runtime?.getBrowserInfo === 'function') return true;
+
+    // Firefox exposes sidebarAction; Chromium exposes sidePanel. Asking which exists answers the question
+    // without depending on the namespace name or on a granted permission.
+    if (typeof c?.sidebarAction !== 'undefined' || typeof b?.sidebarAction !== 'undefined') return true;
+    if (typeof c?.sidePanel !== 'undefined' || typeof b?.sidePanel !== 'undefined') return false;
+
+    // Nothing decisive answered, so fall back to the user agent - and only now.
     return /firefox/i.test(globalThis.navigator?.userAgent ?? '');
   } catch {
     return false;
@@ -310,8 +352,16 @@ export const api = {
       }
       const sp = ns().sidePanel;
       if (sp?.open && windowId !== undefined) {
-        await sp.open({ windowId });
-        return true;
+        try {
+          await sp.open({ windowId });
+          return true;
+        } catch {
+          // Documented rejection: "sidePanel.open() may only be called in response to a user gesture."
+          // Letting this propagate gave the caller an unhandled rejection and the user an error badge on a
+          // toolbar button that was, from their side, simply doing nothing. Returning false means "could not
+          // open", which the caller can act on; throwing means "something is broken", which it is not.
+          return false;
+        }
       }
       return false;
     },

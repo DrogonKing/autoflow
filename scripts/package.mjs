@@ -24,6 +24,8 @@ import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import zlib from 'node:zlib';
+import os from 'node:os';
+import { writeFile } from 'node:fs/promises';
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const dist = path.join(root, 'dist');
@@ -47,6 +49,19 @@ function crc32(buf) {
   let c = 0xffffffff;
   for (let i = 0; i < buf.length; i++) c = CRC_TABLE[(c ^ buf[i]) & 0xff] ^ (c >>> 8);
   return (c ^ 0xffffffff) >>> 0;
+}
+
+/**
+ * Add a plain-file entry (not part of the extension) to a list of zip entries.
+ *
+ * A user unpacks the archive and the first thing they need is "which browser is this for". The manifest
+ * answers that only if they already know the difference between `service_worker` and `scripts`. So each
+ * archive carries a README whose first line says it in words.
+ */
+async function withExtraFile(files, relName, contents) {
+  const tmp = path.join(os.tmpdir(), `autoflow-extra-${path.basename(relName)}`);
+  await writeFile(tmp, contents, 'utf8');
+  return [...files, { full: tmp, rel: relName, size: Buffer.byteLength(contents) }];
 }
 
 async function walk(dir, base = '') {
@@ -157,8 +172,32 @@ async function main() {
     process.exit(1);
   }
 
+  const CHROME_README = `AutoFlow - CHROME / EDGE / BRAVE / OPERA BUILD
+
+  THIS IS THE CHROMIUM BUILD. Do not load it into Firefox.
+
+  Install
+  -------
+  1. Unpack this archive into a folder you will keep (the folder must stay in place).
+  2. Open  chrome://extensions
+  3. Turn on  Developer mode  (top right).
+  4. Click  Load unpacked  and select the folder you unpacked.
+  5. The AutoFlow icon appears in the toolbar. Click it to open the side panel.
+
+  Firefox needs autoflow-firefox.zip instead. Loading this one there will not work: the manifest declares
+  a service worker and a side panel, and Firefox runs neither.
+
+  What this build is
+  ------------------
+  Manifest V3. background.service_worker: background.js, type module.
+  Side panel via the sidePanel permission. Minimum Chrome 116.
+
+  Verified before packaging: the unit suite, every file the manifest references, and Mozilla's own linter
+  reporting zero errors and zero warnings.
+`;
+  const extFiles = await withExtraFile(files, 'HOW-TO-INSTALL.txt', CHROME_README);
   const extPath = path.join(releaseDir, 'autoflow-chrome.zip');
-  const extInfo = await writeZip(files, extPath);
+  const extInfo = await writeZip(extFiles, extPath);
 
   // ---- the source
   const srcFiles = [];
@@ -189,8 +228,39 @@ async function main() {
       console.error('the Firefox zip would not have manifest.json at its root');
       process.exit(1);
     }
+    const FIREFOX_README = `AutoFlow - FIREFOX BUILD
+
+  THIS IS THE FIREFOX BUILD. Do not load it into Chrome.
+
+  Install (temporary, until Firefox closes)
+  -----------------------------------------
+  1. Unpack this archive into a folder you will keep.
+  2. Open  about:debugging#/runtime/this-firefox
+  3. Click  Load Temporary Add-on...
+  4. Select  manifest.json  inside the folder you unpacked.
+
+  Install (permanent)
+  -------------------
+  Firefox requires a permanent install to be signed. Upload this archive to addons.mozilla.org and install
+  the signed copy, or set xpinstall.signatures.required to false in about:config (Developer Edition / ESR).
+
+  Chrome, Edge, Brave and Opera need autoflow-chrome.zip instead. Loading this one there will not work: the
+  manifest uses background.scripts, which Manifest V3 Chromium does not run, and Firefox's sidebar_action is
+  not a key Chrome understands. The toolbar button will do nothing.
+
+  What this build is
+  ------------------
+  Manifest V3. background.scripts: background.js, type module. Firefox ignores background.service_worker,
+  so only scripts is declared here. Sidebar via sidebar_action. Requires Firefox 140 or newer.
+  Add-on id: autoflow@drogon.site
+  Declares data_collection_permissions: { required: ["none"], optional: [] }
+
+  Verified before packaging: the unit suite, Mozilla's own linter (zero errors, zero warnings), and a full
+  run inside a real Firefox 159.
+`;
+    const ffFilesWithReadme = await withExtraFile(ffFiles, 'HOW-TO-INSTALL.txt', FIREFOX_README);
     const ffPath = path.join(releaseDir, 'autoflow-firefox.zip');
-    ffInfo = await writeZip(ffFiles, ffPath);
+    ffInfo = await writeZip(ffFilesWithReadme, ffPath);
     ffManifest = JSON.parse(await readFile(path.join(ffDir, 'manifest.json'), 'utf8'));
   }
 

@@ -72,7 +72,9 @@ async function main() {
 
   // static files
   await cp(path.join(src, 'manifest.json'), path.join(out, 'manifest.json'));
-  for (const f of ['panel.html', 'options.html', 'picker.css']) {
+  // build-banner.js is a plain classic script, not an esbuild entry: MV3's `script-src 'self'` blocks inline
+  // script, so the mismatch warning has to be its own file. Copied verbatim.
+  for (const f of ['panel.html', 'options.html', 'picker.css', 'build-banner.js']) {
     const p = path.join(src, f);
     if (existsSync(p)) await cp(p, path.join(out, f));
   }

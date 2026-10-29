@@ -138,7 +138,9 @@ async function main() {
   await writeFile(path.join(out, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`);
 
   // ---- static files
-  for (const f of ['panel.html', 'options.html', 'picker.css']) {
+  // build-banner.js included for the same reason as in build.mjs: MV3 blocks inline script, so the mismatch
+  // warning is a separate classic script that both pages load with <script src>.
+  for (const f of ['panel.html', 'options.html', 'picker.css', 'build-banner.js']) {
     const p = path.join(src, f);
     if (existsSync(p)) await cp(p, path.join(out, f));
   }
