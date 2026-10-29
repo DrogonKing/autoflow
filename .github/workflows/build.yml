@@ -17,6 +17,13 @@ on:
 # doable on a GitHub runner but they make the job minutes long and flaky, so they stay a local gate. What CI
 # proves is that the code builds, the unit suite passes, both manifests are well formed, and Mozilla's own
 # linter accepts the Firefox build.
+# The release step writes to the repository, so the token needs `contents: write`. Without this block the
+# GITHUB_TOKEN's scopes depend on the repository default, which is read-only for a repo created through the
+# API - and `softprops/action-gh-release` then fails with a 403 AFTER all fourteen earlier steps pass. Stated
+# explicitly so the workflow carries its own requirement rather than inheriting one from repo settings.
+permissions:
+  contents: write
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -124,6 +131,10 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
+          # fail_on_unmatched_files: a missing zip becomes an error rather than a release with two of its
+          # three assets. The artifact-upload step above already fails if the zips are absent, so this is the
+          # second line of defence rather than the first.
+          fail_on_unmatched_files: true
           files: |
             release/autoflow.zip
             release/autoflow-firefox.zip
