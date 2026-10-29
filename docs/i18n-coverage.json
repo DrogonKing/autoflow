@@ -1,7 +1,7 @@
 {
-  "en_keys": 242,
-  "fa_keys": 242,
-  "used_keys": 150,
+  "en_keys": 251,
+  "fa_keys": 251,
+  "used_keys": 158,
   "missing_in_en": [],
   "missing_in_fa": [],
   "unused_keys": [
@@ -10,8 +10,8 @@
     "action.export",
     "action.import",
     "action.newList",
-    "action.runNow",
     "app.tagline",
+    "basic.name",
     "empty.data",
     "empty.scheduled",
     "field.enabled",
@@ -91,6 +91,7 @@
     "step.upload",
     "step.waitFor",
     "tab.automations",
+    "tab.basic",
     "tab.data",
     "tab.history",
     "tab.log",

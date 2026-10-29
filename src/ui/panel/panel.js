@@ -311,31 +311,55 @@ function scheduleEditor(onChange) {
         el('span', { class: 'hint', text: t('sched.monthlyDayHint') }),
       ));
     }
+    /**
+     * THE TIME IS TYPED, NOT ONLY SCROLLED.
+     *
+     * Reported: "the time numbers cannot be changed by typing, only by scrolling and clicking". The cause was this
+     * field calling `onChange()` on every `change` event, and `onChange` re-renders the whole view - so the input
+     * element was destroyed and rebuilt while it had focus, and the caret went with it. A `type="time"` control is
+     * perfectly typeable; it was being re-created underneath the typist.
+     *
+     * So the model is updated in place here and re-rendering is DEFERRED to `blur`, when the user has finished. The
+     * hint about the seconds is a fixed element whose text is updated rather than a conditional node, because a
+     * conditional node would be a reason to re-render.
+     */
+    const timeHint = el('span', { class: 'hint', text: '' });
+    const refreshTimeHint = (hasSecond) => {
+      timeHint.textContent = hasSecond ? t('sched.secondHint') : '';
+    };
+    const commitTime = (value, { rerender }) => {
+      // '09:00' gives two parts and means minute precision; '09:00:00' gives three and means a precise schedule.
+      // The distinction is carried into the model, because `wantsPreciseTiming` keys off it.
+      const parts = String(value ?? '').split(':').map(Number);
+      const [h, m, sec] = parts;
+      if (!Number.isFinite(h) || !Number.isFinite(m)) return;
+      if (h < 0 || h > 23 || m < 0 || m > 59) return;
+      if (parts.length > 2 && (!Number.isFinite(sec) || sec < 0 || sec > 59)) return;
+      const next = { ...(state.editing.schedule ?? s), hour: h, minute: m };
+      if (parts.length > 2) next.second = sec;
+      else delete next.second;
+      state.editing.schedule = next;
+      refreshTimeHint(parts.length > 2);
+      if (rerender) onChange();
+    };
+
+    refreshTimeHint(typeof s.second === 'number');
     wrap.append(el('div', { class: 'row' },
       el('label', { text: t('field.time') }),
       el('input', {
         // `step: 1` is what makes the SECONDS part of the control appear. Without it the input is minute-only,
         // so the model's `second` field was unreachable from the UI entirely - it existed in the scheduler and
-        // could only be set by hand-writing a six-field cron. That is why the panel showed hour and minute.
+        // could only be set by hand-writing a six-field cron.
         type: 'time', class: 'grow', step: '1',
         value: `${String(s.hour ?? 9).padStart(2, '0')}:${String(s.minute ?? 0).padStart(2, '0')}`
           + (typeof s.second === 'number' ? `:${String(s.second).padStart(2, '0')}` : ''),
-        onchange: (e) => {
-          // "09:00" gives two parts and means minute precision; "09:00:00" gives three and means a precise
-          // schedule. The distinction is carried into the model, because `wantsPreciseTiming` keys off it.
-          const [h, m, sec] = e.target.value.split(':').map(Number);
-          if (!Number.isFinite(h) || !Number.isFinite(m)) return;
-          const next = { ...s, hour: h, minute: m };
-          if (Number.isFinite(sec)) next.second = sec;
-          else delete next.second;
-          state.editing.schedule = next;
-          onChange();
-        },
+        // on `input` the model follows every keystroke so nothing is lost; no re-render, so typing works
+        oninput: (e) => commitTime(e.target.value, { rerender: false }),
+        // and the re-render happens once, when focus leaves
+        onblur: (e) => commitTime(e.target.value, { rerender: true }),
+        onchange: (e) => commitTime(e.target.value, { rerender: false }),
       }),
-      // a second is only worth setting if the run can land on it, so say what it costs
-      typeof s.second === 'number'
-        ? el('span', { class: 'hint', text: t('sched.secondHint') })
-        : null,
+      timeHint,
     ));
 
     // ---- the clock warning, shown where the time is chosen
@@ -905,6 +929,244 @@ function stepsEditor(list, rerender, label) {
 // views
 // ---------------------------------------------------------------------------------------------
 
+/**
+ * The simple view: a time, and a list of points to click at that time. Nothing else.
+ *
+ * WHY IT EDITS A REAL AUTOMATION RATHER THAN ITS OWN RECORD. A second kind of saved job would need its own
+ * scheduler path, its own run path, its own history and its own diagnostics - and every one of those is already
+ * built, tested and (after several bugs) trusted. So this is a different EDITOR over the same record: one
+ * automation with a fixed id, always `daily` with a second, whose steps are one click each. The full editor can
+ * still open it, which is the escape hatch when a job outgrows this form.
+ */
+const BASIC_ID = 'basic';
+const BASIC_NAME_KEY = 'basic.name';
+
+function basicDraft() {
+  const existing = state.automations.find((a) => a.id === BASIC_ID);
+  if (existing) {
+    // an editor over a real record: take the stored steps, but never its schedule kind, because this form is
+    // always a daily time
+    return {
+      ...existing,
+      schedule: { kind: 'daily', ...(existing.schedule ?? {}) },
+      steps: (existing.steps ?? []).map((s) => ({ ...s })),
+    };
+  }
+  // a fresh draft: 09:00:00 and one empty click, so the form is usable the moment it is opened
+  return {
+    id: BASIC_ID,
+    name: t(BASIC_NAME_KEY),
+    enabled: true,
+    urls: [],
+    schedule: { kind: 'daily', hour: 9, minute: 0, second: 0 },
+    steps: [makeStep('click', { finder: { strategy: 'css', selector: '' } })],
+    options: { stepDelayMs: 60, stepRetries: 2, maxRunMs: 30 * 60_000 },
+    createdAt: Date.now(),
+  };
+}
+
+function basicView(rerender) {
+  const wrap = el('div', { class: 'basic' });
+  /**
+   * The form is rebuilt from the SAVED record on every render, unless that render was caused by the form itself.
+   *
+   * Reported as "duplicate points that cannot be removed": a draft kept in memory across visits came back with
+   * points the user had deleted, and the saved record was ignored. Storage is the truth, so the default is to
+   * rebuild. The single exception is a re-render caused by the form (adding, deleting, reordering, picking) -
+   * `state.basicKeepDraft` is set by exactly those, so their result is not thrown away. A flag that had to be right
+   * on every path was the earlier, fragile version of this.
+   */
+  if (!state.basicKeepDraft || !state.basic) {
+    state.basic = basicDraft();
+  }
+  state.basicKeepDraft = false;
+  const draft = state.basic;
+
+  /** Mutate the draft and re-render without discarding it. */
+  const keepDraftThen = (fn) => {
+    fn();
+    state.basicKeepDraft = true;
+    rerender();
+  };
+  const sched = draft.schedule ?? { kind: 'daily', hour: 9, minute: 0, second: 0 };
+
+  wrap.append(el('p', { class: 'hint', text: t('basic.intro') }));
+
+  // ---- the time, typed rather than scrolled. Same lesson as the full editor: no re-render while it has focus.
+  const hint = el('span', { class: 'hint', text: '' });
+  const commit = (value) => {
+    const parts = String(value ?? '').split(':').map(Number);
+    const [h, m, sec] = parts;
+    if (!Number.isFinite(h) || !Number.isFinite(m)) return;
+    if (h < 0 || h > 23 || m < 0 || m > 59) return;
+    if (parts.length > 2 && (!Number.isFinite(sec) || sec < 0 || sec > 59)) return;
+    // written to the MODEL on every keystroke, and never followed by a re-render here: rebuilding the view while
+    // the field has focus is what made this control untypeable, and a rebuild reads the schedule back from storage
+    // which would discard the half-typed value.
+    draft.schedule = { kind: 'daily', hour: h, minute: m, second: parts.length > 2 ? sec : 0 };
+    state.basic = draft;
+    hint.textContent = t('basic.savedHint');
+  };
+  wrap.append(el('div', { class: 'row' },
+    el('label', { text: t('basic.time') }),
+    el('input', {
+      type: 'time', step: '1', class: 'grow',
+      value: `${String(sched.hour ?? 9).padStart(2, '0')}:${String(sched.minute ?? 0).padStart(2, '0')}:${String(sched.second ?? 0).padStart(2, '0')}`,
+      // every keystroke updates the model; leaving the field re-renders once, and the draft is kept so the typed
+      // value survives that re-render
+      oninput: (e) => commit(e.target.value),
+      onblur: (e) => { commit(e.target.value); keepDraftThen(() => {}); },
+      onchange: (e) => commit(e.target.value),
+    }),
+    hint,
+  ));
+
+  // ---- the points, each one a picked element and a click
+  wrap.append(el('div', { class: 'row' },
+    el('label', { text: t('basic.points') }),
+    el('span', { class: 'hint', text: `${draft.steps.length}` }),
+  ));
+
+  draft.steps.forEach((step, i) => {
+    const finder = step.finder ?? { strategy: 'css', selector: '' };
+    const picked = pickerSummary(finder);
+
+    wrap.append(el('div', { class: 'step' },
+      el('div', { class: 'step-head' },
+        el('span', { class: 'step-kind', text: `#${i + 1}` }),
+        el('span', { class: 'step-summary', text: picked.label }),
+        el('span', { class: 'spacer' }),
+        // move up / down, so the order of the clicks is visible and adjustable
+        el('button', { class: 'icon', title: t('action.moveUp'), text: t('ui.moveUp'), onclick: () => {
+          if (i === 0) return;
+          [draft.steps[i - 1], draft.steps[i]] = [draft.steps[i], draft.steps[i - 1]];
+          keepDraftThen(() => {});
+        } }),
+        el('button', { class: 'icon', title: t('action.moveDown'), text: t('ui.moveDown'), onclick: () => {
+          if (i >= draft.steps.length - 1) return;
+          [draft.steps[i + 1], draft.steps[i]] = [draft.steps[i], draft.steps[i + 1]];
+          keepDraftThen(() => {});
+        } }),
+        // delete, which is half of what was missing: a picked point could not be removed
+        el('button', { class: 'icon danger', title: t('action.delete'), text: t('ui.close'), onclick: () => {
+          keepDraftThen(() => draft.steps.splice(i, 1));
+        } }),
+      ),
+      el('div', { class: 'step-body' },
+        el('div', { class: 'row' },
+          el('button', {
+            class: 'pick', text: t('ui.pick'), title: t('ui.pickTitle'),
+            onclick: async () => {
+              state.pickTarget = step.id;
+              const res = await send({ type: 'pick-element' });
+              if (!res.ok) alert(res.error ?? 'could not start the picker');
+            },
+          }),
+          // the other half: an editable selector, shown for every point rather than only as a fallback count
+          el('input', {
+            class: 'grow mono', value: finder.selector ?? finder.text ?? finder.id ?? '',
+            placeholder: t('field.selector'),
+            onchange: (e) => {
+              const key = { css: 'selector', xpath: 'xpath', text: 'text', id: 'id', name: 'name',
+                label: 'label', placeholder: 'placeholder', aria: 'aria', role: 'role' }[finder.strategy] ?? 'selector';
+              // editing drops the fallback chain: it pointed at the ORIGINALLY picked element and would outvote
+              // a corrected selector when the new one missed
+              const { chain, ...rest } = finder;
+              keepDraftThen(() => { step.finder = { ...rest, strategy: finder.strategy ?? 'css', [key]: e.target.value }; });
+            },
+          }),
+          finder.chain?.length
+            ? el('span', { class: 'hint', title: finder.chain.join('\n'), text: `+${finder.chain.length}` })
+            : null,
+          // and remove whatever was picked, keeping the strategy so the row stays usable
+          (finder.chain?.length || Object.keys(finder).some((k) => k !== 'strategy'))
+            ? el('button', {
+              class: 'icon', text: '✕', title: t('finder.clear'),
+              onclick: () => keepDraftThen(() => { step.finder = { strategy: finder.strategy ?? 'css' }; }),
+            })
+            : null,
+        ),
+      ),
+    ));
+  });
+
+  // ---- add another point
+  wrap.append(el('div', { class: 'row' },
+    el('button', {
+      class: 'grow', text: t('basic.addPoint'),
+      onclick: () => {
+        keepDraftThen(() => draft.steps.push(makeStep('click', { finder: { strategy: 'css', selector: '' } })));
+      },
+    }),
+  ));
+
+  // ---- save, and run now
+  const save = async () => {
+    const clean = {
+      ...draft,
+      name: draft.name || t(BASIC_NAME_KEY),
+      // only steps that actually point at something are saved: an empty row would fail at run time and look like
+      // a bug in the clicker rather than an unfinished form
+      steps: draft.steps.filter((x) => Object.keys(x.finder ?? {}).some((k) => k !== 'strategy' && x.finder[k])),
+    };
+    if (clean.steps.length === 0) {
+      state.basicError = t('basic.needPoint');
+      rerender();
+      return;
+    }
+    state.basicError = null;
+    const res = await send({ type: 'save-automation', automation: clean });
+    if (!res?.ok) { state.basicError = res?.error ?? 'save failed'; rerender(); return; }
+    await refresh();
+    state.basic = { ...clean };
+    state.basicStale = false;
+    rerender();
+  };
+
+  wrap.append(el('div', { class: 'row' },
+    el('button', { class: 'primary grow', text: t('basic.save'), onclick: save }),
+    el('button', {
+      class: 'grow', text: t('action.runNow'),
+      onclick: async () => {
+        await save();
+        const res = await send({ type: 'start-run', automationId: BASIC_ID });
+        if (!res?.ok) { state.basicError = res?.error ?? 'could not start'; rerender(); }
+        else await refresh();
+      },
+    }),
+  ));
+
+  if (state.basicError) wrap.append(el('div', { class: 'preview warn', text: state.basicError }));
+
+  // ---- what will happen, computed by the same scheduler the worker uses
+  try {
+    const label = describeSchedule(draft.schedule);
+    const upcoming = [];
+    let cursor = Date.now();
+    for (let i = 0; i < 2; i++) {
+      const n = nextRun(draft.schedule, cursor);
+      if (n === null) break;
+      upcoming.push(n);
+      cursor = n;
+    }
+    wrap.append(el('div', { class: 'preview' },
+      el('div', { class: 'preview-label', text: label }),
+      ...upcoming.map((t2) => el('div', { class: 'preview-next', text: `next: ${fmtTime(t2)}  (${relTime(t2)})` })),
+    ));
+  } catch (e) {
+    wrap.append(el('div', { class: 'preview warn', text: `${e.message}` }));
+  }
+
+  return wrap;
+}
+
+/** A short description of what a finder points at, for the collapsed row. */
+function pickerSummary(finder) {
+  const value = finder.selector ?? finder.text ?? finder.id ?? finder.xpath ?? finder.aria ?? finder.placeholder;
+  if (!value) return { label: '—', detail: null };
+  return { label: String(value).slice(0, 60), detail: finder.strategy };
+}
+
 function automationsView(rerender) {
   const wrap = el('div');
 
@@ -1296,17 +1558,25 @@ function render() {
   ));
 
   const nav = el('nav', { class: 'tabs' });
-  for (const [id, key] of [['automations', 'tab.automations'], ['scheduled', 'tab.scheduled'], ['data', 'tab.data'], ['history', 'tab.history'], ['log', 'tab.log']]) {
+  // 'basic' sits beside 'automations' and is the same data with the fields a timed click actually needs, so a
+  // simple job never has to meet the full step editor
+  for (const [id, key] of [['basic', 'tab.basic'], ['automations', 'tab.automations'], ['scheduled', 'tab.scheduled'], ['data', 'tab.data'], ['history', 'tab.history'], ['log', 'tab.log']]) {
     nav.append(el('button', {
       class: state.tab === id ? 'active' : '',
       text: t(key),
-      onclick: () => { state.tab = id; render(); },
+      onclick: () => {
+        // moving to another tab discards the form's working copy, so coming back shows what is actually saved
+        if (id !== 'basic') state.basicStale = true;
+        state.tab = id;
+        render();
+      },
     }));
   }
   root.append(nav);
 
   const body = el('main');
-  if (state.tab === 'automations') body.append(automationsView(rerender));
+  if (state.tab === 'basic') body.append(basicView(rerender));
+  else if (state.tab === 'automations') body.append(automationsView(rerender));
   else if (state.tab === 'scheduled') body.append(scheduledView());
   else if (state.tab === 'data') body.append(dataView(rerender));
   else if (state.tab === 'log') body.append(logView(rerender));
@@ -1343,10 +1613,15 @@ api.runtime.onMessage.addListener((msg) => {
       }
       return null;
     };
-    const step = state.editing ? find(state.editing.steps) : null;
+    // the pick may belong to the full editor or to the simple view; whichever holds that step gets it
+    const inEditing = state.editing ? find(state.editing.steps) : null;
+    const inBasic = state.basic ? (state.basic.steps ?? []).find((s) => s.id === state.pickTarget) : null;
+    const step = inEditing ?? inBasic ?? null;
     if (step) {
       step.finder = msg.finder;
       state.pickTarget = null;
+      // a pick landing in the simple view is form work: keep the draft so the point it was picked for survives
+      if (state.tab === 'basic') state.basicKeepDraft = true;
       render();
     }
     return;
