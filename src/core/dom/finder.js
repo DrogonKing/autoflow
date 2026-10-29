@@ -57,6 +57,46 @@ export function isVisible(el) {
  * An element is "actionable" if a user could click it: visible, not disabled, and not covered by an
  * overlay. The last check is what stops an automation clicking into a cookie banner.
  */
+/**
+ * Is this the kind of element a person would click, or just an element with the right text?
+ *
+ * WHY THIS EXISTS. A Persian trading terminal shows a column header `خرید` above the order book and an action
+ * button `خرید` under the form. A `text` strategy matching "خرید" satisfies every existing check - it is
+ * visible, not disabled, not covered - so the header could be chosen and the click would do nothing while the
+ * trace reported success. `isActionable` answers "could a click reach it"; this answers "was it meant to be
+ * clicked".
+ *
+ * Deliberately permissive about HOW: a <button>, a submit input, a link with an href, an ARIA button role, an
+ * inline handler, or a cursor:pointer style all count. Being strict here would break the many apps that use a
+ * <div> with an onclick, which is common in exactly this kind of terminal.
+ */
+export function isClickableTarget(el) {
+  if (!el || el.nodeType !== 1) return false;
+  const tag = String(el.tagName || '').toLowerCase();
+  if (tag === 'button') return true;
+  if (tag === 'a') return !!(el.getAttribute('href') || el.hasAttribute('onclick'));
+  if (tag === 'input') {
+    const type = String(el.getAttribute('type') || 'text').toLowerCase();
+    return ['button', 'submit', 'reset', 'image', 'checkbox', 'radio'].includes(type);
+  }
+  if (tag === 'select' || tag === 'textarea') return true;
+  if (tag === 'summary' || tag === 'label') return true;
+  const role = String(el.getAttribute('role') || '').toLowerCase();
+  if (role === 'button' || role === 'link' || role === 'menuitem' || role === 'tab' || role === 'option') {
+    return true;
+  }
+  if (el.hasAttribute && (el.hasAttribute('onclick') || el.hasAttribute('onmousedown'))) return true;
+  // JS frameworks often attach the handler instead of an attribute, so a pointer cursor is the remaining
+  // honest signal that a human is meant to click this
+  try {
+    const w = el.ownerDocument?.defaultView;
+    if (w && w.getComputedStyle(el).cursor === 'pointer') return true;
+  } catch {
+    // a detached or sandboxed element: no computed style, and no claim to make
+  }
+  return false;
+}
+
 export function isActionable(el) {
   if (!el) return false;
   if (el.disabled === true) return false;
@@ -318,6 +358,15 @@ export function findElement(root, finder, opts = {}) {
   if (requireActionable) {
     const actionable = chosen.filter(isActionable);
     if (actionable.length) chosen = actionable;
+
+    // Then prefer things that are meant to be clicked. Same defensive shape as the visibility filter above:
+    // narrow only when narrowing leaves something, so a page that puts its handler on a bare <div> still
+    // works - it just loses the preference, not the match.
+    //
+    // This is what stops `text: 'خرید'` from selecting the order book's column header instead of the buy
+    // button. Without it the header is a valid candidate: visible, enabled, uncovered.
+    const clickable = chosen.filter(isClickableTarget);
+    if (clickable.length) chosen = clickable;
   }
 
   const index = finder.index ?? 0;
