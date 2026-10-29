@@ -30,13 +30,22 @@ import { clockOffset } from '../core/clock/skew.js';
 let activeRun = null;
 
 /**
- * How long a scheduled run waits for a slot when another run holds it.
+ * A claim on the run slot, held from the instant a start is accepted until `activeRun` is assigned.
  *
- * Automations that share a target second all arrive together, and each is armed and waiting for that same
- * instant, so the wait can be as long as a run takes. 20s is generous for a click step and still bounded, so a
- * genuinely stuck run cannot make the queue wait forever.
+ * Why it exists: the slot was checked and then assigned several awaits later, so concurrent starts all passed the
+ * check. This is set synchronously before the first await and cleared if the start fails, which makes "one run at
+ * a time" true rather than intended.
  */
-const SLOT_WAIT_MS = 20_000;
+let startingUp = null;
+
+/**
+ * How long a scheduled start waits in the queue for its turn.
+ *
+ * Automations that share a target second all arrive together, each armed and waiting for that same instant, so
+ * they need their turn in sequence rather than being dropped. Eight automations on one second is what an order
+ * window looks like; 45s covers that comfortably and still bounds a wedged run.
+ */
+const SCHEDULE_QUEUE_WAIT_MS = 45_000;
 
 /**
  * How late a missed schedule may be and still run.
@@ -348,11 +357,53 @@ function makeHost(tabId, { stopFlag, onTrace, opts }) {
  *              Passed as `vars.__atMs` so it travels through the runner without changing every step's shape,
  *              and read in `execute` below.
  */
-export async function startAutomation(automationId, { tabId, trigger = 'manual', row = null, vars = {}, atMs = null } = {}) {
-  if (activeRun) {
-    throw new Error(`a run is already in progress (${activeRun.name}); stop it first`);
-  }
+export async function startAutomation(automationId, opts = {}) {
+  /**
+   * THE GUARD IS CLAIMED BEFORE THE FIRST await, and no caller may start a second run by configuration.
+   *
+   * It used to read `if (activeRun) throw` and set `activeRun` three awaits later (getAutomation, getSettings,
+   * tabs.query). Between the check and the set the function yields, so every caller that arrived in that window
+   * also saw a free slot. Measured: two concurrent calls both started, and eight concurrent calls ALL started -
+   * eight runs overwriting each other's activeRun, trace and stop flag. That is the lost run in "seven of eight".
+   *
+   * There is no await between the test and the claim, which on a single-threaded event loop is what makes it
+   * atomic. The claim is released on every failure path, so a rejected start cannot wedge the extension.
+   *
+   * SCHEDULED CALLERS QUEUE INSTEAD OF BEING REFUSED. That is the difference between the alarm handler and a
+   * person pressing Run: a schedule that collides with another schedule must still run, in turn, or the click is
+   * lost - and eight automations on one second is what an order window looks like, not a mistake. A press of Run
+   * while something is already running is still refused, because that is a person who can see what is happening.
+   */
+  const queue = opts.trigger === 'schedule';
+  const deadline = Date.now() + (queue ? SCHEDULE_QUEUE_WAIT_MS : 0);
 
+  for (;;) {
+    if (!activeRun && !startingUp) {
+      const token = { claimedAt: Date.now() };
+      startingUp = token;                     // synchronous: no await between the test above and this
+      try {
+        return await startAutomationLocked(automationId, { ...opts, token });
+      } catch (e) {
+        if (startingUp === token) startingUp = null;
+        throw e;
+      }
+    }
+    if (!queue || Date.now() >= deadline) {
+      throw new Error(`a run is already in progress (${activeRun?.name ?? 'starting'}); stop it first`);
+    }
+    // a scheduled run waits its turn rather than vanishing
+    await new Promise((r) => setTimeout(r, 60));
+  }
+}
+
+/**
+ * The body of a run's start, called with the slot already claimed.
+ *
+ * Split out only so the claim can be made before any await; every rule from the old function is unchanged.
+ */
+async function startAutomationLocked(automationId, {
+  tabId, trigger = 'manual', row = null, vars = {}, atMs = null, token,
+}) {
   const automation = await getAutomation(automationId);
   if (!automation) throw new Error(`no automation with id ${automationId}`);
   validateAutomation(automation);
@@ -365,6 +416,11 @@ export async function startAutomation(automationId, { tabId, trigger = 'manual',
   // `pendingAtMs` lives inside makeHost, above; it is per-run by construction there.
 
   const stopFlag = { stopped: false };
+  if (startingUp !== token) {
+    // another start took over while this one was awaiting (only possible if the claim was released incorrectly)
+    throw new Error('this start was superseded by another run');
+  }
+  startingUp = null;                 // the real flag is about to be set, in the same tick
   activeRun = {
     id: automationId,
     name: automation.name,
@@ -592,21 +648,10 @@ api.alarms.onAlarm.addListener(async (alarm) => {
      *
      * The wait is bounded: if the slot has not freed by then, the refusal is reported rather than hidden.
      */
-    const runWhenSlotIsFree = async (extra = {}) => {
-      const deadline = Date.now() + SLOT_WAIT_MS;
-      let lastError = null;
-      for (;;) {
-        try {
-          return await startAutomation(id, { tabId, trigger: 'schedule', atMs, ...extra });
-        } catch (e) {
-          lastError = e;
-          const collided = /already in progress/i.test(String(e?.message ?? ''));
-          if (!collided || Date.now() >= deadline) throw e;
-          // another scheduled run holds the slot: wait for it rather than dropping this one
-          await new Promise((r) => setTimeout(r, 120));
-        }
-      }
-    };
+    // `startAutomation` queues a scheduled trigger itself now, so this is a plain call. Keeping a retry loop
+    // here as well would be two mechanisms for one rule, and the outer one would hide the inner one's timeout.
+    const runWhenSlotIsFree = (extra = {}) =>
+      startAutomation(id, { tabId, trigger: 'schedule', atMs, ...extra });
 
     // a CSV-driven automation iterates its rows
     const data = automation.dataSource?.key ? await getDataRows(automation.dataSource.key) : null;
