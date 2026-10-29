@@ -122,7 +122,7 @@ jobs:
         with:
           name: autoflow-extension-zips
           path: |
-            release/autoflow.zip
+            release/autoflow-chrome.zip
             release/autoflow-firefox.zip
             release/autoflow-source.zip
           if-no-files-found: error
@@ -136,14 +136,14 @@ jobs:
           # second line of defence rather than the first.
           fail_on_unmatched_files: true
           files: |
-            release/autoflow.zip
+            release/autoflow-chrome.zip
             release/autoflow-firefox.zip
             release/autoflow-source.zip
           generate_release_notes: true
           body: |
             ## Install
 
-            **Chrome / Edge** — download `autoflow.zip`, unpack it, then
+            **Chrome / Edge / Brave / Opera** — download `autoflow-chrome.zip`, unpack it, then
             `chrome://extensions` → enable Developer mode → **Load unpacked** → pick the unpacked folder.
 
             **Firefox** — download `autoflow-firefox.zip`. A permanent install requires Mozilla's signature,

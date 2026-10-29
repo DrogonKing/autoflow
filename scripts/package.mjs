@@ -4,9 +4,15 @@
  *
  * Two artefacts, and the difference matters:
  *
- *   autoflow.zip             the extension itself, with manifest.json at the ROOT of the archive. This is
- *                            what "Load unpacked" and the Web Store both expect.
+ *   autoflow-chrome.zip      the CHROMIUM build (Chrome, Edge, Brave, Opera), with manifest.json at the ROOT
+ *                            of the archive. This is what "Load unpacked" and the Web Store both expect.
+ *   autoflow-firefox.zip     the FIREFOX build, same layout, different manifest.
  *   autoflow-source.zip      the repository, excluding node_modules and dist.
+ *
+ * The Chromium archive is named `-chrome` rather than plain `autoflow.zip` on purpose. It was plain, and a
+ * user looking at three files in a downloads folder picked the Firefox one and then could not find a Chrome
+ * build at all - because only the Firefox file named its browser. A filename that does not say which target
+ * it is for is a filename doing the opposite of its job.
  *
  * A common mistake is zipping the project folder, so the archive contains `dist/manifest.json` instead of
  * `manifest.json`. Chrome then reports "Manifest file is missing or unreadable" with no further
@@ -151,7 +157,7 @@ async function main() {
     process.exit(1);
   }
 
-  const extPath = path.join(releaseDir, 'autoflow.zip');
+  const extPath = path.join(releaseDir, 'autoflow-chrome.zip');
   const extInfo = await writeZip(files, extPath);
 
   // ---- the source
@@ -188,12 +194,14 @@ async function main() {
     ffManifest = JSON.parse(await readFile(path.join(ffDir, 'manifest.json'), 'utf8'));
   }
 
+  // Say which browser each file is for at the point of creation, so the name in a downloads folder is not
+  // the only signal a user gets.
   console.log('packaged:');
-  console.log(`  release/autoflow.zip           ${(extInfo.bytes / 1024).toFixed(0)} KB, ${extInfo.files} files  (Chrome/Edge)`);
+  console.log(`  release/autoflow-chrome.zip    ${(extInfo.bytes / 1024).toFixed(0)} KB, ${extInfo.files} files  -> CHROME, EDGE, BRAVE, OPERA`);
   if (ffInfo) {
-    console.log(`  release/autoflow-firefox.zip   ${(ffInfo.bytes / 1024).toFixed(0)} KB, ${ffInfo.files} files  (Firefox)`);
+    console.log(`  release/autoflow-firefox.zip   ${(ffInfo.bytes / 1024).toFixed(0)} KB, ${ffInfo.files} files  -> FIREFOX`);
   }
-  console.log(`  release/autoflow-source.zip    ${(srcInfo.bytes / 1024).toFixed(0)} KB, ${srcInfo.files} files  (source)`);
+  console.log(`  release/autoflow-source.zip    ${(srcInfo.bytes / 1024).toFixed(0)} KB, ${srcInfo.files} files  -> source, both browsers`);
   console.log(`\n  extension : ${manifest.name} v${manifest.version}`);
   console.log(`  manifest at the root of every zip: yes`);
   if (ffManifest) {

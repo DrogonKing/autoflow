@@ -171,7 +171,7 @@ cd autoflow
 npm ci                                        # from package-lock.json, the step CI uses
 npm run build:all                             # dist/ (Chrome/Edge) + dist-firefox/ (Firefox)
 
-npm run package                               # release/autoflow.zip + autoflow-firefox.zip + source
+npm run package                               # release/autoflow-chrome.zip + -firefox.zip + -source.zip
 ```
 
 | Job step | What it proves |
@@ -189,8 +189,9 @@ npm run package                               # release/autoflow.zip + autoflow-
 The zips are ordinary zip files with `manifest.json` at the root, so a reviewer can read any file in them:
 
 ```
-unzip -l release/autoflow.zip
-unzip -p release/autoflow.zip manifest.json      # the actual manifest that ships
+unzip -l release/autoflow-chrome.zip
+unzip -p release/autoflow-chrome.zip manifest.json    # the actual manifest that ships
+unzip -p release/autoflow-firefox.zip manifest.json   # the Firefox one, for comparison
 ```
 
 And the no-network claim is a test, not a promise. `scripts/firefox-security-test.mjs` starts an HTTP server,
@@ -235,9 +236,24 @@ https://github.com/DrogonKing/autoflow/releases/latest
 Direct downloads (once the repo is public, or with access to it):
 
 ```
-.../releases/download/v1.0.0/autoflow.zip            Chrome and Edge
-.../releases/download/v1.0.0/autoflow-firefox.zip    Firefox
-.../releases/download/v1.0.0/autoflow-source.zip     full source, tests included
+.../releases/download/v1.0.1/autoflow-chrome.zip     Chrome, Edge, Brave, Opera
+.../releases/download/v1.0.1/autoflow-firefox.zip    Firefox
+.../releases/download/v1.0.1/autoflow-source.zip     full source, tests included
+```
+
+### Which file do I download?
+
+| Your browser | File | How to install |
+|---|---|---|
+| **Chrome, Edge, Brave, Opera** | `autoflow-chrome.zip` | unpack it, then `chrome://extensions` → Developer mode → **Load unpacked** → select the unpacked folder |
+| **Firefox** | `autoflow-firefox.zip` | unpack it, then `about:debugging#/runtime/this-firefox` → **Load Temporary Add-on** → select `manifest.json` inside the unpacked folder |
+| either, to read the code | `autoflow-source.zip` | the whole tree, tests and security scripts included |
+
+To confirm which build a zip is, read the manifest inside it rather than trusting the name:
+
+```
+unzip -p autoflow-chrome.zip manifest.json   # "service_worker" and "side_panel"  -> Chromium
+unzip -p autoflow-firefox.zip manifest.json  # "scripts" and "sidebar_action"    -> Firefox
 ```
 
 ### Two things CI caught that a local run could not
