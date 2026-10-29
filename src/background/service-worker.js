@@ -29,6 +29,25 @@ import { clockOffset } from '../core/clock/skew.js';
 /** The run currently in progress, if any. Mirrored into session storage for the UI. */
 let activeRun = null;
 
+/**
+ * How long a scheduled run waits for a slot when another run holds it.
+ *
+ * Automations that share a target second all arrive together, and each is armed and waiting for that same
+ * instant, so the wait can be as long as a run takes. 20s is generous for a click step and still bounded, so a
+ * genuinely stuck run cannot make the queue wait forever.
+ */
+const SLOT_WAIT_MS = 20_000;
+
+/**
+ * How late a missed schedule may be and still run.
+ *
+ * If the machine slept through the target, running is still useful while the window is open and pointless once it
+ * has closed. Ten seconds is the compromise: it covers a suspended laptop waking, a busy profiler, or a slow alarm,
+ * and it does not silently fire an order minutes after the moment has passed. Beyond this the run is recorded as
+ * missed rather than executed.
+ */
+const LATE_TOLERANCE_MS = 10_000;
+
 class StepTimeout extends Error {
   constructor(message) {
     super(message);
@@ -529,26 +548,79 @@ api.alarms.onAlarm.addListener(async (alarm) => {
     // the schedule instead of being carried on the alarm, so a worker restart between arming and firing cannot
     // lose it. If the alarm somehow fires after the target, this is null and the run starts immediately.
     let atMs = null;
+    let lateBy = 0;
     if (wantsPreciseTiming(automation.schedule)) {
-      // The alarm fired EARLY on purpose, so the schedule's next occurrence from *now* is the instant we are
-      // early for - no arithmetic required. The first attempt at this subtracted a second from the alarm time,
-      // which landed before the target and therefore asked for the next day's occurrence: the run then waited
-      // for tomorrow and the click never happened. Measured, not reasoned about.
-      const target = nextRun(automation.schedule, Date.now());
-      // only trust it if it is close: a target far away means the recomputation is wrong, and waiting for it
-      // would silently swallow the run rather than running late
-      if (target && target - Date.now() <= PRECISE_WAKE_MS + 5000) atMs = target;
+      /**
+       * The alarm fired EARLY on purpose, so the schedule's next occurrence from *now* is the instant we are early
+       * for - no arithmetic needed. (The first attempt subtracted a second from the alarm time, which landed
+       * before the target and asked for the NEXT DAY's occurrence: the run waited for tomorrow and the click never
+       * happened. Measured, not reasoned about.)
+       *
+       * LATE IS HANDLED TOO, and it is the other half of "it did not fire when its time came". If the machine was
+       * asleep or the browser was busy, the alarm fires after the target. `nextRun` then returns the NEXT
+       * occurrence - tomorrow - and the old code saw a target far away and dropped the run silently. Late by a
+       * few seconds is still worth acting on for a window that is open; late by minutes is not. So the tolerance
+       * is explicit and the lateness is recorded.
+       */
+      const now = Date.now();
+      const next = nextRun(automation.schedule, now);
+      if (next && next - now <= PRECISE_WAKE_MS + 5000) {
+        atMs = next;                            // early, as designed
+      } else {
+        // was there a target we just missed? ask for the occurrence at or before now
+        const planned = nextRun(automation.schedule, now - LATE_TOLERANCE_MS);
+        if (planned && now - planned <= LATE_TOLERANCE_MS) {
+          lateBy = now - planned;
+          atMs = null;                          // too late to wait for it; run now
+        }
+      }
     }
+
+    /**
+     * RUN IT, WAITING FOR THE SLOT IF ANOTHER SCHEDULED RUN IS STILL GOING.
+     *
+     * THE BUG THIS FIXES, reported from a real test: two of five scheduled automations never fired. The cause was
+     * not timing precision - it was a collision. Every alarm that shares a second arrives together, and
+     * `startAutomation` refuses while `activeRun` is set, so the second and later ones were rejected with
+     * "a run is already in progress". That refusal was then recorded as a run with reason `step-error`, so a run
+     * that never happened looked like a run that failed.
+     *
+     * A millisecond gap between clicks would not have helped: the earlier runs are still armed, waiting for the
+     * same precise instant, and their wait does not end just because the step is finished. What is needed is to
+     * QUEUE, not to spread out by milliseconds - and five automations aimed at one second is not an accident, it
+     * is exactly what an order window looks like.
+     *
+     * The wait is bounded: if the slot has not freed by then, the refusal is reported rather than hidden.
+     */
+    const runWhenSlotIsFree = async (extra = {}) => {
+      const deadline = Date.now() + SLOT_WAIT_MS;
+      let lastError = null;
+      for (;;) {
+        try {
+          return await startAutomation(id, { tabId, trigger: 'schedule', atMs, ...extra });
+        } catch (e) {
+          lastError = e;
+          const collided = /already in progress/i.test(String(e?.message ?? ''));
+          if (!collided || Date.now() >= deadline) throw e;
+          // another scheduled run holds the slot: wait for it rather than dropping this one
+          await new Promise((r) => setTimeout(r, 120));
+        }
+      }
+    };
 
     // a CSV-driven automation iterates its rows
     const data = automation.dataSource?.key ? await getDataRows(automation.dataSource.key) : null;
     if (Array.isArray(data) && data.length) {
       for (const row of data) {
-        await startAutomation(id, { tabId, trigger: 'schedule', row, atMs });
+        await runWhenSlotIsFree({ row });
       }
     } else {
-      await startAutomation(id, { tabId, trigger: 'schedule', atMs });
-    }
+      await runWhenSlotIsFree();
+ }
+ if (lateBy > 0) {
+ // recorded, not hidden: a click that lands 4s after 09:00:00 is a different event from one that lands on time
+ console.warn(`[autoflow] ${id} fired ${lateBy}ms late - the machine or the browser was busy at its time`);
+ }
   } catch (e) {
     await recordRun({
       id: `run${Date.now().toString(36)}`,

@@ -71,7 +71,7 @@ console.log('\n--- 1. opened as a file, WITHOUT "Allow access to file URLs" ---'
     injected: document.documentElement.getAttribute('data-autoflow-content'),
   }));
   console.log(`  clock=${state.clock}  pads=${state.pads}  sames=${state.sames}  injected=${state.injected}`);
-  check('the page itself works with no server at all', state.pads === 4 && state.sames === 3,
+  check('the page itself works with no server at all', state.pads === 5 && state.sames === 3,
     `pads=${state.pads} sames=${state.sames}`);
   check('the hundredths clock runs', /^\d{2}:\d{2}:\d{2}:\d{2}$/.test(state.clock ?? ''), state.clock);
   // MEASURED, not assumed. Playwright launches with --load-extension, which grants this extension file access
@@ -81,7 +81,7 @@ console.log('\n--- 1. opened as a file, WITHOUT "Allow access to file URLs" ---'
     ? 'NOT granted - the per-extension toggle is off'
     : 'granted for this launch (Playwright implies it with --load-extension)'}`);
   check('the page and the clock work with no server, whatever the file-access state',
-    state.pads === 4 && /^\d{2}:\d{2}:\d{2}:\d{2}$/.test(state.clock ?? ''),
+    state.pads === 5 && /^\d{2}:\d{2}:\d{2}:\d{2}$/.test(state.clock ?? ''),
     `pads=${state.pads} clock=${state.clock}`);
 
   // a manual click must still be recorded: the page is useful even with no extension

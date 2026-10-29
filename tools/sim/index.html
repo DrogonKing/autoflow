@@ -38,7 +38,7 @@
   .clock .cc { color: var(--hot); }
   .clock span { color: var(--dim); font-size: 12px; }
 
-  .grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 18px; }
+  .grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; margin-bottom: 18px; }
   .pad {
     position: relative; cursor: pointer; user-select: none;
     background: var(--panel); border: 2px solid var(--line); border-radius: 12px;
@@ -122,6 +122,12 @@
     <div class="count" data-count>0</div>
     <div class="n">۴</div>
     <div class="lbl">نقطه چهار</div>
+    <div class="when" data-when>—</div>
+  </div>
+  <div class="pad" data-target="نقطه ۵" id="pad5">
+    <div class="count" data-count>0</div>
+    <div class="n">۵</div>
+    <div class="lbl">نقطه پنج</div>
     <div class="when" data-when>—</div>
   </div>
 </div>

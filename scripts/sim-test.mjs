@@ -78,7 +78,8 @@ console.log('\n--- 1. the page renders what was asked for ---');
     rtl: document.documentElement.getAttribute('dir'),
   }));
   console.log(`  pads=${shape.pads} same-name=${shape.sames} clock=${shape.clock} dir=${shape.rtl}`);
-  check('four separate points exist', shape.pads === 4, `${shape.pads}`);
+  // five, because the reported failure involved five automations and the page should be able to host that
+  check('five separate points exist', shape.pads === 5, `${shape.pads}`);
   check('three identically-labelled buttons exist', shape.sames === 3, `${shape.sames}`);
   check('the identical label is the one from the real case',
     shape.sameLabel === true, String(shape.sameLabel));
