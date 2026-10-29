@@ -150,12 +150,10 @@ async function refresh() {
  */
 async function refreshClockSkew(force = false) {
   const stored = state.settings?.lastClockOffsetMs;
-  const apply = state.settings?.skewAutoApply === true;
   const threshold = Number(state.settings?.skewWarnThresholdMs ?? 1000);
   if (!force && Number.isFinite(stored)) {
     state.clockSkew = {
-      offsetMs: stored, rttMs: null, trustworthy: true,
-      warn: shouldWarn(stored, threshold), applied: apply,
+      offsetMs: stored, rttMs: null, trustworthy: true, warn: shouldWarn(stored, threshold),
     };
     return state.clockSkew;
   }
@@ -169,7 +167,7 @@ async function refreshClockSkew(force = false) {
   state.settings = { ...state.settings, lastClockOffsetMs: res.offsetMs };
   state.clockSkew = {
     offsetMs: res.offsetMs, rttMs: res.rttMs, trustworthy: res.trustworthy,
-    warn: shouldWarn(res.offsetMs, threshold), applied: apply,
+    warn: shouldWarn(res.offsetMs, threshold),
   };
   return state.clockSkew;
 }
@@ -350,20 +348,18 @@ function scheduleEditor(onChange) {
         el('strong', { text: t('skew.title') }),
         el('div', { text: describeSkew(state.clockSkew, t.language) }),
         el('div', { class: 'hint', text: t('skew.consequence') }),
+        // NO APPLY BUTTON, by decision. An earlier version had one; it was removed because the measurement's
+        // uncertainty is about half a second, so applying it would move an order by an amount that could be in
+        // the wrong direction. Re-measuring is offered because it is free and the reading can go stale.
         el('div', { class: 'skew-actions' },
-          el('button', {
-            text: state.clockSkew.applied ? t('skew.applied') : t('skew.apply'),
-            class: state.clockSkew.applied ? '' : 'primary',
-            onclick: async () => {
-              const settings = await send({ type: 'save-settings', patch: { skewAutoApply: !state.clockSkew.applied } });
-              if (settings?.ok) state.settings = settings.settings;
-              await refreshClockSkew();
-              render();
-            },
-          }),
           el('button', {
             text: t('skew.recheck'),
             onclick: async () => { await refreshClockSkew(true); render(); },
+          }),
+          el('button', {
+            text: t('skew.syncHint'),
+            title: t('skew.syncHintTitle'),
+            onclick: () => { refreshClockSkew(true).then(() => render()); },
           })),
       ));
     }

@@ -50,11 +50,10 @@ export const DEFAULT_SETTINGS = {
    */
   skewWarnThresholdMs: 1000,
   /**
-   * Correct the schedule by the measured offset. OFF by default and deliberately so: it changes WHEN an order
-   * fires based on a measurement, so it must be a decision the user makes rather than one they discover.
+   * The last measured offset, kept so the panel can show it without re-measuring on every open.
+   *
+   * Reported only. Nothing applies it: see src/core/clock/skew.js.
    */
-  skewAutoApply: false,
-  /** The last measured offset, kept so the panel can show it without re-measuring on every open. */
   lastClockOffsetMs: null,
   /**
    * UI language: 'system' follows the browser, otherwise a catalogue code.

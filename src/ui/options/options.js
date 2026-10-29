@@ -98,18 +98,9 @@ function settingsSection() {
         }))),
       el('span', { class: 'hint', text: t('opt.languageHint') }),
     ),
-    // ---- clock offset: measured and reported, never applied without this switch
+    // ---- clock offset: REPORTED only. No apply control exists, on purpose - see src/core/clock/skew.js.
     el('div', { class: 'row' },
-      el('input', {
-        type: 'checkbox', checked: s.skewAutoApply === true, id: 'skewAutoApply',
-        onchange: async (e) => {
-          state.settings = (await send({
-            type: 'save-settings', patch: { skewAutoApply: e.target.checked },
-          })).settings ?? state.settings;
-          render();
-        },
-      }),
-      el('label', { for: 'skewAutoApply', text: t('opt.skew') }),
+      el('label', { text: t('opt.skew') }),
       el('span', { class: 'hint', text: t('opt.skewHint') }),
     ),
     el('div', { class: 'row' },

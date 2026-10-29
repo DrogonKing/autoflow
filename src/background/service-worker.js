@@ -24,7 +24,7 @@ import {
   rescheduleAll, scheduleOne, cancelOne, automationIdFromAlarm, ALARM_PREFIX, listScheduled,
 } from './alarms.js';
 import { nextRun, wantsPreciseTiming, PRECISE_WAKE_MS } from '../core/schedule/schedule.js';
-import { clockOffset, correctedTarget } from '../core/clock/skew.js';
+import { clockOffset } from '../core/clock/skew.js';
 
 /** The run currently in progress, if any. Mirrored into session storage for the UI. */
 let activeRun = null;
@@ -407,13 +407,7 @@ export async function startAutomation(automationId, { tabId, trigger = 'manual',
   try {
     const fresh = await getAutomation(automationId);
     if (fresh?.schedule && fresh.schedule.kind !== 'manual') {
-      // re-armed with the same correction rules: a chain of runs must not silently lose the correction after
-      // the first one, which would make the offset appear to work once and then stop
-      const s = await getSettings();
-      await scheduleOne(fresh, {
-        clockOffsetMs: s.lastClockOffsetMs,
-        skewAutoApply: s.skewAutoApply === true,
-      });
+      await scheduleOne(fresh);
     }
   } catch { /* the run already finished; a schedule failure must not look like a run failure */ }
 
@@ -482,8 +476,7 @@ api.runtime.onInstalled.addListener(async (details) => {
   // panel call meant one failure stopped the other, and the panel call was what the user could see.
   try {
     const automations = await listAutomations();
-    const s = await getSettings();
-    await rescheduleAll(automations, { clockOffsetMs: s.lastClockOffsetMs, skewAutoApply: s.skewAutoApply === true });
+    await rescheduleAll(automations);
   } catch (e) {
     console.warn('[autoflow] rescheduling at install failed:', String(e?.message || e));
   }
@@ -502,8 +495,7 @@ ensureClickOpensPanel();
 api.runtime.onStartup.addListener(async () => {
   // every alarm is re-derived from storage: an alarm set before a restart cannot be trusted
   const automations = await listAutomations();
-  const s2 = await getSettings();
-  await rescheduleAll(automations, { clockOffsetMs: s2.lastClockOffsetMs, skewAutoApply: s2.skewAutoApply === true });
+  await rescheduleAll(automations);
 });
 
 api.alarms.onAlarm.addListener(async (alarm) => {
@@ -806,24 +798,13 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
       case 'reschedule': {
         const automations = await listAutomations();
-        const s = await getSettings();
-        return { ok: true, results: await rescheduleAll(automations, { clockOffsetMs: s.lastClockOffsetMs, skewAutoApply: s.skewAutoApply === true }) };
+        return { ok: true, results: await rescheduleAll(automations) };
       }
 
       case 'schedule-one': {
         const automation = await getAutomation(msg.automationId);
         if (!automation) throw new Error('no such automation');
-        // The offset and the opt-in are read HERE and passed in, so `alarms.js` stays free of the settings
-        // store. Omitting them was a real bug: the parameter existed and nothing supplied it, so opting in
-        // changed nothing - the same shape as `allowScripts` never being passed true.
-        const s = await getSettings();
-        return {
-          ok: true,
-          ...(await scheduleOne(automation, {
-            clockOffsetMs: s.lastClockOffsetMs,
-            skewAutoApply: s.skewAutoApply === true,
-          })),
-        };
+        return { ok: true, ...(await scheduleOne(automation)) };
       }
 
       case 'list-scheduled': {

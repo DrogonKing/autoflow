@@ -7,8 +7,8 @@
  */
 import { describe, expect, it } from 'vitest';
 import {
-  DATE_HEADER_RESOLUTION_MS, DEFAULT_WARN_THRESHOLD_MS, clockOffset, correctedTarget,
-  describeCorrection, describeSkew, normaliseSkewSettings, shouldWarn,
+  DATE_HEADER_RESOLUTION_MS, DEFAULT_WARN_THRESHOLD_MS, clockOffset,
+  describeSkew, normaliseSkewSettings, shouldWarn,
 } from '../src/core/clock/skew.js';
 
 describe('measuring the offset', () => {
@@ -84,41 +84,6 @@ describe('whether to warn', () => {
   });
 });
 
-describe('applying the correction', () => {
-  it('a server 2s ahead means firing 2s earlier on this clock', () => {
-    // the wanted moment is 09:00:00 server time; this machine's clock is 2s behind, so its 08:59:58 is 09:00:00
-    const target = 1_700_000_000_000;
-    expect(correctedTarget(target, 2000)).toBe(target - 2000);
-  });
-
-  it('a server 2s behind means firing 2s later on this clock', () => {
-    const target = 1_700_000_000_000;
-    expect(correctedTarget(target, -2000)).toBe(target + 2000);
-  });
-
-  it('a zero offset leaves the target alone', () => {
-    const target = 1_700_000_000_000;
-    expect(correctedTarget(target, 0)).toBe(target);
-  });
-
-  it('a missing offset leaves the target alone rather than moving it to NaN', () => {
-    expect(correctedTarget(1234, undefined)).toBe(1234);
-    expect(correctedTarget(1234, NaN)).toBe(1234);
-  });
-
-  it('a missing target is null, not a number', () => {
-    expect(correctedTarget(undefined, 1000)).toBeNull();
-    expect(correctedTarget(NaN, 1000)).toBeNull();
-  });
-
-  it('correcting and then undoing returns the original', () => {
-    // the property that matters: the correction is reversible, so a wrong reading can be taken back
-    const target = 1_700_000_000_000;
-    const moved = correctedTarget(target, 1500);
-    expect(moved + 1500).toBe(target);
-  });
-});
-
 describe('the wording, where the direction must not be misread', () => {
   it('says the server is ahead when the offset is positive', () => {
     const s = describeSkew({ offsetMs: 2500, rttMs: 80 });
@@ -142,30 +107,22 @@ describe('the wording, where the direction must not be misread', () => {
     expect(s).toMatch(/4000ms/);
   });
 
-  it('describes the correction as a direction, not just a number', () => {
-    expect(describeCorrection(1500)).toMatch(/behind the server.*moved earlier/);
-    expect(describeCorrection(-1500)).toMatch(/ahead of the server.*moved later/);
-    expect(describeCorrection(0)).toMatch(/none/);
-  });
-
   it('speaks Persian when asked', () => {
     expect(describeSkew({ offsetMs: 2500, rttMs: 80 }, 'fa')).toMatch(/[\u0600-\u06FF]/);
     expect(describeSkew({ offsetMs: 2500, rttMs: 80 }, 'fa')).toContain('2.5');
-    expect(describeCorrection(1500, 'fa')).toMatch(/[\u0600-\u06FF]/);
   });
 });
 
 describe('stored settings', () => {
-  it('defaults to warning at a full second with no auto-apply', () => {
-    const s = normaliseSkewSettings({});
-    expect(s.thresholdMs).toBe(1000);
-    expect(s.autoApply).toBe(false);
+  it('defaults to warning at a full second', () => {
+    expect(normaliseSkewSettings({}).thresholdMs).toBe(1000);
   });
 
-  it('auto-apply is strictly opt-in, so a missing value never applies a correction', () => {
-    expect(normaliseSkewSettings({}).autoApply).toBe(false);
-    expect(normaliseSkewSettings({ skewAutoApply: 'yes' }).autoApply).toBe(false);
-    expect(normaliseSkewSettings({ skewAutoApply: true }).autoApply).toBe(true);
+  it('has NO apply field at all, so the offset can never be used to move a schedule', () => {
+    // A test that asserted `autoApply === false` would only pin a default - someone could flip it. Asserting the
+    // property is ABSENT pins the design: there is no code path from a measurement to a schedule.
+    expect('autoApply' in normaliseSkewSettings({})).toBe(false);
+    expect('autoApply' in normaliseSkewSettings({ skewAutoApply: true })).toBe(false);
   });
 
   it('a nonsense threshold falls back rather than disabling the warning', () => {

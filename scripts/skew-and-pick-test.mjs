@@ -93,36 +93,43 @@ console.log('\n--- 1. the clock measurement ---');
   await page.close();
 }
 
-console.log('\n--- 2. the warning is information, not a correction ---');
+console.log('\n--- 2. the offset is REPORTED and never applied ---');
 {
-  // store a large offset and check what an alarm becomes, with the switch OFF and ON
+  // The apply path was removed by decision, so there is no switch to test. What must be tested instead is the
+  // absence: a large measured offset must leave the schedule exactly where it was. That is a stronger claim
+  // than "the switch defaults to off", because no amount of configuration can move it.
   const cmp = await bridge.evaluate(async ({ u, bigOffset }) => {
-    await chrome.runtime.sendMessage({ type: 'save-settings', patch: { lastClockOffsetMs: bigOffset, skewAutoApply: false } });
-    const a = await chrome.runtime.sendMessage({ type: 'save-automation', automation: {
+    await chrome.runtime.sendMessage({
+      type: 'save-settings',
+      patch: { lastClockOffsetMs: bigOffset, skewAutoApply: true, skewWarnThresholdMs: 1000 },
+    });
+    await chrome.runtime.sendMessage({ type: 'save-automation', automation: {
       id: 'sk', name: 'sk', enabled: true, urls: [u],
       steps: [{ id: 's1', kind: 'click', finder: { strategy: 'css', selector: '#buy' } }],
       schedule: { kind: 'daily', hour: 9, minute: 0, second: 0 }, options: {},
     } });
-    const off = await chrome.runtime.sendMessage({ type: 'schedule-one', automationId: 'sk' });
-    await chrome.runtime.sendMessage({ type: 'save-settings', patch: { skewAutoApply: true } });
-    const on = await chrome.runtime.sendMessage({ type: 'schedule-one', automationId: 'sk' });
-    await chrome.runtime.sendMessage({ type: 'save-settings', patch: { skewAutoApply: false } });
-    return { off, on };
+    // even with the old setting deliberately forced true, the schedule must not move
+    const withBigOffset = await chrome.runtime.sendMessage({ type: 'schedule-one', automationId: 'sk' });
+    await chrome.runtime.sendMessage({
+      type: 'save-settings', patch: { lastClockOffsetMs: 0, skewAutoApply: false },
+    });
+    const withZero = await chrome.runtime.sendMessage({ type: 'schedule-one', automationId: 'sk' });
+    const settings = await chrome.runtime.sendMessage({ type: 'get-settings' });
+    return { withBigOffset, withZero, settings: settings?.settings };
   }, { u: url, bigOffset: 4000 });
 
-  // `targetLocal` is the moment this machine acts. `target` is the instant the schedule names, which is
-  // identical either way - comparing that was MY mistake, and it made the correction look like a no-op.
-  const offLocal = cmp.off?.targetLocal;
-  const onLocal = cmp.on?.targetLocal;
-  console.log(`  switch OFF -> acts at ${offLocal}   (correctedBy ${cmp.off?.correctedBy})`);
-  console.log(`  switch ON  -> acts at ${onLocal}   (correctedBy ${cmp.on?.correctedBy})`);
-  check('with the switch OFF nothing is corrected', cmp.off?.correctedBy === 0, `correctedBy=${cmp.off?.correctedBy}`);
-  check('with the switch OFF the named target is left alone', offLocal === cmp.off?.target,
-    `local ${offLocal} vs target ${cmp.off?.target}`);
-  check('with the switch ON the machine acts 4s earlier in its own terms',
-    Number.isFinite(onLocal) && Math.abs((offLocal - onLocal) - 4000) < 50,
-    `moved ${offLocal - onLocal}ms, expected 4000`);
-  check('and it says by how much it corrected', cmp.on?.correctedBy === 4000, `correctedBy=${cmp.on?.correctedBy}`);
+  console.log(`  with a 4000ms offset stored: target ${cmp.withBigOffset?.target}`);
+  console.log(`  with a zero offset stored:   target ${cmp.withZero?.target}`);
+  check('the offset does NOT move the schedule, even with the old flag forced on',
+    cmp.withBigOffset?.target === cmp.withZero?.target,
+    `${cmp.withBigOffset?.target} vs ${cmp.withZero?.target}`);
+  check('nothing reports a correction, because none is made',
+    cmp.withBigOffset?.correctedBy === undefined && cmp.withZero?.correctedBy === undefined,
+    JSON.stringify({ a: cmp.withBigOffset?.correctedBy, b: cmp.withZero?.correctedBy }));
+  check('the measurement is still recorded for the warning',
+    Number.isFinite(cmp.settings?.lastClockOffsetMs), `lastClockOffsetMs=${cmp.settings?.lastClockOffsetMs}`);
+  check('the warning threshold is stored', cmp.settings?.skewWarnThresholdMs === 1000,
+    `${cmp.settings?.skewWarnThresholdMs}`);
 }
 
 console.log('\n--- 3. a picked finder can be corrected and cleared ---');

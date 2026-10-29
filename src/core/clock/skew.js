@@ -26,6 +26,10 @@
  * from noise, which is why the default warning threshold is 1000ms and not 200ms: a warning that fires on
  * noise is worse than no warning, because it trains the user to ignore it.
  *
+ * THIS MODULE NEVER CORRECTS ANYTHING. It measures and it words the result. That is a deliberate limit and not
+ * an unfinished feature: the offset's own uncertainty is roughly half a second, so using it to move an order
+ * would move it by an amount that could be in the wrong direction. The user is told; the schedule is untouched.
+ *
  * This module is pure. The request is made by the caller; everything here is arithmetic and wording, so the
  * behaviour is provable without a network.
  */
@@ -68,38 +72,6 @@ export function shouldWarn(offsetMs, thresholdMs = DEFAULT_WARN_THRESHOLD_MS) {
 }
 
 /**
- * Where to aim this machine's clock so that it acts at a given server time.
- *
- * `targetServerMs` is the moment wanted in SERVER time; the result is the moment to program into an alarm,
- * which reads this machine's clock. A positive offset (server ahead) means this machine must fire earlier in
- * its own terms, hence the subtraction.
- */
-export function correctedTarget(targetServerMs, offsetMs) {
-  if (!Number.isFinite(targetServerMs)) return null;
-  if (!Number.isFinite(offsetMs)) return targetServerMs;
-  return targetServerMs - offsetMs;
-}
-
-/** How the correction relocates the action, in words, for the trace. */
-export function describeCorrection(offsetMs, language = 'en') {
-  const fa = language === 'fa';
-  const ms = Math.round(offsetMs);
-  if (!Number.isFinite(ms) || ms === 0) {
-    return fa ? 'اختلاف ساعت: صفر' : 'clock offset: none';
-  }
-  const ahead = ms > 0;         // the server is ahead, so this machine is behind
-  const abs = Math.abs(ms);
-  if (fa) {
-    return ahead
-      ? `ساعت این دستگاه ${abs}ms عقب است؛ اجرا به همان اندازه جلو کشیده شد`
-      : `ساعت این دستگاه ${abs}ms جلو است؛ اجرا به همان اندازه عقب کشیده شد`;
-  }
-  return ahead
-    ? `this machine is ${abs}ms behind the server; the run was moved earlier by that much`
-    : `this machine is ${abs}ms ahead of the server; the run was moved later by that much`;
-}
-
-/**
  * The user-facing reading, worded so the direction cannot be misread.
  *
  * "server is 1.2s ahead" is unambiguous; "offset: +1200" is not, and getting the sign wrong here would move a
@@ -135,5 +107,9 @@ export function normaliseSkewSettings(settings = {}) {
   const raw = Number(settings.skewWarnThresholdMs);
   const thresholdMs = Number.isFinite(raw) && raw >= 0 && raw <= 60_000
     ? Math.floor(raw) : DEFAULT_WARN_THRESHOLD_MS;
-  return { thresholdMs, autoApply: settings.skewAutoApply === true };
+  // There is deliberately NO "apply" field. The offset is reported and never used to move a schedule: the
+  // measurement's uncertainty is about half a second, so applying it would move an order by an amount that
+  // could as easily be wrong as right. Removing the option removes the possibility of someone turning it on
+  // because it looked helpful.
+  return { thresholdMs };
 }

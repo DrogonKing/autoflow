@@ -70,7 +70,20 @@ const extensionId = new URL(worker.url()).host;
 async function runOnPage(step, { reset = true } = {}) {
   const page = await ctx.newPage();
   await page.goto(FIXTURE);
-  await page.waitForTimeout(400);
+
+  /**
+   * Wait until the CONTENT SCRIPT is demonstrably present, not for a fixed number of milliseconds.
+   *
+   * `page.goto` resolves when the document loads; the extension injects afterwards. Sending a step in that gap
+   * fails with "Could not establish connection. Receiving end does not exist", which is indistinguishable from a
+   * product failure - it made this test report 1 failure out of 12 on one run and pass on the next. The content
+   * script sets `data-autoflow-content` on the document element, so the honest wait is for that marker.
+   */
+  await page.waitForFunction(
+    () => document.documentElement.getAttribute('data-autoflow-content') !== null,
+    null, { timeout: 15_000 },
+  );
+
   const tabId = await worker.evaluate(async () => {
     const [t] = await chrome.tabs.query({ active: true, currentWindow: true });
     return t?.id ?? null;

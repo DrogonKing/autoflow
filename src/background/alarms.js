@@ -18,15 +18,12 @@
 import {
   nextRun, validateSchedule, describeSchedule, wantsPreciseTiming, PRECISE_WAKE_MS,
 } from '../core/schedule/schedule.js';
-import { correctedTarget } from '../core/clock/skew.js';
 import { api } from '../platform/api.js';
 
 export const ALARM_PREFIX = 'autoflow:run:';
 
 /** Reschedule every enabled automation, and clear alarms that no longer belong to one. */
-export async function rescheduleAll(automations, {
-  now = Date.now(), clockOffsetMs = null, skewAutoApply = false,
-} = {}) {
+export async function rescheduleAll(automations, { now = Date.now() } = {}) {
   const wanted = new Set();
   const results = [];
 
@@ -46,14 +43,13 @@ export async function rescheduleAll(automations, {
       continue;
     }
     const precise = wantsPreciseTiming(a.schedule);
-    const offset = skewAutoApply && Number.isFinite(clockOffsetMs) ? clockOffsetMs : 0;
-    const atLocal = offset ? (correctedTarget(at, offset) ?? at) : at;
-    const base = precise ? Math.max(atLocal - PRECISE_WAKE_MS, now + 500) : atLocal;
+    // No clock correction is applied. The measured offset is REPORTED only: applying it would move an order by
+    // a value whose own uncertainty is half a second, which is worse than leaving it alone.
+    const base = precise ? Math.max(at - PRECISE_WAKE_MS, now + 500) : at;
     const when = Math.max(base, now + 1000);
     await api.alarms.create(name, { when });
     results.push({
       id: a.id, name: a.name, ok: true, at: when, target: at, precise,
-      correctedBy: offset || 0,
       description: describeSchedule(a.schedule),
     });
   }
@@ -75,14 +71,7 @@ export async function rescheduleAll(automations, {
  * A `cron` or `daily` schedule registers a single next occurrence rather than a repeating alarm, because
  * a repeating alarm cannot express "09:00 local, skipping DST" and would drift by an hour twice a year.
  */
-/**
- * @param clockOffsetMs  the measured server-minus-local offset, already trusted by the caller. Passed in rather
- *   than read here so this module stays free of the settings store.
- * @param skewAutoApply  whether the user asked for the correction to be applied
- */
-export async function scheduleOne(automation, {
-  now = Date.now(), clockOffsetMs = null, skewAutoApply = false,
-} = {}) {
+export async function scheduleOne(automation, { now = Date.now() } = {}) {
   const name = ALARM_PREFIX + automation.id;
   await api.alarms.clear(name);
   if (!automation.enabled || !automation.schedule || automation.schedule.kind === 'manual') {
@@ -95,20 +84,13 @@ export async function scheduleOne(automation, {
   // waited for in the page, where the timer is millisecond-resolution. Without that the click inherits the
   // alarm path's whole latency - worker wake-up, storage read, tab resolution, message round-trip.
   const precise = wantsPreciseTiming(automation.schedule);
-  // When the user has turned the correction on, the schedule's instant is in SERVER time and the alarm reads
-  // this machine's clock, so the two are reconciled here - in one place, so a target is never half-corrected.
-  const offset = skewAutoApply && Number.isFinite(clockOffsetMs) ? clockOffsetMs : 0;
-  const atInLocalTerms = offset ? (correctedTarget(at, offset) ?? at) : at;
-  const base = precise ? Math.max(atInLocalTerms - PRECISE_WAKE_MS, now + 500) : atInLocalTerms;
+  // The schedule's instant is used as-is. Any clock difference is reported to the user and never applied:
+  // the measurement's own uncertainty is about half a second, so "correcting" by it would move an order by an
+  // amount that could easily be in the wrong direction.
+  const base = precise ? Math.max(at - PRECISE_WAKE_MS, now + 500) : at;
   const when = Math.max(base, now + 1000);
   await api.alarms.create(name, { when });
-  return {
-    scheduled: true,
-    // `target` is the instant the SCHEDULE names; `targetLocal` is when this machine will act. Two fields
-    // because they differ exactly when the correction is on, and reporting only the first made the correction
-    // impossible to observe from outside - which is how it appeared to do nothing.
-    at: when, target: at, targetLocal: atInLocalTerms, precise, correctedBy: offset || 0,
-  };
+  return { scheduled: true, at: when, target: at, precise };
 }
 
 export async function cancelOne(automationId) {

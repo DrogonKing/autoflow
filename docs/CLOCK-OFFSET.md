@@ -42,22 +42,28 @@ An HTTP `Date` header has **one-second resolution** - the format has no sub-seco
 cannot be better than about ±500ms plus half the round-trip jitter. That is why the warning threshold defaults
 to **1000ms** and not 200ms: a warning that fires on noise teaches the user to ignore it.
 
-## A warning, and a separate switch
+## A warning, and nothing else
 
-The user asked for the offset to be **reported, not applied** - and for an option to apply it. So:
+An "apply this offset" switch was built and then **removed at the user's instruction**: the offset is reported,
+never applied.
 
-| Behaviour | Default | Where |
-|---|---|---|
-| Measure and show the offset | on | the schedule editor, next to the time |
-| Warn when it is at least a threshold apart | 1000ms | Settings |
-| **Apply** the correction to the schedule | **off** | Settings, explicit switch |
+That is the right call, and for a reason stronger than preference. The measurement's own uncertainty is about
+half a second, so applying it would move an order by an amount that could as easily be wrong as right. An
+option that looks helpful and is a coin flip is worse than no option.
 
-With the switch off, nothing moves. With it on, the schedule's instant is treated as **server time** and the
-alarm is set at `target - offset` on this machine's clock. Both instants are reported separately
-(`target` and `targetLocal`) so the correction is observable rather than invisible.
+| Behaviour | Where |
+|---|---|
+| Measure and show the offset | the schedule editor, next to the time |
+| Warn when it is at least a threshold apart | Settings, default 1000ms |
+| **Apply** the correction | **does not exist** |
 
-That distinction cost a bug: the first version reported only `target`, so the correction could not be seen from
-outside and appeared to do nothing.
+The removal is structural, not a default: `correctedTarget`, `describeCorrection`, the `skewAutoApply` setting
+and both call sites are gone from the source. A test asserts the property is **absent** rather than false, so no
+configuration can reach a schedule. Verified with a 4000ms offset stored *and* the old flag forced on: the
+target did not move by a millisecond.
+
+The advice is instead to **sync the system clock** (`Settings > Time & language > Date & time > Sync now`),
+which corrects the clock itself rather than shifting one schedule by a measured guess.
 
 ## The cost: this is the extension's only network request
 
