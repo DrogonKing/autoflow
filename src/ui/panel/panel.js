@@ -81,6 +81,8 @@ const state = {
   tab: 'automations',
   pickTarget: null,       // the step id awaiting an element pick
   clockSkew: null,        // { offsetMs, rttMs, trustworthy, warn, applied } - measured, never applied silently
+  clockSkewError: null,   // why the measurement could not be taken, shown next to the button that tried
+  basicNotice: null,      // what Save did with the schedule: armed for an instant, or not scheduled at all
 };
 
 // ---------------------------------------------------------------------------------------------
@@ -380,6 +382,10 @@ function scheduleEditor(onChange) {
     // A measurement and its consequences, not an automatic correction. The user asked for the offset to be
     // REPORTED and, separately, for an option to apply it - so it is a warning plus a switch, never a silent
     // adjustment. It appears only for a precise schedule, because only then can whole seconds matter.
+    // what Save did with the schedule: armed for an instant, or not scheduled at all
+    if (state.basicNotice) {
+      wrap.append(el('div', { class: 'hint', text: state.basicNotice }));
+    }
     // why the measurement could not be taken, when it could not: saying nothing looked like a broken button
     if (state.clockSkewError) {
       wrap.append(el('div', { class: 'hint warn', text: state.clockSkewError }));
@@ -1139,11 +1145,36 @@ function basicView(rerender) {
       return;
     }
     state.basicError = null;
+    state.basicNotice = null;
     const res = await send({ type: 'save-automation', automation: clean });
     if (!res?.ok) { state.basicError = res?.error ?? 'save failed'; rerender(); return; }
     await refresh();
     state.basic = { ...clean };
     state.basicStale = false;
+
+    /**
+     * SAY WHAT HAPPENED TO THE SCHEDULE.
+     *
+     * `save-automation` now reports whether it armed an alarm, and this is the only place a user would ever look. An
+     * export with no automations and no alarms could not distinguish "the save was refused", "the save worked but armed
+     * nothing" and "nothing was ever saved" - and all three looked identical from the panel too.
+     */
+    const sched = res.schedule ?? {};
+    if (sched.scheduled) {
+      const when = Number.isFinite(sched.at) ? new Date(sched.at) : null;
+      const time = when ? `${String(when.getHours()).padStart(2, '0')}:${String(when.getMinutes()).padStart(2, '0')}:${String(when.getSeconds()).padStart(2, '0')}` : '';
+      const sameDay = when ? when.getDate() === new Date().getDate() : true;
+      state.basicNotice = t('basic.armedFor')
+        .replace('{time}', time)
+        .replace('{day}', sameDay ? '' : new Date(sched.at).toLocaleDateString());
+    } else if (sched.reason === 'manual') {
+      state.basicNotice = t('basic.notScheduled');
+    } else if (Number.isFinite(sched.justMissedMs)) {
+      state.basicNotice = t('basic.justMissed').replace('{sec}', String(Math.round(sched.justMissedMs / 1000)));
+    } else {
+      state.basicNotice = t('basic.armFailed').replace('{reason}', String(sched.reason ?? 'unknown'));
+    }
+
     rerender();
   };
 

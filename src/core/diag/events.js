@@ -58,6 +58,7 @@ export function decisionTrail(events) {
   const KINDS = new Set([
     'alarm-armed', 'armed', 'alarm-fired', 'alarm-late', 'fired-late', 'fired-too-late',
     're-armed', 'arm-skipped', 'arm-failed', 'storm-refused',
+    'save-request', 'save-armed-nothing',
     'start-request', 'start-refused', 'start-queued',
     'start-accepted', 'run-finished', 'run-abandoned', 'worker-boot',
   ]);

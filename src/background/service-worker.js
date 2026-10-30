@@ -1141,6 +1141,20 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           timezoneOffsetMin: new Date().getTimezoneOffset(),
         });
         const events = await readEvents();
+        /**
+         * Counts, so an empty profile can be told apart from a report that lost its data. The last export showed no
+         * automations, no alarms and no events with nothing explaining why, and that reads as a fault rather than as
+         * "nothing is saved".
+         */
+        const allLocal = await api.storage.local.get(null).catch(() => ({}));
+        const storageSummary = {
+          automations: automations.length,
+          alarms: alarms.length,
+          runs: runs.length,
+          events: events.length,
+          settingsKeys: Object.keys(allLocal ?? {}).length,
+          firstLoad: Object.keys(allLocal ?? {}).length === 0,
+        };
         const doc = buildExport({
           header,
           events,
@@ -1149,6 +1163,7 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           alarms: alarms.map((a) => ({ name: a.name, scheduledTime: a.scheduledTime, periodInMinutes: a.periodInMinutes })),
           // the page's own log is fetched from the page rather than duplicated here, so it is the page's truth
           pageLogs: Array.isArray(msg.pageLogs) ? msg.pageLogs : [],
+          storageSummary,
           settings: { ...s, diagnosticEvents: `(${events.length} events, listed above)` },
           includedPaths: [
             'src/background/service-worker.js: alarm -> decision -> run',
@@ -1225,6 +1240,14 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         return { ok: true, automations: await listAutomations() };
 
       case 'save-automation': {
+        const incoming = msg.automation ?? {};
+        recordEvent({
+          kind: 'save-request',
+          automationId: incoming.id ?? null,
+          scheduleKind: incoming.schedule?.kind ?? null,
+          stepCount: Array.isArray(incoming.steps) ? incoming.steps.length : 0,
+          name: incoming.name ?? null,
+        });
         const saved = await saveAutomation(msg.automation);
         /**
          * ARM OR DISARM THE SCHEDULE. This was missing, and it is why a saved time never fired.
@@ -1252,6 +1275,21 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         }
         if (!schedule.scheduled && saved.schedule?.kind !== 'manual' && saved.enabled !== false) {
           await cancelOne(saved.id);      // a disabled or unarmable schedule must not leave a stale alarm behind
+        }
+        /**
+         * A SAVE THAT ARMED NOTHING SAYS SO, and it is recorded too.
+         *
+         * The export that prompted this had no automations, no alarms and no events, which could equally mean the
+         * extension lost everything or that Save had never worked. Both are `ok: true` from the panel's point of view,
+         * and a schedule that arms nothing is exactly the case worth reporting.
+         */
+        if (!schedule.scheduled) {
+          recordEvent({
+            kind: 'save-armed-nothing',
+            automationId: saved.id,
+            reason: schedule.reason ?? 'unknown',
+            manual: saved.schedule?.kind === 'manual',
+          });
         }
         return { ok: true, automation: saved, schedule };
       }

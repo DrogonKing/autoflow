@@ -74,6 +74,9 @@ export function buildDecisionLines(events) {
       case 'fired-late': return `${t}  FIRED LATE  ${e.automationId}  by ${e.lateByMs}ms - the run starts now`;
       case 'fired-too-late': return `${t}  FIRED TOO LATE ${e.automationId}  by ${e.lateByMs}ms (tolerance ${e.toleranceMs}ms) - the window was missed`;
       case 'arm-failed': return `${t}  ARM FAILED  ${e.automationId}  ${e.error}`;
+      case 'save-request': return `${t}  SAVED       ${e.automationId ?? '(no id)'}  "${e.name ?? ''}"`
+        + `  schedule=${e.scheduleKind ?? 'none'}  steps=${e.stepCount ?? 0}`;
+      case 'save-armed-nothing': return `${t}  NOT ARMED   ${e.automationId}  ${e.manual ? 'schedule is manual, so nothing to arm' : e.reason}`;
       case 'alarm-late': return `${t}  FIRED LATE  ${e.automationId}  by ${e.lateByMs}ms`;
       case 'start-request': return `${t}  requested   ${e.automationId}  trigger=${e.trigger}${e.lateByMs ? `  late=${e.lateByMs}ms` : ''}`;
       case 'start-queued': return `${t}  QUEUED      ${e.automationId}  behind ${e.behind ?? 'another run'}  (queue depth ${e.depth})`;
@@ -94,7 +97,7 @@ export function buildDecisionLines(events) {
  * scheduled, did it fire, was it accepted, and what did it do. Ordered so the answer is at the top.
  */
 export function buildExport({
-  header, events, runs, automations, alarms, settings, pageLogs = [], includedPaths = [],
+  header, events, runs, automations, alarms, settings, pageLogs = [], includedPaths = [], storageSummary = null,
 }) {
   const trail = buildDecisionLines(decisionTrail(events));
   return {
@@ -106,6 +109,7 @@ export function buildExport({
     events,
     runs,
     automations,
+    storageSummary,
     alarms,
     settings,
     // the page's own click log, if the test field was open and the user pressed its export button
@@ -156,6 +160,14 @@ export function exportAsText(doc) {
   L.push('');
 
   L.push('-- automations ' + '-'.repeat(48));
+  /**
+   * AN EMPTY LIST MUST SAY SO.
+   *
+   * This section printed nothing at all when there were no automations - no line, no marker - so a report from a
+   * profile with nothing saved looked like a report that had lost them. `(none saved)` is an answer; a blank block is a
+   * mystery, and it was read as one.
+   */
+  if (!(doc.automations ?? []).length) L.push('(none saved - the extension has no automations in this profile)');
   for (const a of (doc.automations ?? [])) {
     const sc = a.schedule ?? {};
     L.push(`${a.id}  "${a.name}"  enabled=${a.enabled !== false}  schedule=${sc.kind ?? '-'}`
@@ -170,6 +182,32 @@ export function exportAsText(doc) {
     for (const c of (p.clicks ?? [])) L.push(`    ${c.at}  ${c.target}  +${c.delta ?? 0}ms`);
   }
   if (!(doc.pageLogs ?? []).length) L.push('(none - the test field was not open, or its export was not used)');
+  L.push('');
+
+  /**
+   * A summary of what the profile actually holds.
+   *
+   * This exists so that "no automations, no alarms, no events" can be read as a FACT about the profile rather than as a
+   * fault in the report. Counts only - never contents - so it is safe to paste.
+   */
+  L.push('-- storage summary ' + '-'.repeat(45));
+  {
+    const s = doc.storageSummary;
+    if (!s || typeof s !== 'object') {
+      L.push('(not collected)');
+    } else {
+      L.push(`automations stored : ${s.automations ?? '?'}`);
+      L.push(`alarms registered  : ${s.alarms ?? '?'}`);
+      L.push(`runs in history    : ${s.runs ?? '?'}`);
+      L.push(`events in log      : ${s.events ?? '?'}`);
+      L.push(`settings keys      : ${s.settingsKeys ?? '?'}`);
+      if (s.firstLoad) L.push('note: this looks like a freshly installed or freshly reloaded profile');
+      if (Number(s.automations) === 0) {
+        L.push('NOTE: nothing is saved, so nothing can fire. Save an automation in the panel first -');
+        L.push('      a schedule with no automation behind it has nothing to run.');
+      }
+    }
+  }
   L.push('');
 
   L.push('-- settings ' + '-'.repeat(50));
