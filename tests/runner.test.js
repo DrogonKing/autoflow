@@ -471,15 +471,30 @@ describe('runner — error policy', () => {
 });
 
 describe('runner — stop and budgets', () => {
-  it('stop step ends the run with the user reason', async () => {
+  it('a stop STEP reports that the automation stopped itself, not that the user did', async () => {
+    /**
+     * THIS TEST USED TO ASSERT THE BUG. It expected `stopped-by-user` for a `stop` step, which is what the runner
+     * reported for every `RunAborted` - so a `stop` step, a stray `break`, and a real user stop were indistinguishable
+     * in the history (B10). The reason now says who ended the run, which is the difference between "you stopped it" and
+     * "the automation stopped itself".
+     */
     const { host, calls } = makeHost();
     const a = automation([
       makeStep('stop', { reason: 'done here' }),
       makeStep('click', { finder: { strategy: 'css', selector: '#never' } }),
     ]);
     const r = await new Runner(host).run(a);
-    expect(r.reason).toBe('stopped-by-user');
+    expect(r.reason).toBe('stopped-by-step');
     expect(calls.filter((c) => c.op === 'execute')).toHaveLength(0);
+  });
+
+  it('a real stop request still reports stopped-by-user', async () => {
+    const { host, requestStop } = makeHost();
+    const a = automation([makeStep('reload'), makeStep('reload'), makeStep('reload')]);
+    const runner = new Runner(host);
+    requestStop();
+    const r = await runner.run(a);
+    expect(r.reason).toBe('stopped-by-user');
   });
 
   it('a stop request from the host aborts before the next step', async () => {
@@ -493,6 +508,12 @@ describe('runner — stop and budgets', () => {
     const p = runner.run(a);
     requestStop();
     const r = await p;
+    /**
+     * One of the honest outcomes: stopped by the request (the usual case), or finished because all three steps had
+     * already run before the flag was read. `stopped-by-user` is asserted specifically in the test above, where the stop
+     * is requested before the run begins, so this one only has to reject a WRONG reason - `stopped-by-step` or
+     * `stray-break` would mean the runner blamed the automation for something the user did.
+     */
     expect(['stopped-by-user', 'finished']).toContain(r.reason);
     expect(r.steps).toBeLessThanOrEqual(3);
   });

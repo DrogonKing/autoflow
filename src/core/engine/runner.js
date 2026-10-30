@@ -23,14 +23,45 @@ import { BLOCK_KINDS, ELEMENT_KINDS, validateAutomation, StepError } from '../mo
 import { interpolate, jitter, TemplateError } from '../model/templates.js';
 import { evaluateCondition, ConditionError } from './conditions.js';
 
+/**
+ * Why a run ended.
+ *
+ * MEASURED (B10): a `stop` step and a `break` outside any loop BOTH reported `stopped-by-user`, because every
+ * `RunAborted` was collapsed into one reason. The distinction matters to whoever reads the history: "you stopped it"
+ * and "the automation stopped itself" call for completely different next steps, and a stray `break` is a bug in the
+ * automation rather than a decision by anyone.
+ */
 export const STOP_REASONS = {
   finished: 'finished',
   stopped: 'stopped-by-user',
+  stoppedByStep: 'stopped-by-step',
+  strayBreak: 'stray-break',
   stepError: 'step-error',
   timeout: 'run-timeout',
   maxSteps: 'step-limit',
   aborted: 'aborted',
 };
+
+/**
+ * Which reason a `RunAborted` stands for.
+ *
+ * The sentinels are the ones the block handling already uses internally: `__break__` and `__continue__`.
+ */
+function reasonForAbort(e, signal) {
+  if (signal?.aborted) return STOP_REASONS.aborted;
+  const message = String(e?.message ?? '');
+  if (message === '__break__' || message === '__continue__') return STOP_REASONS.strayBreak;
+  /**
+   * THE USER'S STOP CARRIES ITS OWN SENTINEL.
+   *
+   * MEASURED, in the first version of this fix: the host's stop check threw `RunAborted('stopped by user')`, whose
+   * message is indistinguishable from a `stop` step's reason text - so pressing Stop reported `stopped-by-step` and
+   * blamed the automation for the user's decision. The check now throws a sentinel, and the mapping is explicit instead
+   * of inferred from a human-readable string.
+   */
+  if (message === '__user__') return STOP_REASONS.stopped;
+  return STOP_REASONS.stoppedByStep;
+}
 
 export class RunAborted extends Error {
   constructor(reason) {
@@ -109,7 +140,7 @@ export class Runner {
       await this.#runBlock(automation.steps, state, push, 0);
     } catch (e) {
       if (e instanceof RunAborted) {
-        reason = ctx.signal?.aborted ? STOP_REASONS.aborted : STOP_REASONS.stopped;
+        reason = reasonForAbort(e, ctx.signal);
       } else if (e instanceof StepError || e instanceof TemplateError || e instanceof ConditionError) {
         reason = STOP_REASONS.stepError;
         error = e;
@@ -143,7 +174,7 @@ export class Runner {
   }
 
   async #runStep(step, state, push, depth) {
-    if (this.host.stopRequested?.()) throw new RunAborted('stopped by user');
+    if (this.host.stopRequested?.()) throw new RunAborted('__user__');
     if (state.stepsExecuted >= this.maxStepsExecuted) {
       throw new StepError(`the run executed more than ${this.maxStepsExecuted} steps and was stopped`, step.id);
     }
@@ -251,7 +282,16 @@ export class Runner {
       }
 
       case 'extract': {
-        const obs = await this.host.execute({ ...step, __resolve: (t) => interpolate(t, state.vars) });
+        /**
+         * RESOLVED HERE, not in the page.
+         *
+         * MEASURED (B11): this used to pass `__resolve` as a FUNCTION. Functions do not cross the extension message
+         * port - the receiver gets nothing - and `content.js` never called it anyway, so `${var}` in an extract's finder
+         * was silently ignored and the wrong element was read. Every other step already goes through `resolveStep`,
+         * which substitutes the values before sending; extract now does the same, so there is one mechanism instead of
+         * two, one of which could not work.
+         */
+        const obs = await this.host.execute(resolveStep(step, state.vars));
         const value = obs && typeof obs === 'object' && 'value' in obs ? obs.value : obs;
         state.vars[step.name] = value === null || value === undefined ? '' : String(value);
         push({ type: 'variable', name: step.name, value: preview(state.vars[step.name]) });
@@ -348,7 +388,7 @@ export class Runner {
 
   /** Shared guard: a loop must stop if the run has been cancelled or outlived its budget. */
   #checkLoop(state, step, index) {
-    if (this.host.stopRequested?.()) throw new RunAborted('stopped by user');
+    if (this.host.stopRequested?.()) throw new RunAborted('__user__');
     if (state.opts.maxRunMs && this.host.now() - state.startedAt > state.opts.maxRunMs) {
       const e = new Error(`the loop exceeded the run's ${state.opts.maxRunMs} ms limit`);
       e.name = 'StepTimeout';

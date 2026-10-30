@@ -48,7 +48,13 @@ export function resolveName(name, vars) {
     if (Object.prototype.hasOwnProperty.call(vars, head)) {
       let cur = vars[head];
       for (const part of rest) {
-        if (cur && typeof cur === 'object' && part in cur) cur = cur[part];
+        /**
+         * OWN PROPERTIES ONLY. `part in cur` walks the prototype chain, so `${row.constructor}` rendered
+         * `function Object() { [native code] }` into a form field and `${row.__proto__}` rendered `[object Object]` -
+         * measured. Anything that can be typed into a field can be read back somewhere, and a template is not a place to
+         * expose the shape of the objects it is given.
+         */
+        if (cur && typeof cur === 'object' && Object.hasOwn(cur, part)) cur = cur[part];
         else return { found: false, value: '' };
       }
       return { found: true, value: cur === null || cur === undefined ? '' : String(cur) };
@@ -136,10 +142,45 @@ export function evaluateExpression(expr, vars, { now = () => new Date() } = {}) 
   const body = expr.trim();
   if (!body) return '';
 
-  // pipe: value | default:fallback | upper | lower | trim
+  /**
+   * ONLY the FIRST `default:` is treated as a modifier, and everything after it is the fallback text.
+   *
+   * MEASURED: `${x|default:a|b}` threw `unknown modifier "b"`. A default is free text - a URL, a label with a pipe in it -
+   * so the pipe inside it must not be parsed as another modifier. The head is what is split on; the default takes the
+   * remainder of the expression verbatim.
+   */
   if (body.includes('|')) {
-    const [head, ...pipes] = body.split('|');
-    let value = evaluateExpression(head, vars, { now });
+    const pipeAt = body.indexOf('|');
+    const head = body.slice(0, pipeAt);
+    const rest = body.slice(pipeAt + 1);
+    const defaultAt = rest.indexOf('default:');
+    let value;
+    let pipes;
+    let literalDefault = null;
+    if (defaultAt === 0) {
+      // find where the fallback ends: the next `|` that starts a KNOWN modifier, or the end
+      const KNOWN = /\|\s*(upper|lower|trim)\s*(?=\||$)/;
+      const m = KNOWN.exec(rest);
+      literalDefault = m ? rest.slice(defaultAt + 'default:'.length, m.index) : rest.slice('default:'.length);
+      pipes = m ? rest.slice(m.index + 1).split('|').map((s) => s.trim()) : [];
+    } else {
+      pipes = rest.split('|').map((s) => s.trim());
+    }
+
+    /**
+     * AN UNKNOWN HEAD WITH A DEFAULT IS THE DEFAULT.
+     *
+     * MEASURED: `${missing|default:fallback}` threw `unknown variable "${missing}"`, because the head was evaluated
+     * before the pipes could apply - so the feature the README advertises did not work at all. The default exists
+     * precisely for the case where the head is not available, so the head's failure is the default's cue, not an error.
+     */
+    try {
+      value = evaluateExpression(head, vars, { now });
+    } catch (e) {
+      if (literalDefault === null) throw e;
+      value = '';
+    }
+    if (literalDefault !== null && value === '') value = literalDefault;
     for (const raw of pipes) {
       const p = raw.trim();
       if (p.startsWith('default:')) {
@@ -173,9 +214,29 @@ export function evaluateExpression(expr, vars, { now = () => new Date() } = {}) 
     // arithmetic: +5m -2h +30s +1d
     const shift = /^([+-])(\d+)([smhd])/.exec(rest);
     if (shift) {
-      const amount = Number(shift[2]);
-      const unitMs = { s: 1000, m: 60_000, h: 3600_000, d: 86_400_000 }[shift[3]];
-      date = new Date(date.getTime() + (shift[1] === '-' ? -amount : amount) * unitMs);
+      const amount = Number(shift[2]) * (shift[1] === '-' ? -1 : 1);
+      const unit = shift[3];
+      /**
+       * DAYS AND HOURS ARE CALENDAR UNITS, not a fixed number of milliseconds.
+       *
+       * MEASURED, TZ=Europe/Berlin: `${now+1d.date}` with now = 2026-03-28 23:30 returned **2026-03-30** - a day too far,
+       * because a fixed 24 h crossed the spring-forward boundary and landed after midnight. And with now = 2026-10-25
+       * 00:30 it returned 2026-10-25, the SAME day, because the extra hour was absorbed by the fall-back. Both are the
+       * kind of error that silently books the wrong date.
+       *
+       * Adding a day means "the same wall-clock time on the next date", so the calendar parts are advanced with
+       * `setDate`, which the runtime does in local time and is therefore DST-correct. Seconds and minutes are genuinely
+       * durations and keep the millisecond arithmetic.
+       */
+      if (unit === 'd' || unit === 'h') {
+        const next = new Date(date.getTime());
+        if (unit === 'd') next.setDate(next.getDate() + amount);
+        else next.setHours(next.getHours() + amount);
+        date = next;
+      } else {
+        const unitMs = { s: 1000, m: 60_000 }[unit];
+        date = new Date(date.getTime() + amount * unitMs);
+      }
       rest = rest.slice(shift[0].length);
     }
     if (rest === '') return DATE_FORMATS.datetime(date);

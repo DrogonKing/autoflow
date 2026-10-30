@@ -22,10 +22,20 @@ import {
   recordEvent, clearEvents, flushEvents, readEvents,
 } from './storage.js';
 import {
-  rescheduleAll, scheduleOne, cancelOne, automationIdFromAlarm, ALARM_PREFIX, listScheduled, startLatencyMs,
+  rescheduleAll, scheduleOne, cancelOne, automationIdFromAlarm, startLatencyMs, recordFiredTarget,
+  /**
+   * `listScheduled` WAS NEVER IMPORTED.
+   *
+   * MEASURED: `list-scheduled` answered `{ ok: false, error: "listScheduled is not defined" }` while the alarm itself was
+   * correctly registered - so the panel could not show which automations were armed, and the failure looked like "nothing
+   * is scheduled" rather than like an error in the code. It predates the 1.18.0 review; nothing in the unit suite calls
+   * this message, which is why it survived.
+   */
+  listScheduled,
 } from './alarms.js';
 import { nextRun, wantsPreciseTiming, PRECISE_WAKE_MS } from '../core/schedule/schedule.js';
 import { clockOffset } from '../core/clock/skew.js';
+import { matchesPattern } from '../core/net/match-pattern.js';
 import { buildHeader, buildExport, exportAsText } from '../core/diag/report.js';
 
 /** The run currently in progress, if any. Mirrored into session storage for the UI. */
@@ -460,11 +470,34 @@ async function startAutomationLocked(automationId, {
     // when the alarm that started this run fired, so the wake margin can be calibrated against reality.
     // Only the alarm path supplies it; a manual run has no alarm and no margin to calibrate.
     firedAt: Number.isFinite(opts?.firedAt) ? opts.firedAt : null,
+    // the scheduled instant this run was for, so the post-run re-arm can record it as fired (B1/B2)
+    scheduledTarget: Number.isFinite(opts?.scheduledTarget) ? opts.scheduledTarget : null,
     trigger,
     stopFlag,
     trace: [],
   };
 
+  /**
+   * EVERYTHING AFTER THE CLAIM LIVES INSIDE try/finally (B6).
+   *
+   * `activeRun` is the mutual-exclusion lock: while it is set, every later run is refused. The claim above is made
+   * before any of the work below, and any of `storage.session.set`, `setBadge`, `makeHost` or the session write can
+   * throw - a quota error, a closed tab, a worker being torn down. Without the `finally`, a single throw left the lock
+   * held and EVERY subsequent run refused until the browser restarted, with no error to explain it.
+   *
+   * The slot is released here rather than at the end of the function so that the release happens on every exit path,
+   * including the ones that end in a thrown error.
+   */
+  let released = false;
+  const releaseSlot = async () => {
+    if (released) return;
+    released = true;
+    activeRun = null;
+    try { await api.storage.session.set({ activeRun: null }); } catch { /* the badge is cosmetic; keep going */ }
+    try { await setBadge('idle'); } catch { /* ditto */ }
+  };
+
+  try {
   await api.storage.session.set({ activeRun: publicActiveRun() });
   await setBadge('running');
 
@@ -501,12 +534,13 @@ async function startAutomationLocked(automationId, {
     elapsedMs: result.elapsedMs,
     startedAt: activeRun?.startedAt ?? Date.now(),
     firedAt: activeRun?.firedAt ?? null,
+    scheduledTarget: activeRun?.scheduledTarget ?? null,
     trigger,
     error: result.error ? { message: result.error.message ?? String(result.error), stepId: result.error.stepId } : null,
     trace: result.trace?.slice(-200) ?? [],
   };
 
-  activeRun = null;
+  await releaseSlot();
   /**
    * How long the scheduled path took to get going, so the next wake margin is based on this machine.
    *
@@ -527,15 +561,46 @@ async function startAutomationLocked(automationId, {
   api.tabs.sendMessage(targetTabId, { type: 'run-status', status: 'idle' }).catch(() => {});
   api.runtime.sendMessage({ type: 'run-finished', run: finished }).catch(() => {});
 
-  // a scheduled automation must arm its next occurrence, or it runs once and stops forever
+  /**
+   * A scheduled automation must arm its NEXT occurrence, or it runs once and stops forever.
+   *
+   * `preferNext: true` is the whole of B1. Without it, `scheduleOne` saw the target this run had just used, called it
+   * "just missed", returned `scheduled: true`, and never created an alarm - so a daily automation ran once. MEASURED
+   * before the fix: a run finishing 5s and 70s after its target both left `ALARM=undefined`.
+   *
+   * The occurrence that just fired is also recorded, so a restart or an import inside the same two minutes cannot treat
+   * it as missed and run it a second time (B2).
+   */
   try {
+    /**
+     * WHICH TARGET THIS RUN WAS FOR is read off the run record, not from a local.
+     *
+     * `attemptedTarget` does not exist in `finishRun`'s scope - it is local to the alarm handler - so the first version
+     * of this fix referenced a variable that was not there. A `ReferenceError` inside the `try` would have been swallowed
+     * by the surrounding catch and the re-arm would have silently not happened, which is the same class of failure as
+     * the bug being fixed.
+     */
+    const ranFor = Number.isFinite(finished?.scheduledTarget) ? finished.scheduledTarget : null;
+    if (Number.isFinite(ranFor)) await recordFiredTarget(automationId, ranFor);
     const fresh = await getAutomation(automationId);
     if (fresh?.schedule && fresh.schedule.kind !== 'manual') {
-      await scheduleOne(fresh);
+      await scheduleOne(fresh, { preferNext: true });
     }
   } catch { /* the run already finished; a schedule failure must not look like a run failure */ }
 
   return finished;
+  } finally {
+    /**
+     * THE LOCK IS RELEASED ON EVERY EXIT PATH, including a throw from storage, the badge, or the host setup.
+     *
+     * Measured: without this, one failed `storage.session.set` left `activeRun` set and every later run was refused
+     * until the worker restarted - reported to the user as "Run now does nothing" with no error anywhere. `releaseSlot`
+     * is idempotent, so the normal path releasing it earlier is harmless.
+     */
+    await releaseSlot();
+    try { await api.storage.session.remove('activeRun'); } catch { /* best effort */ }
+    try { await setBadge(null); } catch { /* best effort */ }
+  }
 }
 
 export function stopActiveRun() {
@@ -646,32 +711,71 @@ api.alarms.onAlarm.addListener(async (alarm) => {
        * became the empty string, which matched EVERY tab. A regex keeps the star meaning "anything here", which is
        * what the field says it does.
        */
-      const escapeForRegex = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      const asRegex = (pattern) => {
-        const body = String(pattern).split('*').map(escapeForRegex).join('.*');
-        return new RegExp(`^${body}$`, 'i');
-      };
+      /**
+       * THE PATTERN IS MATCHED AGAINST THE URL'S HOST, by a real match-pattern parser.
+       *
+       * MEASURED with the substitution this replaces (`pattern.split('*').map(escape).join('.*')`), for
+       * `*://*.example.com/*`:
+       *
+       *     https://evil.com/x.example.com/y   -> MATCH   (the domain was only in the PATH)
+       *     https://example.com/              -> no match (Chrome's `*.` includes the bare domain)
+       *
+       * The first row is the dangerous one: a URL on an unrelated host matched because the regex could not tell the host
+       * from the path, so clicks and form fills could be delivered to a site the user never named. The second row is the
+       * ordinary failure - the user's own site did not match its own pattern.
+       */
       const match = tabs.find((tab) => {
         const url = tab.url ?? '';
-        return patterns.some((pattern) => {
-          if (asRegex(pattern).test(url)) return true;
-          // a saved pattern with no wildcard is treated as a prefix, because a live tab URL almost never equals it
-          // character for character
-          return !String(pattern).includes('*') && url.startsWith(String(pattern));
-        });
+        return patterns.some((pattern) => matchesPattern(url, pattern));
       });
       if (match) tabId = match.id;
-      else if (patterns[0] && !patterns[0].includes('*')) {
-        const created = await api.tabs.create({ url: patterns[0], active: false });
-        tabId = created.id;
-        await new Promise((r) => setTimeout(r, 1500));
+      else {
+        /**
+         * NO MATCH: OPEN THE PATTERN'S OWN SITE, or fail with a reason.
+         *
+         * A SCHEDULED run must never fall back to the active tab - that fallback is what made a mismatched automation
+         * click on whatever the user happened to be looking at. A concrete URL can be opened deliberately; a wildcard
+         * cannot, so it is refused rather than guessed at.
+         *
+         * A MANUAL run is different, and the difference is handled below: the user is looking at the page and pressed
+         * Run, so "this tab" is what they mean.
+         */
+        const concrete = patterns.map((p) => String(p)).find((p) => !p.includes('*')
+          && !p.startsWith('<all_urls>') && /^[a-z][a-z0-9+.-]*:\/\//i.test(p));
+        if (concrete) {
+          const created = await api.tabs.create({ url: concrete, active: false });
+          tabId = created.id;
+          await new Promise((r) => setTimeout(r, 1500));
+        } else {
+          recordEvent({ kind: 'no-matching-tab', automationId: id, patterns });
+          throw new Error(`no open tab matches ${patterns.filter((p) => String(p).trim()).join(', ') || '(no pattern)'} - open the site, or give the automation a concrete URL`);
+        }
       }
     }
+    /**
+     * A pattern that resolves to nothing is a REFUSAL, not an invitation.
+     *
+     * The old code ended with "use the active tab of whatever window is in front", so an automation whose site was not
+     * open ran its clicks on an unrelated page - a form fill on the wrong site is worse than not running.
+     */
     if (!tabId) {
-      const active = await api.tabs.query({ active: true, currentWindow: true });
-      tabId = active[0]?.id ?? null;
+      /**
+       * THIS HANDLER IS A SCHEDULED RUN BY DEFINITION, so there is no manual case to allow here.
+       *
+       * MEASURED, twice: the first version of this fix removed the active-tab fallback for manual runs too, which broke
+       * every automation the user built without a URL pattern; the second version tried to restore it HERE, inside the
+       * alarm handler, where `trigger` does not exist - so the handler threw `trigger is not defined` and the run was
+       * recorded as a step-error with zero steps. Both were the same mistake in different clothes: the wrong place for
+       * the rule.
+       *
+       * The manual path needs no fallback at all, because `startAutomationLocked` already resolves `tabId ?? the active
+       * tab` before it claims the slot. A scheduled run is the case that must NOT guess: nobody is watching, so a click
+       * on an unrelated page is worse than no click.
+       */
+      throw new Error(patterns.length
+        ? `no open tab matches ${patterns.filter((p) => String(p).trim()).join(', ')} - open the site, or give the automation a concrete URL`
+        : 'this automation has no URL pattern, so a scheduled run has no safe tab - add one, or run it by hand');
     }
-    if (!tabId) throw new Error('no tab available to run in');
 
     // For a schedule with a second, the alarm arrived early on purpose. The target instant is recomputed from
     // the schedule instead of being carried on the alarm, so a worker restart between arming and firing cannot
@@ -763,6 +867,23 @@ api.alarms.onAlarm.addListener(async (alarm) => {
     recent.set(id, history);
     if (history.length > 3) {
       recordEvent({ kind: 'storm-refused', automationId: id, firingsIn10s: history.length });
+      /**
+       * REFUSING THE FIRING MUST NOT ALSO KILL THE SCHEDULE.
+       *
+       * MEASURED (B3): this branch returned without re-arming. `chrome.alarms` entries are ONE-SHOT, so refusing the
+       * firing left the automation with no alarm at all - it would never run again until the next browser start, and
+       * nothing said so. The guard's job is to stop a storm, not to disable a schedule the user set.
+       *
+       * The next occurrence is resolved the same way the failure path does it, from one millisecond after the target
+       * that was refused, with `preferNext` so the refused occurrence cannot come back as "just missed". The `try` is
+       * deliberate: if the arithmetic fails there is nothing useful to do here, and a recurrence of the storm would be
+       * worse than a missing alarm that the next startup re-arms anyway.
+       */
+      try {
+        const fresh = await getAutomation(id);
+        const from = Number.isFinite(atMs) ? atMs + 1 : Date.now();
+        if (fresh) await scheduleOne(fresh, { now: Math.max(from, Date.now()), preferNext: true });
+      } catch { /* the storm is already stopped; the next startup re-arms from storage */ }
       return;
     }
 
@@ -774,7 +895,7 @@ api.alarms.onAlarm.addListener(async (alarm) => {
     const attemptedTarget = Number.isFinite(atMs) ? atMs
       : (Number.isFinite(alarm.scheduledTime) ? alarm.scheduledTime : null);
     const runWhenSlotIsFree = (extra = {}) =>
-      startAutomation(id, { tabId, trigger: 'schedule', atMs, firedAt: alarmFiredAt, ...extra });
+      startAutomation(id, { tabId, trigger: 'schedule', atMs, firedAt: alarmFiredAt, scheduledTarget: atMs, ...extra });
 
     // a CSV-driven automation iterates its rows
     const data = automation.dataSource?.key ? await getDataRows(automation.dataSource.key) : null;
@@ -815,7 +936,8 @@ api.alarms.onAlarm.addListener(async (alarm) => {
          * ever produce a storm again.
          */
         const after = Number.isFinite(attemptedTarget) ? attemptedTarget + 1 : Date.now();
-        const armed = await scheduleOne(again, { now: Math.max(after, Date.now()) });
+        // the same rule as the post-run path: the occurrence that just failed is behind us, so ask for the NEXT one
+        const armed = await scheduleOne(again, { now: Math.max(after, Date.now()), preferNext: true });
         if (!armed?.scheduled || (armed.target ?? armed.at) <= Date.now()) {
           recordEvent({ kind: 'arm-skipped', automationId: id, note: 'the next occurrence did not resolve to the future' });
         } else {
@@ -992,6 +1114,17 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
       case 'element-picked':
         api.runtime.sendMessage({ type: 'element-picked', info: msg.info, finder: msg.finder }).catch(() => {});
+        return { ok: true };
+
+      /**
+       * A CANCELLED PICK MUST REACH THE PANEL (B11).
+       *
+       * The type was in the content-script allowlist and the panel listened for it, but there was no case here - so the
+       * message fell through to the default and was never forwarded. The panel's Pick button stayed in its
+       * "picking" state forever after the user pressed Escape on the page, with no way to tell that nothing was coming.
+       */
+      case 'element-pick-cancelled':
+        api.runtime.sendMessage({ type: 'element-pick-cancelled' }).catch(() => {});
         return { ok: true };
 
       case 'start-run':

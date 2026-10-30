@@ -315,12 +315,23 @@ export function describeSchedule(s) {
 // whole point of this module is that it is testable without dependencies, and a cron parser is 60 lines.
 // ---------------------------------------------------------------------------------------------
 
+/**
+ * FIELD DEFINITIONS, with the name aliases cron accepts.
+ *
+ * MEASURED: `0 0 * * 7` and `0 0 * * MON` were both REJECTED. `7` is Sunday in every cron implementation, and the
+ * three-letter names are standard - refusing them means a schedule copied from a working crontab is rejected here for no
+ * reason. `alt` is the extra value the field accepts, `names` the aliases it understands.
+ */
+const DOW_NAMES = { SUN: 0, MON: 1, TUE: 2, WED: 3, THU: 4, FRI: 5, SAT: 6 };
+const MONTH_NAMES = { JAN: 1, FEB: 2, MAR: 3, APR: 4, MAY: 5, JUN: 6, JUL: 7, AUG: 8, SEP: 9, OCT: 10, NOV: 11, DEC: 12 };
+
 const CRON_FIELDS = [
   { name: 'minute',       min: 0,  max: 59 },
   { name: 'hour',         min: 0,  max: 23 },
   { name: 'dayOfMonth',   min: 1,  max: 31 },
-  { name: 'month',        min: 1,  max: 12 },
-  { name: 'dayOfWeek',    min: 0,  max: 6 },
+  { name: 'month',        min: 1,  max: 12, names: MONTH_NAMES },
+  // 7 is Sunday: accepted and folded onto 0, which is why the field has an `alt`
+  { name: 'dayOfWeek',    min: 0,  max: 6,  names: DOW_NAMES, alt: { 7: 0 } },
 ];
 
 /** Six fields: the same order with seconds in front. */
@@ -366,15 +377,37 @@ export function parseCron(expression) {
   return out;
 }
 
+/**
+ * One number, and only one that a cron field can hold.
+ *
+ * MEASURED: `Number()` accepted `-5` (read as 0-5), `0x10` (read as 16) and `1e1` (read as 10), so a mangled expression
+ * silently scheduled something the user did not write. Digits only, then a name alias, then the optional `alt` mapping.
+ */
+function parseCronNumber(text, spec) {
+  const raw = String(text).trim();
+  if (/^-?\d+$/.test(raw)) {
+    const n = Number(raw);
+    if (Object.hasOwn(spec.alt ?? {}, n)) return spec.alt[n];
+    return n;
+  }
+  const named = spec.names?.[raw.toUpperCase()];
+  if (named !== undefined) return named;
+  throw new ScheduleError(`bad value ${JSON.stringify(raw)} in ${spec.name} - digits${spec.names ? ' or a name like ' + Object.keys(spec.names).slice(0, 3).join('/') : ''}`);
+}
+
 function parseCronField(field, spec) {
   const values = new Set();
   for (const chunk of String(field).split(',')) {
     if (!chunk) throw new ScheduleError(`empty field part in ${JSON.stringify(field)}`);
 
-    // */n  or  a-b/n
+    // */n  or  a-b/n  - exactly one slash, and only when it is followed by a plain step
+    if ((chunk.match(/\//g) ?? []).length > 1) {
+      throw new ScheduleError(`too many "/" in ${JSON.stringify(chunk)} in ${spec.name}`);
+    }
     const [rangePart, stepPart] = chunk.split('/');
     let step = 1;
     if (stepPart !== undefined) {
+      if (!/^\d+$/.test(stepPart)) throw new ScheduleError(`bad step ${JSON.stringify(stepPart)} in ${spec.name} - digits only`);
       step = Number(stepPart);
       if (!Number.isInteger(step) || step < 1) {
         throw new ScheduleError(`bad step ${JSON.stringify(stepPart)} in ${spec.name}`);
@@ -386,13 +419,13 @@ function parseCronField(field, spec) {
     if (rangePart !== '*') {
       const bounds = rangePart.split('-');
       if (bounds.length === 1) {
-        const single = Number(bounds[0]);
+        const single = parseCronNumber(bounds[0], spec);
         if (!Number.isInteger(single)) throw new ScheduleError(`bad value ${JSON.stringify(bounds[0])} in ${spec.name}`);
         lo = single;
         hi = stepPart !== undefined ? spec.max : single;
       } else if (bounds.length === 2) {
-        lo = Number(bounds[0]);
-        hi = Number(bounds[1]);
+        lo = parseCronNumber(bounds[0], spec);
+        hi = parseCronNumber(bounds[1], spec);
         if (!Number.isInteger(lo) || !Number.isInteger(hi)) {
           throw new ScheduleError(`bad range ${JSON.stringify(rangePart)} in ${spec.name}`);
         }
@@ -419,6 +452,16 @@ function parseCronField(field, spec) {
  * matters: a schedule like `0 0 31 2 *` (31 February) can never fire, and without a horizon this would
  * loop forever. Four years of minutes is the worst legitimate case (29 February).
  */
+/**
+ * The first instant of the next LOCAL day.
+ *
+ * A day boundary is local, not a fixed number of milliseconds and not a UTC midnight: adding 86 400 000 ms lands on
+ * 01:00 or 02:00 local depending on the season, which silently skips the midnight a schedule may be waiting for.
+ */
+function nextLocalMidnight(d) {
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1, 0, 0, 0, 0).getTime();
+}
+
 export function nextCronRun(cron, fromMs) {
   const start = new Date(fromMs);
 
@@ -433,40 +476,99 @@ export function nextCronRun(cron, fromMs) {
    * what keeps an impossible expression like `0 0 31 2 *` from looping forever.
    */
   const withSeconds = cron._hasSeconds === true;
+  const stepMs = withSeconds ? 1000 : 60_000;
 
-  const cursor = new Date(
-    start.getFullYear(), start.getMonth(), start.getDate(),
-    start.getHours(), start.getMinutes(), withSeconds ? start.getSeconds() : 0, 0,
-  );
-  if (withSeconds) {
-    // strictly after fromMs: the next whole second, or the one after if we are exactly on a second
-    if (cursor.getTime() <= fromMs) cursor.setSeconds(cursor.getSeconds() + 1);
-  } else {
-    cursor.setMinutes(cursor.getMinutes() + 1);
-  }
+  /**
+   * THE WALK IS ENTIRELY IN ABSOLUTE MILLISECONDS, and this is the whole of B8a.
+   *
+   * MEASURED (TZ=Europe/Berlin): asking the every-five-minutes expression from 2026-10-25T01:30Z - which is 02:30 local, the SECOND time
+   * that hour occurs, inside the fall-back - returned 02:35 local as a timestamp an hour BEFORE the question. The cause
+   * was that every jump rebuilt the candidate with `new Date(y, m, d, h, m)`, and during a repeated hour that constructor
+   * resolves to the FIRST of the two occurrences. So each jump moved back an hour, the "strictly after" check rejected
+   * it, and the walk span in place until the horizon.
+   *
+   * Advancing by a fixed number of milliseconds cannot do that: the same wall clock appears twice, and only the absolute
+   * value distinguishes them. Local fields are still READ from each candidate - that is how a cron field is matched - but
+   * they are never used to CONSTRUCT the next candidate.
+   *
+   * A jump may land an hour off near a transition (a `+1 day` crossing one is 23 or 25 hours of wall clock). That is
+   * accepted deliberately: the contract is "strictly after, never backwards, and skip nothing that could match", and a
+   * day that was about to be skipped cannot contain a match anyway.
+   */
+  let cursorMs = Math.floor(fromMs / stepMs) * stepMs + stepMs;
 
-  const LIMIT_MINUTES = 4 * 366 * 24 * 60;
-  const limit = withSeconds ? LIMIT_MINUTES * 60 : LIMIT_MINUTES;
+  /**
+   * The horizon is absolute time, not a step count: four years covers the worst legitimate case (29 February) and
+   * bounds an impossible expression like `31 February`.
+   */
+  const HORIZON_MS = 4 * 366 * 24 * 60 * 60 * 1000;
+  const limitMs = fromMs + HORIZON_MS;
+  const DAY_MS = 86_400_000;
+  const HOUR_MS = 3_600_000;
 
-  for (let i = 0; i < limit; i++) {
+  while (cursorMs <= limitMs) {
+    const cursor = new Date(cursorMs);
     const month = cursor.getMonth() + 1;
+
+    /**
+     * SKIP WHOLE UNITS THAT CANNOT MATCH.
+     *
+     * MEASURED (B8b): `0 0 0 31 2 *` took 83 047 ms, because every second of four years was tested. With skipping, an
+     * impossible date costs about as many steps as there are days in the horizon - 1 464 - and returns promptly.
+     */
+    if (!cron.month.has(month)) {
+      cursorMs = nextLocalMidnight(cursor);
+      continue;
+    }
+
     const dom = cursor.getDate();
     const dow = cursor.getDay();
-    const h = cursor.getHours();
-    const m = cursor.getMinutes();
-    const s = cursor.getSeconds();
-
-    const monthOk = cron.month.has(month);
     const domOk = cron.dayOfMonth.has(dom);
     const dowOk = cron.dayOfWeek.has(dow);
     const dayOk = cron._dayFieldsAreOr ? (domOk || dowOk) : (domOk && dowOk);
-    const timeOk = cron.hour.has(h) && cron.minute.has(m) && (!withSeconds || cron.second.has(s));
-
-    if (monthOk && dayOk && timeOk) {
-      return cursor.getTime();
+    if (!dayOk) {
+      cursorMs = nextLocalMidnight(cursor);
+      continue;
     }
-    if (withSeconds) cursor.setSeconds(cursor.getSeconds() + 1);
-    else cursor.setMinutes(cursor.getMinutes() + 1);
+
+    if (!cron.hour.has(cursor.getHours())) {
+      /**
+       * The next LOCAL hour boundary.
+       *
+       * MEASURED, and this is the subtle one: skipping a day by adding 86 400 000 ms lands on **UTC** midnight, which in
+       * Berlin is 01:00 local. Entering 29 February 2028 at 01:00 meant the `00:00` instant - the only one that could
+       * match `0 0 0 29 2 *` - was never visited, so a legitimate once-every-four-years schedule resolved to null.
+       *
+       * A day boundary is a LOCAL concept, so the jump is built from local fields. The guard keeps progress guaranteed
+       * even where a local-field construction could resolve backwards (a repeated hour), which is why the walk is
+       * otherwise kept in absolute milliseconds.
+       */
+      const next = new Date(cursor.getFullYear(), cursor.getMonth(), cursor.getDate(), cursor.getHours() + 1, 0, 0, 0);
+      cursorMs = next.getTime() > cursorMs ? next.getTime() : cursorMs + HOUR_MS;
+      continue;
+    }
+
+    if (!cron.minute.has(cursor.getMinutes())) {
+      cursorMs += stepMs;
+      continue;
+    }
+
+    if (withSeconds && !cron.second.has(cursor.getSeconds())) {
+      cursorMs += 1000;
+      continue;
+    }
+
+    /**
+     * STRICTLY AFTER IS THE CONTRACT, so it is stated rather than assumed.
+     *
+     * The local-field construction produced a candidate an hour in the past for a repeated hour; this check makes any
+     * future arithmetic mistake surface here instead of as an alarm armed in the past.
+     */
+    if (cursorMs <= fromMs) {
+      cursorMs = Math.floor(fromMs / stepMs) * stepMs + stepMs;
+      continue;
+    }
+    return cursorMs;
   }
   // no candidate matched within the horizon: an impossible date such as 31 February
   return null;

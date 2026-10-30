@@ -36,8 +36,18 @@ export async function rescheduleAll(automations, { now = Date.now() } = {}) {
       continue;
     }
     const name = ALARM_PREFIX + a.id;
+    const fired = await lastFiredTarget(a.id);
+    /**
+     * ASK FROM AFTER WHAT ALREADY FIRED.
+     *
+     * B2, measured: a restart / reload / import within two minutes of a target that had ALREADY RUN treated that target
+     * as "just missed" and armed `now + 1000`, so the automation ran a second time - a second order, in the reported use
+     * case. Both facts are now passed to `armTarget`: the evidence (`firedAt`) and the fact that the question here is
+     * "what comes next". Asking from the fired target makes `nextRun` return the following occurrence directly.
+     */
+    const askFrom = Number.isFinite(fired) && fired < now ? fired : now;
     wanted.add(name);
-    const armed = armTarget(a.schedule, now);
+    const armed = armTarget(a.schedule, askFrom, { firedAt: fired });
     const at = armed.at;
     if (at === null && armed.missedMs === 0) {
       results.push({ id: a.id, name: a.name, ok: false, reason: 'this schedule will not fire again' });
@@ -180,7 +190,7 @@ export async function recordStartLatency(ms) {
  * instant to arm for, plus how late that occurrence already was, so the caller can record it instead of pretending the
  * schedule was on time.
  */
-export function armTarget(schedule, now) {
+export function armTarget(schedule, now = Date.now(), { preferNext = false, firedAt = null } = {}) {
   const at = nextRun(schedule, now);
   const ahead = at === null ? Infinity : at - now;
 
@@ -194,7 +204,25 @@ export function armTarget(schedule, now) {
    * seconds and looking back 300 seconds both returned today's target, while looking back 25 hours returned
    * yesterday's.
    */
-  const earlier = nextRun(schedule, now - JUST_MISSED_GRACE_MS - 1);
+  /**
+   * `preferNext` disables the "just missed" answer entirely.
+   *
+   * That answer exists for one question - "the user saved a time that has just gone by, should it run now?" - and it is
+   * wrong for the other question this module is asked, "this run has finished, what comes next?". Answering the second
+   * with the first is B1: the run's own target came back as "just missed", the caller saw `scheduled: true`, and no
+   * alarm was ever created.
+   */
+  /**
+   * AN OCCURRENCE THAT ALREADY FIRED IS NOT "JUST MISSED", whoever is asking.
+   *
+   * `preferNext` encodes which question the caller is asking; `firedAt` encodes what actually happened, and the second
+   * is the stronger fact. Measured: with the guard gated on `preferNext` alone, a save 30 s after a target that had
+   * already run still scheduled `now + 1000` and ran the automation a SECOND time - and so did `rescheduleAll` after a
+   * restart. Both are the duplicate-order case in the report (B2).
+   */
+  const earlierForFired = nextRun(schedule, now - JUST_MISSED_GRACE_MS - 1);
+  const alreadyFired = Number.isFinite(firedAt) && earlierForFired !== null && earlierForFired <= firedAt;
+  const earlier = preferNext || alreadyFired ? null : earlierForFired;
   const withinGrace = earlier !== null
     && earlier <= now + 1000
     && now - earlier <= JUST_MISSED_GRACE_MS;
@@ -213,14 +241,69 @@ export function armTarget(schedule, now) {
   return { at, missedMs: 0 };
 }
 
-export async function scheduleOne(automation, { now = Date.now() } = {}) {
+/**
+ * The occurrence each automation last actually fired, persisted.
+ *
+ * WHY IT HAS TO EXIST: `armTarget` decides "just missed" by looking backwards, and from the outside a target that has
+ * just run and a target that has just been saved-but-not-run look identical. They are not: the first must arm the NEXT
+ * occurrence, the second must run now. Without a record of what fired, a restart or an import within two minutes of a
+ * target re-ran it - a second order, in the reported use case.
+ */
+const FIRED_KEY = 'autoflow:lastFiredTarget';
+
+async function readLastFired() {
+  try {
+    const bag = await api.storage.local.get(FIRED_KEY);
+    const raw = bag?.[FIRED_KEY];
+    return raw && typeof raw === 'object' ? raw : {};
+  } catch { return {}; }
+}
+
+export async function recordFiredTarget(automationId, target) {
+  if (!automationId || !Number.isFinite(target)) return;
+  try {
+    const all = await readLastFired();
+    all[automationId] = target;
+    await api.storage.local.set({ [FIRED_KEY]: all });
+  } catch { /* a bookkeeping failure must never stop a run */ }
+}
+
+export async function lastFiredTarget(automationId) {
+  const all = await readLastFired();
+  const v = all?.[automationId];
+  return Number.isFinite(v) ? v : null;
+}
+
+/**
+ * Arm an automation's next occurrence.
+ *
+ * `preferNext` is the difference between the two questions this function gets asked, and getting it wrong is B1:
+ *
+ *   - "the user has just saved this schedule" - a target a few seconds in the past is what they meant, so run it now.
+ *   - "this run has just finished" (or failed) - that occurrence is DONE; arm the following one, always.
+ *
+ * With `preferNext`, an occurrence at or before the one that just fired is skipped rather than treated as missed.
+ */
+export async function scheduleOne(automation, { now = Date.now(), preferNext = false } = {}) {
   const name = ALARM_PREFIX + automation.id;
   await api.alarms.clear(name);
   if (!automation.enabled || !automation.schedule || automation.schedule.kind === 'manual') {
     return { scheduled: false, reason: 'manual' };
   }
   validateSchedule(automation.schedule);
-  const armed = armTarget(automation.schedule, now);
+
+  /**
+   * ASK FROM AFTER THE OCCURRENCE THAT ALREADY FIRED.
+   *
+   * `nextRun(schedule, now)` returns the first occurrence strictly after `now`, so asking from `lastFired` returns the
+   * NEXT one. This is what makes the post-run re-arm correct without a second code path: the arithmetic that produced
+   * the bug is bypassed rather than compensated for.
+   */
+  const fired = await lastFiredTarget(automation.id);
+  let askedFrom = now;
+  if (preferNext && Number.isFinite(fired) && fired < now) askedFrom = Math.max(fired, now - 1000);
+
+  const armed = armTarget(automation.schedule, askedFrom, { preferNext, firedAt: fired });
   const at = armed.at;
   /**
    * `at === null` with a `missedMs` means the occurrence the user meant has just gone by: arm for NOW so the run
@@ -229,9 +312,17 @@ export async function scheduleOne(automation, { now = Date.now() } = {}) {
    */
   if (at === null && armed.missedMs === 0) return { scheduled: false, reason: 'no future occurrence' };
   if (at === null) {
+    /**
+     * CREATE THE ALARM. This branch used to return `scheduled: true` with an `at` and never touch `chrome.alarms` - and
+     * since line 218 has already CLEARED the existing alarm, the automation was left with none at all while the caller
+     * was told it had been scheduled. That is the whole of B1: one honest `create` call, and the return value can no
+     * longer disagree with reality.
+     */
+    const atNow = now + 1000;
+    await api.alarms.create(name, { when: atNow });
     return {
       scheduled: true,
-      at: now + 1000,
+      at: atNow,
       target: armed.intendedAt,
       precise: false,
       justMissedMs: armed.missedMs,

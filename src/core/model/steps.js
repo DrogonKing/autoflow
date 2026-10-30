@@ -258,7 +258,16 @@ export function validateStep(step, depth = 0) {
     throw new StepError('onError must be "stop", "continue" or "skip"', id);
   }
 
-  if (ELEMENT_KINDS.has(step.kind)) {
+  /**
+   * A FINDER IS REQUIRED ONLY WHERE AN ELEMENT IS THE POINT.
+   *
+   * MEASURED (B11): `waitFor` was in ELEMENT_KINDS, so validation demanded a finder for every wait - which made
+   * "wait until the URL contains X" impossible to save even though the engine supports it. The condition's own source
+   * decides whether an element is needed.
+   */
+  const needsFinder = ELEMENT_KINDS.has(step.kind)
+    && !(step.kind === 'waitFor' && step.condition && step.condition.source !== 'element');
+  if (needsFinder) {
     validateFinder(step.finder, id);
   }
 

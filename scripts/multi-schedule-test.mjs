@@ -68,12 +68,20 @@ const target = new Date(Math.ceil((now + 16_000) / 1000) * 1000);
 const hh = target.getHours(), mm = target.getMinutes(), ss = target.getSeconds();
 console.log(`  all five scheduled for ${target.toLocaleTimeString()} (second ${ss})\n`);
 
-const armed = await bridge.evaluate(async ({ tabId, hh, mm, ss }) => {
+const armed = await bridge.evaluate(async ({ tabId, hh, mm, ss, pageUrl }) => {
   const ids = ['m1', 'm2', 'm3', 'm4', 'm5'];
   const out = [];
   for (const [i, id] of ids.entries()) {
     await chrome.runtime.sendMessage({ type: 'save-automation', automation: {
-      id, name: `multi ${i + 1}`, enabled: true, urls: [],
+      /**
+       * THE PAGE IS NAMED, because a SCHEDULED run must not guess which tab it means.
+       *
+       * The old test saved `urls: []` and relied on the worker falling back to the active tab. That fallback is what
+       * delivered clicks to whatever page the user happened to have in front (B5), so it is gone for scheduled runs -
+       * and this test, which is a scheduled run five times over, has to say where it wants its clicks. `file://` is an
+       * actionable scheme for the matcher, and the page is the simulator.
+       */
+      id, name: `multi ${i + 1}`, enabled: true, urls: [pageUrl],
       steps: [{ id: 's1', kind: 'click', finder: { strategy: 'css', selector: `#pad${i + 1}` } }],
       schedule: { kind: 'daily', hour: hh, minute: mm, second: ss },
       options: { stepDelayMs: 0, focusBeforePrecise: false },
@@ -82,7 +90,7 @@ const armed = await bridge.evaluate(async ({ tabId, hh, mm, ss }) => {
     out.push({ id, ...r });
   }
   return out;
-}, { tabId, hh, mm, ss });
+}, { tabId, hh, mm, ss, pageUrl: `file://${SIM}` });
 
 for (const a of armed) {
   console.log(`  ${a.id}: scheduled=${a.scheduled} at=${a.at} target=${a.target} precise=${a.precise}`);
