@@ -82,6 +82,7 @@ const state = {
   pickTarget: null,       // the step id awaiting an element pick
   clockSkew: null,        // { offsetMs, rttMs, trustworthy, warn, applied } - measured, never applied silently
   clockSkewError: null,   // why the measurement could not be taken, shown next to the button that tried
+  backupNote: null,       // the result of the last backup or restore, so it is not a silent operation
   basicNotice: null,      // what Save did with the schedule: armed for an instant, or not scheduled at all
 };
 
@@ -1398,6 +1399,63 @@ function automationsView(rerender) {
 
 function dataView(rerender) {
   const wrap = el('div');
+
+  /**
+   * BACKUP AND RESTORE, first thing in this tab.
+   *
+   * Not a convenience: REMOVING AN UNPACKED EXTENSION DELETES ITS STORAGE. The instructions to "remove the old version
+   * and install the new one" therefore destroy every automation and schedule, and a schedule saved before a reinstall
+   * is gone before it can fire. That is what happened on the machine this was reported from - an export showed no
+   * automations, no alarms and no events at all - and no amount of accuracy elsewhere recovers from it.
+   */
+  wrap.append(el('h3', { text: t('backup.title') }));
+  wrap.append(el('div', { class: 'hint', text: t('backup.why') }));
+
+  const backupRow = el('div', { class: 'row' });
+  backupRow.append(el('button', {
+    class: 'primary grow', text: t('backup.export'),
+    onclick: async () => {
+      const res = await send({ type: 'export-all' });
+      if (!res?.ok) { alert(String(res?.error ?? 'export failed')); return; }
+      const n = (res.document?.automations ?? []).length;
+      downloadText(JSON.stringify(res.document, null, 2),
+        `autoflow-backup-${new Date().toISOString().slice(0, 10)}.json`);
+      state.backupNote = t('backup.exported').replace('{n}', String(n));
+      rerender();
+    },
+  }));
+  backupRow.append(el('label', {
+    class: 'grow', text: t('backup.import'), style: 'text-align:center;cursor:pointer',
+  }, el('input', {
+    type: 'file', accept: '.json,.txt', style: 'display:none',
+    onchange: async (e) => {
+      const file = e.target.files?.[0];
+      if (!file) return;
+      try {
+        const doc = JSON.parse(await file.text());
+        const count = (doc?.automations ?? []).length;
+        /**
+         * CONFIRM, because `replace` clears what is there. The count is stated so the user knows what the file holds
+         * before it overwrites anything - and a backup is offered first, which is the only way back.
+         */
+        if (!confirm(t('backup.confirm').replace('{n}', String(count)))) return;
+        const res = await send({ type: 'import-all', document: doc, replace: true, allowScripts: false });
+        if (!res?.ok) { alert(String(res?.error ?? 'import failed')); return; }
+        state.backupNote = t('backup.imported')
+          .replace('{n}', String(res.imported ?? count))
+          .replace('{armed}', String(res.rearmed ?? '?'));
+        await refresh();
+        rerender();
+      } catch (err) {
+        alert(`${t('backup.badFile')}: ${err.message}`);
+      }
+    },
+  })));
+  wrap.append(backupRow);
+  if (state.backupNote) wrap.append(el('div', { class: 'hint', text: state.backupNote }));
+  wrap.append(el('div', { class: 'hint', text: t('backup.warning') }));
+  wrap.append(el('hr'));
+
   wrap.append(el('div', { class: 'row' },
     el('label', { text: t('data.csvFile') }),
     el('input', {

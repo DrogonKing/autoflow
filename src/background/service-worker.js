@@ -1329,14 +1329,21 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         return { ok: true, document: await exportAll() };
 
       case 'import-all': {
+        /**
+         * RE-ARM WHAT WAS RESTORED. A restore that writes the records but arms no alarms looks complete and is not:
+         * the automations would sit there until the next worker start re-schedules them, and a schedule saved for a
+         * time in between would be missed. The count is returned so the panel can say so.
+         */
         const report = await importAll(msg.document, {
           replace: msg.replace === true,
           // a script step is only accepted when the caller has explicitly confirmed it, which the UI does
           // after showing the user what the file contains
           allowScripts: msg.allowScripts === true,
         });
-        await rescheduleAll(await listAutomations());
-        return { ok: true, ...report };
+        const rearm = await rescheduleAll(await listAutomations());
+        const rearmed = rearm.filter((r) => r.ok && r.at).length;
+        recordEvent({ kind: 'imported', imported: report.imported ?? 0, rearmed, replace: msg.replace === true });
+        return { ok: true, ...report, rearmed };
       }
 
       case 'audit-import': {
