@@ -115,6 +115,36 @@ button {
 button:hover { background: var(--surface-2); }
 button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 500; }
 button.primary:hover { background: var(--accent-dim); }
+
+/** The line under Save saying what the schedule is. Green because it reports a completed action, not a warning. */
+.hint.saved-note { color: #2ea043; }
+
+/**
+ * The moment after Save, stated for EVERY pointer state and placed AFTER :hover.
+ *
+ * MEASURED FAILURE, and it made the whole feature invisible: `button.primary:hover` has the same specificity as
+ * `button.primary.saved` and came later in this file, so while the pointer was over the button - which it is
+ * immediately after a click, and the user is still looking at it - hover won and the background stayed blue. The tick
+ * appeared and the colour never did.
+ *
+ * So the saved face is written for hover, focus and active as well, and last, which is the only ordering that holds
+ * against an equal-specificity rule above it.
+ */
+button.primary.saved,
+button.primary.saved:hover,
+button.primary.saved:focus,
+button.primary.saved:active {
+  background: #2ea043; border-color: #2ea043; color: #fff;
+  animation: af-saved-pop 0.35s ease-out;
+}
+@keyframes af-saved-pop {
+  0%   { transform: scale(0.94); box-shadow: 0 0 0 0 rgba(46, 160, 67, 0.55); }
+  60%  { transform: scale(1.03); box-shadow: 0 0 0 6px rgba(46, 160, 67, 0); }
+  100% { transform: scale(1);    box-shadow: 0 0 0 0 rgba(46, 160, 67, 0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  button.primary.saved { animation: none; }
+}
 button.danger { color: #ff8a80; border-color: #4a2b2b; }
 button.danger:hover { background: #3a1f1f; }
 button.icon { padding: 2px 6px; font-size: 12px; line-height: 1.2; }

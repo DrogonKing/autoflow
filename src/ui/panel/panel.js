@@ -83,6 +83,7 @@ const state = {
   clockSkew: null,        // { offsetMs, rttMs, trustworthy, warn, applied } - measured, never applied silently
   clockSkewError: null,   // why the measurement could not be taken, shown next to the button that tried
   backupNote: null,       // the result of the last backup or restore, so it is not a silent operation
+  basicSavedAt: null,     // when Save last succeeded, so the button can confirm for a moment and then stop
   basicNotice: null,      // what Save did with the schedule: armed for an instant, or not scheduled at all
 };
 
@@ -383,10 +384,6 @@ function scheduleEditor(onChange) {
     // A measurement and its consequences, not an automatic correction. The user asked for the offset to be
     // REPORTED and, separately, for an option to apply it - so it is a warning plus a switch, never a silent
     // adjustment. It appears only for a precise schedule, because only then can whole seconds matter.
-    // what Save did with the schedule: armed for an instant, or not scheduled at all
-    if (state.basicNotice) {
-      wrap.append(el('div', { class: 'hint', text: state.basicNotice }));
-    }
     // why the measurement could not be taken, when it could not: saying nothing looked like a broken button
     if (state.clockSkewError) {
       wrap.append(el('div', { class: 'hint warn', text: state.clockSkewError }));
@@ -1152,6 +1149,7 @@ function basicView(rerender) {
     await refresh();
     state.basic = { ...clean };
     state.basicStale = false;
+    state.basicSavedAt = Date.now();      // the button shows a tick for a moment, which is the only confirmation the user asked for
 
     /**
      * SAY WHAT HAPPENED TO THE SCHEDULE.
@@ -1179,8 +1177,30 @@ function basicView(rerender) {
     rerender();
   };
 
+  /**
+   * THE SAVE BUTTON CONFIRMS ITSELF.
+   *
+   * Reported: "there is no way to tell whether it saved." The notice under the row is easy to miss, because the hand
+   * that pressed the button is still over it. So the BUTTON is what changes: a tick and a green face for a couple of
+   * seconds, with the armed time as its tooltip.
+   *
+   * The state is held as an expiry timestamp rather than a timeout, so a re-render cannot leave it stuck on - which
+   * would make the confirmation lie, and a confirmation that lies is worse than none.
+   */
+  const saveState = state.basicSavedAt && Date.now() - state.basicSavedAt < 2500 ? 'saved' : 'idle';
+  const saveBtn = el('button', {
+    class: saveState === 'saved' ? 'primary grow saved' : 'primary grow',
+    text: saveState === 'saved' ? t('basic.saved') : t('basic.save'),
+    title: saveState === 'saved' && state.basicNotice ? state.basicNotice : '',
+    onclick: save,
+  });
+  if (saveState === 'saved') {
+    // return to the normal face on its own, so the button cannot claim a stale save indefinitely
+    setTimeout(() => { state.basicSavedAt = null; rerender(); }, 2500 - (Date.now() - state.basicSavedAt));
+  }
+
   wrap.append(el('div', { class: 'row' },
-    el('button', { class: 'primary grow', text: t('basic.save'), onclick: save }),
+    saveBtn,
     el('button', {
       class: 'grow', text: t('action.runNow'),
       onclick: async () => {
@@ -1193,6 +1213,16 @@ function basicView(rerender) {
   ));
 
   if (state.basicError) wrap.append(el('div', { class: 'preview warn', text: state.basicError }));
+
+  /**
+   * WHAT SAVE DID, shown next to the button that did it.
+   *
+   * This lives here, in the view that OWNS the save, and not in the shared schedule editor where it was first put by
+   * mistake: `basicView` sets the notice and never rendered it, so the message existed only as a tooltip. It survives
+   * the button's own confirmation reverting, because the button says "the press worked" and this says what the
+   * schedule is - two different facts, and the second one is the useful one two seconds later.
+   */
+  if (state.basicNotice) wrap.append(el('div', { class: 'hint saved-note', text: state.basicNotice }));
 
   // ---- what will happen, computed by the same scheduler the worker uses
   try {
