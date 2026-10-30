@@ -67,9 +67,27 @@ describe('the decision trail is what a person reads first', () => {
 });
 
 describe('times are formatted so two machines can be compared', () => {
-  it('is HH:MM:SS.mmm', () => {
+  it('is HH:MM:SS.mmm for a time on the reference day', () => {
     const d = new Date(2026, 0, 2, 3, 4, 5, 67);
-    expect(stamp(d.getTime())).toBe('03:04:05.067');
+    // the reference is the same instant, so no date suffix - the common case stays readable
+    expect(stamp(d.getTime(), d.getTime())).toBe('03:04:05.067');
+  });
+
+  it('ADDS THE DAY when the time is not on the reference day', () => {
+    /**
+     * THE REASON THIS EXISTS. An export showed `armed ... at 09:57:00.500` for a schedule targeting 09:57:02, which
+     * reads as "armed 1.5 seconds early" and was in fact "armed for TOMORROW". The arming had jumped a whole day and
+     * the time-of-day still looked right, so the log could not show the bug it was supposed to expose.
+     */
+    const d = new Date(2026, 0, 2, 3, 4, 5, 67);
+    const later = new Date(2026, 0, 5, 0, 0, 0, 0);
+    expect(stamp(d.getTime(), later.getTime())).toBe('03:04:05.067 (2 Jan)');
+  });
+
+  it('and the suffix is gone again the next day, so it means "not today" and not "a date"', () => {
+    const d = new Date(2026, 0, 2, 3, 4, 5, 67);
+    const sameDay = new Date(2026, 0, 2, 23, 59, 59, 0);
+    expect(stamp(d.getTime(), sameDay.getTime())).toBe('03:04:05.067');
   });
 
   it('a missing time is a dash, not NaN', () => {

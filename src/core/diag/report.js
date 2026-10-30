@@ -9,12 +9,24 @@
  */
 import { decisionTrail, summarise } from './events.js';
 
-/** Format a time as HH:MM:SS.mmm - sortable, unambiguous, and comparable against the test page's own log. */
-export function stamp(ms) {
+/**
+ * Format a time as HH:MM:SS.mmm, WITH THE DATE, whenever it is not today.
+ *
+ * THE REASON THE DATE IS HERE: an export showed `armed ... at 09:57:00.500` for a schedule whose target was 09:57:02,
+ * which reads as "armed 1.5 seconds early" and was in fact "armed for tomorrow" - the arming had jumped a whole day
+ * and the time-of-day still looked right. A log that cannot show that difference is not a log, it is a plausible
+ * story. Dates are shown only when they differ from the day the export was taken, so the common case stays readable.
+ */
+export function stamp(ms, referenceMs = Date.now()) {
   if (!Number.isFinite(ms)) return '-';
   const d = new Date(ms);
+  const r = new Date(referenceMs);
   const p = (n, w = 2) => String(n).padStart(w, '0');
-  return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}.${p(d.getMilliseconds(), 3)}`;
+  const time = `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}.${p(d.getMilliseconds(), 3)}`;
+  const sameDay = d.getFullYear() === r.getFullYear() && d.getMonth() === r.getMonth() && d.getDate() === r.getDate();
+  if (sameDay) return time;
+  const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  return `${time} (${d.getDate()} ${months[d.getMonth()]})`;
 }
 
 /**
@@ -45,8 +57,23 @@ export function buildDecisionLines(events) {
   return (Array.isArray(events) ? events : []).map((e) => {
     const t = stamp(e.at);
     switch (e.kind) {
-      case 'alarm-armed': return `${t}  armed       ${e.automationId}  at ${stamp(e.at)}${e.precise ? '  (precise)' : ''}`;
-      case 'alarm-fired': return `${t}  FIRED       ${e.automationId}`;
+      // `at` is when the alarm was ARMED FOR, and the record's own instant is separate - printing the record's own
+      // time here was the same mistake twice: it hid a whole-day jump behind a plausible clock reading.
+      // an `armed` event from the panel carries the same fields under a shorter kind, and both must read the same:
+      // `target` is what the alarm was armed FOR, and it is what has to carry the date
+      case 'armed':
+      case 'alarm-armed': return `${t}  armed       ${e.automationId}  for ${stamp(e.target ?? e.at)}`
+        + `${e.precise ? '  (precise)' : ''}`
+        + `${e.via ? `  via ${e.via}` : ''}`
+        + `${Number.isFinite(e.justMissedMs) ? `  [the target second had just passed by ${e.justMissedMs}ms - running now]` : ''}`;
+      case 'alarm-fired': return `${t}  FIRED       ${e.automationId}`
+        + `${Number.isFinite(e.latenessMs) ? `  ${e.latenessMs >= 0 ? 'late by' : 'early by'} ${Math.abs(e.latenessMs)}ms` : ''}`;
+      case 're-armed': return `${t}  RE-ARMED    ${e.automationId}  for ${stamp(e.target)}`;
+      case 'arm-skipped': return `${t}  ARM SKIPPED ${e.automationId}  ${e.note}`;
+      case 'storm-refused': return `${t}  STORM REFUSED ${e.automationId}  ${e.firingsIn10s} firings in 10s`;
+      case 'fired-late': return `${t}  FIRED LATE  ${e.automationId}  by ${e.lateByMs}ms - the run starts now`;
+      case 'fired-too-late': return `${t}  FIRED TOO LATE ${e.automationId}  by ${e.lateByMs}ms (tolerance ${e.toleranceMs}ms) - the window was missed`;
+      case 'arm-failed': return `${t}  ARM FAILED  ${e.automationId}  ${e.error}`;
       case 'alarm-late': return `${t}  FIRED LATE  ${e.automationId}  by ${e.lateByMs}ms`;
       case 'start-request': return `${t}  requested   ${e.automationId}  trigger=${e.trigger}${e.lateByMs ? `  late=${e.lateByMs}ms` : ''}`;
       case 'start-queued': return `${t}  QUEUED      ${e.automationId}  behind ${e.behind ?? 'another run'}  (queue depth ${e.depth})`;

@@ -432,9 +432,21 @@ describe('alarms — scheduling bridge', () => {
     expect(chromeMock._alarms.size).toBe(0);
   });
 
-  it('reports a schedule that will not fire again', async () => {
+  it('a once schedule whose time JUST passed is acted on, not reported as dead', async () => {
+    /**
+     * The two-minute window exists because the previous behaviour - a zero-width window - silently deferred a daily
+     * schedule by 24 hours when a worker restart happened seconds after the target. For a `once` schedule the old code
+     * reported "this schedule will not fire again" for a target ten seconds old, which is the same silent loss.
+     */
     const a = await load();
     const results = await a.rescheduleAll([automation({ schedule: { kind: 'once', at: Date.now() - 10_000 } })]);
+    expect(results[0].ok).toBe(true);
+    expect(results[0].justMissedMs).toBeGreaterThan(0);
+  });
+
+  it('reports a schedule that will not fire again, once the window has passed', async () => {
+    const a = await load();
+    const results = await a.rescheduleAll([automation({ schedule: { kind: 'once', at: Date.now() - 600_000 } })]);
     expect(results[0].ok).toBe(false);
     expect(results[0].reason).toMatch(/will not fire again/);
   });

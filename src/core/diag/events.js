@@ -49,8 +49,16 @@ export function summarise(events) {
  * A whole log is useful; this is what a person reads first.
  */
 export function decisionTrail(events) {
+  /**
+   * EVERY kind that touches a start decision. This list was missing `armed`, `fired-late` and `fired-too-late`, all
+   * of which were being RECORDED and then dropped before the section a person reads - so the export showed the alarm
+   * firing with no line saying when it had been armed for, which is exactly the line that would have exposed a
+   * whole-day jump. A writer and a reader with different lists is the same failure as two code paths disagreeing.
+   */
   const KINDS = new Set([
-    'alarm-armed', 'alarm-fired', 'alarm-late', 'start-request', 'start-refused', 'start-queued',
+    'alarm-armed', 'armed', 'alarm-fired', 'alarm-late', 'fired-late', 'fired-too-late',
+    're-armed', 'arm-skipped', 'arm-failed', 'storm-refused',
+    'start-request', 'start-refused', 'start-queued',
     'start-accepted', 'run-finished', 'run-abandoned', 'worker-boot',
   ]);
   return (Array.isArray(events) ? events : []).filter((e) => KINDS.has(e.kind));

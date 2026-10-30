@@ -37,9 +37,22 @@ export async function rescheduleAll(automations, { now = Date.now() } = {}) {
     }
     const name = ALARM_PREFIX + a.id;
     wanted.add(name);
-    const at = nextRun(a.schedule, now);
-    if (at === null) {
+    const armed = armTarget(a.schedule, now);
+    const at = armed.at;
+    if (at === null && armed.missedMs === 0) {
       results.push({ id: a.id, name: a.name, ok: false, reason: 'this schedule will not fire again' });
+      continue;
+    }
+    /**
+     * The target second has just gone by. arming for now is the honest reading of "I saved this time and I expect it to
+     * happen" - the alternative, which was the behaviour, is a silent jump to tomorrow.
+     */
+    if (at === null) {
+      await api.alarms.create(name, { when: now + 1000 });
+      results.push({
+        id: a.id, name: a.name, ok: true, at: now + 1000, target: armed.intendedAt, precise: false,
+        justMissedMs: armed.missedMs, description: describeSchedule(a.schedule),
+      });
       continue;
     }
     const precise = wantsPreciseTiming(a.schedule);
@@ -96,6 +109,30 @@ export async function rescheduleAll(automations, { now = Date.now() } = {}) {
  * A `cron` or `daily` schedule registers a single next occurrence rather than a repeating alarm, because
  * a repeating alarm cannot express "09:00 local, skipping DST" and would drift by an hour twice a year.
  */
+/**
+ * How recently an occurrence may have passed and still be treated as the one the user meant.
+ *
+ * THE BUG THIS FIXES, from a real export: a `daily 09:57:02` schedule was saved at 09:57:00.5. With the wake margin
+ * applied the alarm was armed for 09:58:41 - 99 seconds after its own target second - so `nextRun` saw the target as
+ * past and returned TOMORROW. The click never happened, and the `armed` event showed a plausible time-of-day because
+ * it printed no date.
+ *
+ * The window is exactly zero milliseconds wide: the instant the target second passes, the next occurrence is 24 hours
+ * away. MEASURED on a real machine: a worker restart 99 seconds after the target replaced a pending same-day alarm
+ * with tomorrow's, and the scheduled click never happened. The user had saved the schedule correctly; the restart is
+ * what lost it.
+ *
+ * Two minutes, chosen against the alternative rather than for roundness. Firing up to two minutes late is a bounded,
+ * visible, RECORDED error - it appears in the run history and the panel says so. Skipping a whole day is unbounded and
+ * invisible: the automation looks healthy and never runs. Between those, a late click is the honest failure. Two
+ * minutes is also comfortably longer than the gap between an alarm firing and a run starting on a slow machine, which
+ * is what created the window in the first place.
+ *
+ * A browser start hours after the target is unaffected: the miss is far outside the window, so the next real
+ * occurrence is armed and nothing fires spuriously.
+ */
+const JUST_MISSED_GRACE_MS = 120_000;
+
 /** Key for the last observed worker start latency, in storage.local so it survives a worker restart. */
 const START_LATENCY_KEY = 'scheduledStartLatencyMs';
 
@@ -136,6 +173,46 @@ export async function recordStartLatency(ms) {
   } catch { /* a latency hint that cannot be stored must not break the run */ }
 }
 
+/**
+ * When to arm, and whether the occurrence the user meant has only just gone by.
+ *
+ * A thin layer over `nextRun` that refuses to jump a whole day when the target is seconds in the past. Returns the
+ * instant to arm for, plus how late that occurrence already was, so the caller can record it instead of pretending the
+ * schedule was on time.
+ */
+export function armTarget(schedule, now) {
+  const at = nextRun(schedule, now);
+  const ahead = at === null ? Infinity : at - now;
+
+  /**
+   * `nextRun` ALWAYS returns a future instant, so the previous occurrence is found by asking from BEYOND the grace
+   * window - not from within it. Asking from `now - grace` returns the occurrence after that point, which for a
+   * daily schedule is today's target when that is still ahead and tomorrow's when it is not; asking from
+   * `now - grace - 1` is what lands on the one that just passed.
+   *
+   * MEASURED, and this is why the arithmetic is stated: with `now` five seconds past the target, looking back 30
+   * seconds and looking back 300 seconds both returned today's target, while looking back 25 hours returned
+   * yesterday's.
+   */
+  const earlier = nextRun(schedule, now - JUST_MISSED_GRACE_MS - 1);
+  const withinGrace = earlier !== null
+    && earlier <= now + 1000
+    && now - earlier <= JUST_MISSED_GRACE_MS;
+
+  /**
+   * An imminent occurrence WINS over a missed one. If the next one is a few seconds away it is a better answer than
+   * firing seconds late: for a 60-second interval whose tick passed 30 seconds ago, waiting 30 seconds is right and
+   * firing 30 seconds late is not.
+   */
+  if (ahead <= JUST_MISSED_GRACE_MS) return { at, missedMs: 0 };
+
+  if (withinGrace) {
+    return { at: null, missedMs: Math.max(0, now - earlier), intendedAt: earlier };
+  }
+
+  return { at, missedMs: 0 };
+}
+
 export async function scheduleOne(automation, { now = Date.now() } = {}) {
   const name = ALARM_PREFIX + automation.id;
   await api.alarms.clear(name);
@@ -143,8 +220,24 @@ export async function scheduleOne(automation, { now = Date.now() } = {}) {
     return { scheduled: false, reason: 'manual' };
   }
   validateSchedule(automation.schedule);
-  const at = nextRun(automation.schedule, now);
-  if (at === null) return { scheduled: false, reason: 'no future occurrence' };
+  const armed = armTarget(automation.schedule, now);
+  const at = armed.at;
+  /**
+   * `at === null` with a `missedMs` means the occurrence the user meant has just gone by: arm for NOW so the run
+   * happens, rather than returning "no future occurrence" (which is what the previous code did for 'once') or
+   * deferring the whole thing by a day.
+   */
+  if (at === null && armed.missedMs === 0) return { scheduled: false, reason: 'no future occurrence' };
+  if (at === null) {
+    return {
+      scheduled: true,
+      at: now + 1000,
+      target: armed.intendedAt,
+      precise: false,
+      justMissedMs: armed.missedMs,
+      reason: 'the target second had just passed; running now',
+    };
+  }
   // A schedule with a second is fired PRECISELY: the alarm wakes the worker early and the exact instant is
   // waited for in the page, where the timer is millisecond-resolution. Without that the click inherits the
   // alarm path's whole latency - worker wake-up, storage read, tab resolution, message round-trip.
