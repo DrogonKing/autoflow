@@ -1327,7 +1327,20 @@ function basicView(rerender) {
            * the button stayed as it was and the click looked like it had done nothing. The message still reached the
            * worker, which is why only the button's own state was wrong.
            */
-          pickControl({ step, redraw: () => keepDraftThen(() => {}) }),
+          /**
+       * THE SIMPLE FORM'S PICK KEEPS ITS DRAFT; THE EDITOR'S MUST KEEP ITS COPY TOO.
+       *
+       * MEASURED (user report, 1.22.0): "after every pick this error comes - That pick found
+       * [data-symbol="فزر"] > div:nth-of-type(3) > div:nth-of-type(6), but no point was waiting for it."
+       *
+       * The editor's Pick passed no `redraw`, so the control fell back to a bare `render()`. `render()` rebuilds
+       * `state.editing` from the saved record when the editor's own keep-flag is not set - and `state.pickTarget` is
+       * dropped in the same step. So the pick arrived for an automation whose copy no longer existed, was reported as
+       * "no point waiting", and the user saw that message after EVERY pick.
+       *
+       * The other call site (line ~718) is the one that had it right; this is the one that did not.
+       */
+      pickControl({ step, redraw: () => { state.editorKeepDraft = true; render(); } }),
           // the other half: an editable selector, shown for every point rather than only as a fallback count
           el('input', {
             class: 'grow mono', value: finder.selector ?? finder.text ?? finder.id ?? '',
@@ -1829,7 +1842,15 @@ function automationsView(rerender) {
           enabled: true,
           createdAt: Date.now(),
         };
-        state.editing = a;
+        /**
+         * OPENING AN AUTOMATION FOR EDITING TAKES A COPY, always - that is what the editor is: a working copy.
+         *
+         * `state.editorKeepDraft` is the editor's half of the same rule the simple form already had: a re-render caused
+         * by the editor itself (a pick landing, a selector being corrected) must not throw the copy away and rebuild it
+         * from storage, because the storage version does not have the pick that is in flight.
+         */
+        if (!state.editorKeepDraft || state.editing?.id !== a.id) state.editing = JSON.parse(JSON.stringify(a));
+        state.editorKeepDraft = false;
         await send({ type: 'save-automation', automation: a });
         await refresh();
       },
@@ -2500,11 +2521,34 @@ api.runtime.onMessage.addListener((msg) => {
       render();
     } else {
       /**
-       * NO STEP CLAIMED IT: say so, and say what the user can do.
+       * NO STEP CLAIMED IT - SO CLAIM IT FOR THE OBVIOUS ONE.
        *
-       * Silence here is what made this show up as "nothing is saved" three versions in a row. The selector is known, so
-       * the message can name it, and the two honest next steps are the ones in the message.
+       * MEASURED (user report, 1.22.0): every pick produced "That pick found ... but no point was waiting for it".
+       * The message was accurate and useless: the selector was known, the form on screen had exactly one point, and
+       * refusing to fill it is not caution - it makes the feature not work.
+       *
+       * The order of preference, each step defensible on its own:
+       *   1. the point whose Pick button was pressed last (`pickTarget`), whenever it still exists;
+       *   2. otherwise the ONLY point in the visible form - with one point there is nothing to be ambiguous about;
+       *   3. otherwise, and only then, say the pick has nowhere to go.
+       *
+       * Steps 1 and 2 keep the report's own words ("press Pick next to the point you want it on") true: they fill the
+       * point the user indicated, and never guess between two.
        */
+      const steps = state.tab === 'basic' ? (state.basic?.steps ?? []) : (state.editing?.steps ?? []);
+      const single = steps.length === 1 ? steps[0] : null;
+      if (single) {
+        single.finder = msg.finder;
+        rememberFinder(single.id, msg.finder);
+        state.pickSavedAt = Date.now();
+        state.pickSavedFor = single.id;
+        state.pickTarget = null;
+        if (state.tab === 'basic') state.basicKeepDraft = true;
+        else state.editorKeepDraft = true;
+        recordPickDebug({ event: 'adopted', stepId: single.id, tab: state.tab });
+        render();
+        return;
+      }
       const where = msg.finder?.selector ?? msg.finder?.xpath ?? msg.finder?.id ?? '(a picked element)';
       const message = String(where).startsWith('(a')
         ? t('pick.needsStep')
