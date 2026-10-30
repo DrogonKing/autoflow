@@ -1219,8 +1219,18 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           await setPickPage(forAutomation, msg.url);
         }
         pendingPick = null;
-        api.runtime.sendMessage({ type: 'element-picked', info: msg.info, finder: msg.finder, url: msg.url })
-          .catch(() => {});
+        /**
+         * THE WORKER DOES NOT FORWARD THIS. The content script's `runtime.sendMessage` already reaches the panel.
+         *
+         * MEASURED (user report, 1.23.0): one click, TWO `element-picked` messages at the panel - the first from the
+         * content script, the second from this forward. The first copy found the step and consumed `state.pickTarget`;
+         * every later copy found nothing and took the `else` branch, which is the sentence the user kept seeing:
+         * "but no point was waiting for it". The selector had landed, which is why it "still worked" and the message
+         * looked like noise - it was noise, produced here.
+         *
+         * A message sent with `runtime.sendMessage` from a content script is delivered to every extension context that
+         * listens, so forwarding it adds a second delivery rather than adding reach.
+         */
         return { ok: true };
       }
 

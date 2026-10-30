@@ -2440,6 +2440,22 @@ api.runtime.onMessage.addListener((msg) => {
    * it - so the pick's selector was thrown away and nothing said so.
    */
   if (msg?.type === 'element-picked') {
+    /**
+     * THE SAME PICK MAY ARRIVE MORE THAN ONCE, AND THE SECOND COPY IS NOT NEWS.
+     *
+     * MEASURED (user report, 1.23.0): one click, two deliveries - the content script's broadcast and the worker's forward
+     * of it. The first copy found the step and consumed `state.pickTarget`; the second found nothing and printed "but no
+     * point was waiting for it". The selector had landed, which is why it "still worked" - the message was noise.
+     *
+     * Fixing the sender removes the duplicate; this keeps the panel honest if any other path ever produces one, because
+     * a false complaint is worse than no complaint: it teaches the user to ignore the message that matters.
+     */
+    const alreadySettled = state.pickSavedFor && state.pickSavedAt
+      && Date.now() - state.pickSavedAt < 1500;
+    if (alreadySettled && state.pickTarget === null) {
+      recordPickDebug({ event: 'ignored-duplicate', tab: state.tab });
+      return;
+    }
     const find = (list) => {
       for (const s of list) {
         if (s.id === state.pickTarget) return s;
