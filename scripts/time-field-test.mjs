@@ -125,54 +125,92 @@ console.log('\n--- 1. the field is ours, not the native one ---');
     attrs.bidi === 'plaintext' || attrs.bidi === 'isolate', `unicode-bidi=${attrs.bidi}`);
 }
 
-console.log('\n--- 2. a PERSIAN keyboard separator is read as a colon ---');
+console.log('\n--- 2. THE REPORTED EXAMPLE: ۱۳۵۱۲۱ becomes ۱۳:۵۱:۲۱ ---');
 {
   /**
-   * THE FAILURE THAT BROKE THE REPORTED RUN. U+066B is what a Persian keyboard often sends for the separator. It used
-   * to be deleted, so '۱۲٫۳۰' became '1230' - not a time, rejected in silence, and the 09:00:00 default stayed in the
-   * model and armed for tomorrow.
+   * "اعداد ساعت رو باید دوتا دوتا بگیره مثلا وقتی عدد ۱۳۵۱۲۱ رو میدم خودش تبدیلش کنه به ۱۳:۵۱:۲۱، برای هم فارسی هم
+   * انگلیسی" - a run of digits groups itself, in either script.
+   */
+  for (const [label, typed, expected] of [
+    ['Persian', '۱۳۵۱۲۱', '13:51:21'],
+    ['Western', '135121', '13:51:21'],
+    ['Arabic-Indic', '١٣٥١٢١', '13:51:21'],
+  ]) {
+    await clearField();
+    await typeInto(typed);
+    const f = await readField();
+    const m = await model();
+    console.log(`  ${label}: typed "${typed}" -> field "${f?.value}"  model "${m}"`);
+    check(`${label} digits group into ${expected}`, f?.value === expected, `${typed} -> ${f?.value}`);
+    check(`${label}: and the model takes it`, /13:51:21/.test(m ?? ''), String(m));
+  }
+}
+
+console.log('\n--- 3. colons are DERIVED, so they cannot be deleted ---');
+{
+  /**
+   * "':' نباید پاک بشه درحالی که وقتی اعداد ساعت‌ها رو پاک میکنم اونم پاک میشه" - the colon used to be stored text, so
+   * removing digits around it could take it too. It is now drawn from whatever digits remain, so every intermediate
+   * value is the digits plus their own separators - there is no state holding a stray colon or a missing one.
    */
   await clearField();
-  await typeInto('۱۲\u066B۳۰');
-  const f = await readField();
-  const m = await model();
-  console.log(`  field="${f?.value}"  model="${m}"`);
-  check('a Persian separator reaches the field as a colon', /12:30/.test(f?.value ?? ''), String(f?.value));
-  check('AND the model takes it, which is what never happened before',
-    /12:30/.test(m ?? ''), String(m));
+  await typeInto('۱۳۵۱');
+  const full = await readField();
+  console.log(`  after typing ۱۳۵۱: "${full?.value}"`);
+  check('four digits group as 13:51', full?.value === '13:51', String(full?.value));
+
+  // delete twice with real key presses and watch the structure stay consistent
+  const seen = [];
+  for (let i = 0; i < 4; i++) {
+    await panel.keyboard.press('Backspace');
+    await panel.waitForTimeout(220);
+    const v = (await readField())?.value ?? '';
+    seen.push(v);
+  }
+  console.log(`  backspace sequence: ${JSON.stringify(seen)}`);
+  check('every intermediate value is the digits plus their derived separators',
+    seen.every((v) => v === v.replace(/[^0-9:]/g, '') && !/:$/.test(v) && !/^:/.test(v)),
+    JSON.stringify(seen));
+  check('the colon disappears only when the digits it separated are gone',
+    seen.includes('13:5') || seen.includes('135'), JSON.stringify(seen));
+  check('and it never survives alone', !seen.some((v) => /^:+$/.test(v)), JSON.stringify(seen));
 }
 
-console.log('\n--- 3. Persian digits still work ---');
+console.log('\n--- 4. the model follows every keystroke, including before it is complete ---');
 {
   await clearField();
-  await typeInto('۱۴:۳۰:۵۵');
+  await typeInto('۱۳');
   const f = await readField();
   const m = await model();
-  console.log(`  field="${f?.value}"  model="${m}"`);
-  check('typed Persian digits are shown as western ones', f?.value === '14:30:55', String(f?.value));
-  check('and the model has the seconds', /14:30:55/.test(m ?? ''), String(m));
+  console.log(`  two digits: field="${f?.value}"  model="${m}"`);
+  check('two digits are a whole hour', f?.value === '13', String(f?.value));
+  check('and the model reads it as 13:00, not as incomplete', /13:00/.test(m ?? ''), String(m));
 }
 
-console.log('\n--- 4. absurd values are REFUSED, and say so ---');
+console.log('\n--- 5. what must NOT be accepted ---');
 {
   await clearField();
-  await typeInto('12:100');
-  const f = await readField();
+  await typeInto('۲۵');
   const h = await hint();
   const m = await model();
-  console.log(`  field="${f?.value}"  hint=${JSON.stringify(h)}  model="${m}"`);
-  check('minute 100 is not accepted', !/12:100/.test(m ?? ''), String(m));
+  console.log(`  hour 25: hint=${JSON.stringify(h)}  model="${m}"`);
+  check('an impossible hour is refused', !/25/.test(m ?? ''), String(m));
   check('AND a reason is shown next to the field', h !== null && h.warn === true, JSON.stringify(h));
 
   await clearField();
-  await typeInto('۲۵:۰۰');
+  await typeInto('۱۳۹۹');
   const h2 = await hint();
-  const m2 = await model();
-  console.log(`  hour 25: hint=${JSON.stringify(h2)}  model="${m2}"`);
-  check('hour 25 is refused with a reason', h2 !== null && h2.warn === true, JSON.stringify(h2));
+  console.log(`  minute 99: hint=${JSON.stringify(h2)}`);
+  check('an impossible minute is refused with a reason', h2 !== null && h2.warn === true, JSON.stringify(h2));
+
+  await clearField();
+  await typeInto('۱۳۵۱۹۹');
+  const h3 = await hint();
+  console.log(`  second 99: hint=${JSON.stringify(h3)}`);
+  check('an impossible second is refused with a reason', h3 !== null && h3.warn === true, JSON.stringify(h3));
 }
 
-console.log('\n--- 5. clearing the field must NOT schedule midnight ---');
+console.log('\n--- 6. clearing the field must NOT schedule midnight ---');
 {
   await clearField();
   const f = await readField();
@@ -182,17 +220,6 @@ console.log('\n--- 5. clearing the field must NOT schedule midnight ---');
   check('an empty field is empty', f?.value === '', String(f?.value));
   check('AND it does not become 00:00', !/00:00/.test(m ?? ''), String(m));
   check('AND it says the time is not usable yet', h !== null, JSON.stringify(h));
-}
-
-console.log('\n--- 6. a lone separator does not become midnight either ---');
-{
-  await clearField();
-  await typeInto(':');
-  const m = await model();
-  const h = await hint();
-  console.log(`  lone ':': model="${m}"  hint=${JSON.stringify(h)}`);
-  check('a lone separator is refused', !/00:00/.test(m ?? ''), String(m));
-  check('with a reason', h !== null, JSON.stringify(h));
 }
 
 console.log('\n--- 7. the caret follows the typing, left to right ---');

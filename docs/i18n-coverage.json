@@ -1,6 +1,6 @@
 {
-  "en_keys": 279,
-  "fa_keys": 279,
+  "en_keys": 277,
+  "fa_keys": 277,
   "used_keys": 178,
   "missing_in_en": [],
   "missing_in_fa": [],
@@ -99,11 +99,9 @@
     "tab.scheduled",
     "time.error.empty",
     "time.error.hourRange",
-    "time.error.incomplete",
     "time.error.minuteRange",
     "time.error.secondRange",
     "time.error.tooManyDigits",
-    "time.error.tooManyParts",
     "timer.nextPreview",
     "timer.title"
   ],

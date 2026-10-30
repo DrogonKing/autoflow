@@ -1388,19 +1388,70 @@ export function normaliseDigits(text) {
  * character filter, so `۱۲:۳۰` became `1230`, which is not a time, so the value was rejected in silence and the model
  * kept whatever it had before. That is the whole of "when I type with the Persian keyboard it does not change".
  */
+/**
+ * Every character that can appear where a Western keyboard has `:`, all of which are simply dropped now.
+ *
+ * They are dropped rather than read as separators because the separators are structural: the digits are what the user
+ * provides, in any script, and the colons are produced by `formatTimeDigits`. A separator character in the input is
+ * therefore noise, whether it is an ASCII colon, an Arabic decimal mark, or a fullwidth one.
+ */
 const TIME_SEPARATORS = /[\u066B\u066C\u061B\uFF1A\uFE55\u05C3\u2236\u002E\u06D4]/g;
 
-export function normaliseTimeText(text) {
-  return normaliseDigits(text)
-    .replace(TIME_SEPARATORS, ':')
-    .replace(/[^0-9:]/g, '')
-    .replace(/:{2,}/g, ':')
-    .slice(0, 8);
+/** Just the digits, translated from any script and capped at the six a time can hold. */
+export function timeDigits(text) {
+  return normaliseDigits(text).replace(TIME_SEPARATORS, '').replace(/[^0-9]/g, '').slice(0, 6);
 }
 
-/** How many colon-separated parts a typed text has - two means minutes, three means a precise schedule. */
+/**
+ * Format a run of digits as a time: two, then two, then two.
+ *
+ * This is the whole of "اعداد ساعت رو باید دوتا دوتا بگیره" - and because the colons are DRAWN rather than stored, they
+ * also cannot be deleted by accident, which was the first report. A pasted `09:30:05` goes through the same path: the
+ * colons are stripped and regenerated in the same places.
+ */
+export function formatTimeDigits(text) {
+  const digits = timeDigits(text);
+  const parts = [];
+  for (let i = 0; i < digits.length; i += 2) parts.push(digits.slice(i, i + 2));
+  return parts.join(':');
+}
+
+/** Kept for the existing callers: the number of parts a value has, which decides minute vs precise. */
 export function countTimeParts(text) {
-  return normaliseTimeText(text).split(':').length;
+  return formatTimeDigits(text).split(':').filter(Boolean).length;
+}
+
+/**
+ * Where the caret goes after the value has been re-formatted.
+ *
+ * Counts how many DIGITS sat before the caret and returns the position after that many digits in the new text, stepping
+ * past a separator the formatting inserted there - so the next keystroke lands in the group the user is filling rather
+ * than before the colon.
+ */
+export function caretAfterFormatting(raw, caret, formatted) {
+  const rawText = String(raw ?? '');
+  const upTo = rawText.slice(0, Math.max(0, Math.min(caret ?? 0, rawText.length)));
+  const digitsBefore = timeDigits(upTo).length;
+  const out = String(formatted ?? '');
+  if (digitsBefore === 0) return 0;
+
+  let seen = 0;
+  let i = 0;
+  for (; i < out.length; i++) {
+    if (/[0-9]/.test(out[i])) {
+      seen += 1;
+      if (seen === digitsBefore) { i += 1; break; }
+    }
+  }
+  // step past the separator the formatting just inserted, so typing continues in the next group
+  if (out[i] === ':' && i < out.length - 1) i += 1;
+  return i;
+}
+
+/** The position of the caret as a DIGIT index, which is what all the editing operations work in. */
+export function caretDigitIndex(raw, caret) {
+  const rawText = String(raw ?? '');
+  return timeDigits(rawText.slice(0, Math.max(0, Math.min(caret ?? 0, rawText.length)))).length;
 }
 
 /**
@@ -1419,31 +1470,41 @@ export function countTimeParts(text) {
  *     schedule into a precise one, and precise schedules are the ones where whole seconds matter.
  */
 export function parseTypedTime(text) {
-  const normalised = normaliseTimeText(text);
-  if (normalised === '') return { ok: false, error: 'empty' };
+  /**
+   * PARSED FROM THE DIGITS, because the grouping is the field's job now.
+   *
+   * The user provides digits and the field draws the colons, so there is no such thing as a "misplaced separator" to
+   * reject - and the two values that used to fail for structural reasons are the ones being reported:
+   *
+   *     '13'      -> 13:00      two digits mean 13:00, not "incomplete"
+   *     '13:5'    -> 13:05      a half-group is padded, because that is what the field displays
+   *     '135121'  -> 13:51:21   six digits are grouped two by two
+   *
+   * What is still refused is a value that cannot be a time at all - an impossible hour or minute, or more digits than
+   * a time has - and each refusal carries its name so the panel can say it.
+   */
+  const digits = timeDigits(text);
+  if (digits === '') return { ok: false, error: 'empty' };
+  if (digits.length > 6) return { ok: false, error: 'tooManyDigits' };
 
   /**
-   * TOO LONG TO BE A TIME, checked BEFORE the field's own 8-character limit can truncate it.
+   * A PARTIAL GROUP IS PADDED ON THE LEFT, and the direction matters.
    *
-   * `normaliseTimeText` slices to 8 because that is the longest time there is, but slicing first meant
-   * `14:30:55:99` became `14:30:55` and was ACCEPTED - a silent repair, which is the exact failure mode this parser
-   * exists to stop. The unsliced form is examined here, so a fourth part is refused.
+   * Measured: with `padEnd`, `'13:5'` read as 13:50 and a lone `'1'` read as hour 10 - both wrong in the same way. A
+   * partial group is the START of a group, so it is the leading digit: `'13:5'` is thirteen-oh-five and `'1'` is one
+   * o'clock. It is also the only rule that reads a complete and a partial group consistently, which is why `'13'` and
+   * `'13:5'` cannot disagree about the hour.
    */
-  const unbounded = normaliseDigits(text).replace(TIME_SEPARATORS, ':').replace(/[^0-9:]/g, '');
-  if (unbounded.length > 8) return { ok: false, error: 'tooManyDigits' };
+  const h = Number(digits.slice(0, 2).padStart(2, '0'));
+  const m = Number(digits.slice(2, 4).padStart(2, '0'));
+  const precise = digits.length > 4;
+  const s = precise ? Number(digits.slice(4, 6).padStart(2, '0')) : 0;
 
-  const rawParts = normalised.split(':');
-  if (rawParts.some((p) => p === '')) return { ok: false, error: 'incomplete' };
-  if (rawParts.length > 3) return { ok: false, error: 'tooManyParts' };
-  if (rawParts.length < 2) return { ok: false, error: 'incomplete' };
-  if (rawParts.some((p) => p.length > 2)) return { ok: false, error: 'tooManyDigits' };
-
-  const [h, m, s] = rawParts.map(Number);
   if (h > 23) return { ok: false, error: 'hourRange' };
   if (m > 59) return { ok: false, error: 'minuteRange' };
-  if (rawParts.length > 2 && s > 59) return { ok: false, error: 'secondRange' };
+  if (precise && s > 59) return { ok: false, error: 'secondRange' };
 
-  return { ok: true, hour: h, minute: m, second: rawParts.length > 2 ? s : 0, precise: rawParts.length > 2 };
+  return { ok: true, hour: h, minute: m, second: s, precise };
 }
 
 /**
@@ -1480,53 +1541,93 @@ function afterCurrentInteraction(fn) {
   setTimeout(run, 250);   // a blur with no click behind it must still refresh, and promptly
 }
 
-/**
- * Map a caret position in the raw text onto the normalised text.
- *
- * Normalising is not length-preserving in general: a Persian digit becomes one ASCII digit and a separator becomes `:`,
- * both the same length, but a rejected letter is DELETED, which shifts everything after it. Counting the output produced
- * by the input before the caret is the only way to keep the insertion point on the character being edited rather than at
- * whichever end a boolean test happened to choose.
- */
-export function caretsAfterNormalising(raw, caret, normalised) {
-  const text = String(raw ?? '');
-  const upTo = text.slice(0, Math.max(0, Math.min(caret ?? 0, text.length)));
-  return Math.max(0, Math.min(normaliseTimeText(upTo).length, String(normalised ?? '').length));
-}
-
 function timeField({ value, placeholder, onCommit, onHint, rerender }) {
+  /**
+   * A MASKED FIELD. It holds a run of DIGITS; the colons are drawn.
+   *
+   * The two reports are the same mistake seen twice - the field treated `:` as something the user types:
+   *
+   *  - "':' نباید پاک بشه ... وقتی اعداد ساعت‌ها رو پاک میکنم اونم پاک میشه" - the colon was stored text, so deleting
+   *    digits around it could take it with them, leaving a field holding `13` and looking broken.
+   *  - "اعداد ساعت رو باید دوتا دوتا بگیره مثلا ۱۳۵۱۲۱ رو بدم خودش ۱۳:۵۱:۲۱ کنه" - a run of digits should group itself.
+   *
+   * So the buffer is digits only and the separators are produced by `formatTimeDigits`. A colon cannot be deleted
+   * because it is never stored, and grouping is automatic for any script - `۱۳۵۱۲۱`, `135121` and a pasted
+   * `13:51:21` all arrive as the same six digits.
+   */
   const input = el('input', {
     type: 'text',
     inputmode: 'numeric',
     dir: 'ltr',
     class: 'grow mono time-input',
-    value,
+    value: formatTimeDigits(value),
     placeholder: placeholder ?? 'HH:MM:SS',
     autocomplete: 'off',
     spellcheck: 'false',
+    maxlength: '8',
+    /**
+     * Only digits are let through, and the caret is placed in DIGIT space.
+     *
+     * `beforeinput` is not used because it is not reliably cancelled in every engine; filtering on `input` and
+     * re-rendering is uniform, and the caret mapping is what stops it jumping.
+     */
     oninput: (e) => {
-      const raw = e.target.value;
-      const normalised = normaliseTimeText(raw);
-      if (normalised !== raw) {
-        /**
-         * THE CARET IS MAPPED, not guessed.
-         *
-         * Reported: "when I type with the Persian keyboard it starts from the right instead of like English". The old
-         * code placed the caret by asking a boolean - was it at the end? - which is wrong the moment normalisation
-         * changes a character in place near the caret: replacing `۱۲` with `12` at the START of the value has the same
-         * length but the insertion point must stay where the typing is. The position is mapped across the translation.
-         */
-        const mapped = caretsAfterNormalising(raw, e.target.selectionStart, normalised);
-        e.target.value = normalised;
-        try { e.target.setSelectionRange(mapped, mapped); } catch { /* not focusable */ }
+      const formatted = formatTimeDigits(e.target.value);
+      const caret = caretAfterFormatting(e.target.value, e.target.selectionStart, formatted);
+      e.target.value = formatted;
+      try { e.target.setSelectionRange(caret, caret); } catch { /* not focusable */ }
+      onCommit(formatted, { rerender: false });
+      if (onHint) onHint(countTimeParts(formatted) > 2);
+    },
+    /**
+     * BACKSPACE IS HANDLED IN DIGIT SPACE, and this is the part that has to be explicit.
+     *
+     * With the colon derived, a caret sitting just after a separator would make plain backspace delete nothing visible -
+     * the field would look stuck. So backspace removes the digit BEFORE the caret and re-formats, which is both what the
+     * user means and what makes the separator around it disappear correctly.
+     */
+    onkeydown: (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); e.target.blur(); return; }
+
+      if (e.key !== 'Backspace' && e.key !== 'Delete') return;
+      const before = e.target.value;
+      const start = e.target.selectionStart ?? 0;
+      const end = e.target.selectionEnd ?? 0;
+      // a selection is just removed; the browser handles it and `input` re-formats
+      if (start !== end) return;
+
+      const at = caretDigitIndex(before, start);
+      const digits = timeDigits(before);
+      let next;
+      let nextCaretDigit;
+      if (e.key === 'Backspace') {
+        if (at === 0) { e.preventDefault(); return; }          // nothing before the caret, and the colon must not go
+        next = digits.slice(0, at - 1) + digits.slice(at);
+        nextCaretDigit = at - 1;
+      } else {
+        if (at >= digits.length) { e.preventDefault(); return; }
+        next = digits.slice(0, at) + digits.slice(at + 1);
+        nextCaretDigit = at;
       }
-      onCommit(normalised, { rerender: false });
-      if (onHint) onHint(countTimeParts(normalised) > 2);
+      e.preventDefault();
+      const formatted = formatTimeDigits(next);
+      e.target.value = formatted;
+      // place the caret after `nextCaretDigit` digits of the NEW text
+      let seen = 0;
+      let pos = 0;
+      while (pos < formatted.length && seen < nextCaretDigit) {
+        if (/[0-9]/.test(formatted[pos])) seen += 1;
+        pos += 1;
+      }
+      try { e.target.setSelectionRange(pos, pos); } catch { /* not focusable */ }
+      onCommit(formatted, { rerender: false });
+      if (onHint) onHint(countTimeParts(formatted) > 2);
     },
     onblur: (e) => {
-      const normalised = normaliseTimeText(e.target.value);
-      onCommit(normalised, { rerender: false });
-      if (onHint) onHint(countTimeParts(normalised) > 2);
+      const formatted = formatTimeDigits(e.target.value);
+      e.target.value = formatted;
+      onCommit(formatted, { rerender: false });
+      if (onHint) onHint(countTimeParts(formatted) > 2);
       /**
        * The re-render waits for the click that caused this blur to finish.
        *
@@ -1534,13 +1635,13 @@ function timeField({ value, placeholder, onCommit, onHint, rerender }) {
        * to nothing - "I type a time, click Add a point, and nothing happens". Nothing is lost by waiting, because the
        * model was already written above.
        */
-      afterCurrentInteraction(() => onCommit(normalised, { rerender: true }));
+      afterCurrentInteraction(() => onCommit(formatted, { rerender: true }));
     },
-    onchange: (e) => onCommit(normaliseTimeText(e.target.value), { rerender: false }),
-    // Enter is what a person presses when done typing, and here it should behave like leaving the field
-    onkeydown: (e) => { if (e.key === 'Enter') { e.preventDefault(); e.target.blur(); } },
+    onchange: (e) => onCommit(formatTimeDigits(e.target.value), { rerender: false }),
+    // A paste of '09:30:05' goes through `input`, where the separators are stripped and regenerated in place
+    onpaste: () => { /* handled by `input` */ },
   });
-  void rerender;
+  void placeholder; void rerender;
   return input;
 }
 

@@ -219,8 +219,8 @@ The version lives in four files that different consumers read, so a partial bump
 and a filename that disagree. Use the script:
 
 ```
-scripts/bump-version.sh 1.16.0     # package.json, src/manifest.json, options page, README
-git tag v1.16.0 && git push --tags # the release workflow attaches the zips
+scripts/bump-version.sh 1.17.0     # package.json, src/manifest.json, options page, README
+git tag v1.17.0 && git push --tags # the release workflow attaches the zips
 ```
 
 ---
@@ -236,9 +236,9 @@ https://github.com/DrogonKing/autoflow/releases/latest
 Direct downloads (once the repo is public, or with access to it):
 
 ```
-.../releases/download/v1.16.0/autoflow-chrome.zip     Chrome, Edge, Brave, Opera
-.../releases/download/v1.16.0/autoflow-firefox.zip    Firefox
-.../releases/download/v1.16.0/autoflow-source.zip     full source, tests included
+.../releases/download/v1.17.0/autoflow-chrome.zip     Chrome, Edge, Brave, Opera
+.../releases/download/v1.17.0/autoflow-firefox.zip    Firefox
+.../releases/download/v1.17.0/autoflow-source.zip     full source, tests included
 ```
 
 ### Which file do I download?
