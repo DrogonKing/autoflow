@@ -12,6 +12,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import { evaluateCondition } from '../src/core/engine/conditions.js';
+import { validateCondition } from '../src/core/model/steps.js';
 
 /** A host that behaves like the real one: the page cannot answer a variable. */
 const pageHost = () => ({
@@ -76,24 +77,32 @@ describe('variable conditions', () => {
 });
 
 describe('a js condition source', () => {
-  it('does NOT execute code - it is inert data', async () => {
-    // `steps.js` validates that `c.js` is present when source is 'js', so a user CAN author one. Nothing
-    // evaluates it: conditions.js routes it through ctx.read, and the page returns null for it. This test
-    // pins that behaviour so it is a decision rather than an accident.
-    let executed = false;
-    const evil = 'executed = true; return "pwned"';
-    const vars = {};
-    const result = await evaluateCondition(
-      { source: 'js', js: evil, comparator: 'eq', value: 'pwned' },
-      {
-        vars,
-        read: (c) => {
-          if (c.source === 'js') return { value: null, found: false, flags: {} };
-          return { value: null, found: false, flags: {} };
-        },
-      },
-    );
-    expect(executed).toBe(false);
-    expect(result).toBe(false);
+  /**
+   * THE PREVIOUS VERSION OF THIS TEST WAS THE HAZARD, WRITTEN DOWN.
+   *
+   * It asserted that a `source: 'js'` condition "does NOT execute code - it is inert data", on the grounds that nothing
+   * evaluates it today. That is not a safety property, it is a description of the current code: a saved automation could
+   * carry a script condition, and any future path that read it would execute it. The security scan flags the ACCEPTANCE of
+   * that source as critical, and it is right - the door being open is the finding, whether or not anyone walked through it.
+   *
+   * The source is gone from the model now. A file written against the old shape is refused with a message that says what
+   * to do instead.
+   */
+  it('is REFUSED by validation, so a file cannot carry one', async () => {
+    let threw = null;
+    try {
+      validateCondition({ source: 'js', js: 'return 1', comparator: 'eq', value: '1' });
+    } catch (e) { threw = e; }
+    expect(threw, 'a js condition was accepted').toBeTruthy();
+    // either message is correct - what matters is that it is REFUSED and says something useful
+    expect(String(threw.message)).toMatch(/cannot run a script|unknown condition source/i);
+  });
+
+  it('and the model no longer lists it as a source', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { resolve } = await import('node:path');
+    const src = readFileSync(resolve(process.cwd(), 'src/core/model/steps.js'), 'utf8');
+    const list = /const sources = \[([^\]]+)\]/.exec(src)?.[1] ?? '';
+    expect(list, 'js is still an accepted condition source').not.toMatch(/'js'/);
   });
 });

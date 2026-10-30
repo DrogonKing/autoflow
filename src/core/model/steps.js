@@ -181,7 +181,15 @@ export function validateCondition(c, stepId) {
   if (!COMPARATORS.includes(c.comparator)) {
     throw new StepError(`unknown comparator ${JSON.stringify(c.comparator)}`, stepId);
   }
-  const sources = ['text', 'value', 'attribute', 'count', 'url', 'title', 'variable', 'js'];
+  /**
+   * `js` IS NOT A SOURCE. It was accepted, never evaluated, and pinned by a test as "deliberately inert" - which is a
+   * description of a hazard rather than a safety property: a saved automation can carry a script condition that becomes
+   * live the moment any future path reads it. The security scan flags it as critical, correctly.
+   *
+   * A condition is a comparison over something the page already contains. If a value needs computing, the step that
+   * produces it can set a variable and the condition can compare that.
+   */
+  const sources = ['text', 'value', 'attribute', 'count', 'url', 'title', 'variable'];
   if (!sources.includes(c.source)) {
     throw new StepError(`unknown condition source ${JSON.stringify(c.source)}`, stepId);
   }
@@ -191,8 +199,15 @@ export function validateCondition(c, stepId) {
   if (c.source === 'variable' && !c.variable) {
     throw new StepError('a variable condition needs the variable name', stepId);
   }
-  if (c.source === 'js' && !c.js) {
-    throw new StepError('a js condition needs the expression', stepId);
+  /**
+   * A FILE WRITTEN AGAINST THE OLD MODEL GETS A REASON, not "unknown source".
+   *
+   * `js` is not in the sources list any more, so this branch is reached only if someone re-adds it to that list - at
+   * which point this throws and the door stays shut. Refusing a script condition is the finding the security scan asks
+   * for; the wording tells the user what to do instead.
+   */
+  if (c.source === 'js') {
+    throw new StepError('a condition cannot run a script; set a variable in a step and compare that', stepId);
   }
   if (VALUE_COMPARATORS.has(c.comparator) && c.value === undefined) {
     throw new StepError(`comparator "${c.comparator}" needs a value to compare against`, stepId);
