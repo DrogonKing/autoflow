@@ -107,7 +107,7 @@ console.log('--- 1. the time field accepts TYPED input ---');
   });
   await panel.waitForTimeout(600);
 
-  const field = panel.locator('main input[type="time"]').first();
+  const field = panel.locator('main input.time-input').first();
   const exists = await field.count();
   check('a time field is present', exists > 0, `${exists}`);
 
@@ -126,7 +126,7 @@ console.log('--- 1. the time field accepts TYPED input ---');
     await field.press('Tab');
     await panel.waitForTimeout(500);
     const afterBlur = await panel.evaluate(() => {
-      const input = document.querySelector('main input[type="time"]');
+      const input = document.querySelector('main input.time-input');
       const preview = document.querySelector('.preview-label')?.textContent ?? null;
       return { value: input?.value ?? null, preview };
     });
@@ -152,15 +152,31 @@ console.log('--- 1. the time field accepts TYPED input ---');
     check('the schedule preview reflects the typed time once it settles',
       /08:45:52|8:45:52/.test(settled ?? ''), settled);
 
-    // the fix must be present in BOTH editors: oninput updates the model and onblur re-renders, so no re-render
-    // happens between keystrokes. Read it out of the built panel, not out of the source.
+    /**
+     * THE PROPERTIES THAT MATTER, read out of the BUILT panel rather than the source.
+     *
+     * The earlier version counted `oninput` handlers and required two - one per editor. That was right when the two
+     * editors each carried their own copy of the field, and it is exactly the duplication that let them drift apart
+     * ("Pick" in one, "Pick & record" in the other) and that made the Persian-digit fix need applying twice. There is
+     * now ONE shared `timeField`, so ONE handler is the correct count and requiring two would be asserting the bug.
+     *
+     * What is asserted instead is what the control must be, whichever way it is built:
+     *   - it is a text field, because a native time input discards Persian and Arabic-Indic digits outright
+     *   - it normalises those digits
+     *   - it is left-to-right, so `09:00:00` does not render as `00:00:90` in the Persian interface
+     *   - and it updates the model on `input`, so no re-render happens between keystrokes
+     */
     const { readFileSync } = await import('node:fs');
     const built = readFileSync(path.join(ROOT, 'dist', 'panel.js'), 'utf8');
     const oninputCount = (built.match(/oninput:/g) ?? []).length;
-    const onchangeOnTime = (built.match(/type:"time"[^}]{0,200}?onchange:/g) ?? []).length
-      + (built.match(/type: 'time'[^}]{0,200}?onchange:/g) ?? []).length;
-    console.log(`  built panel: ${oninputCount} oninput handlers`);
-    check('the built panel wires oninput for typed input', oninputCount >= 2, `${oninputCount}`);
+    const hasNativeTimeInput = /type:\s*['"]time['"]/.test(built);
+    const normalises = /06F0|06f0/.test(built);          // the Persian digit range, however it is escaped
+    console.log(`  built panel: ${oninputCount} oninput handler(s), native time input: ${hasNativeTimeInput}`);
+    check('the built panel updates the model on input', oninputCount >= 1, `${oninputCount}`);
+    check('there is NO native time input in the built panel - it deletes Persian digits',
+      hasNativeTimeInput === false, `found type="time" in dist/panel.js`);
+    check('the digit normalisation is present in the built panel', normalises === true,
+      'no Persian digit range found in dist/panel.js');
   }
 }
 
@@ -186,25 +202,47 @@ console.log('\n--- 2. the Basic tab ---');
   await panel.waitForTimeout(700);
 
   const shape = await panel.evaluate(() => {
-    const timeInput = document.querySelector('main input[type="time"]');
+    const timeInput = document.querySelector('main input.time-input');
     const buttons = [...document.querySelectorAll('main button')].map((b) => b.textContent.trim());
     return {
       hasTime: !!timeInput,
       timeValue: timeInput?.value ?? null,
-      hasStep: timeInput?.getAttribute('step') ?? null,
+      /**
+       * SECONDS ARE EXPRESSED BY THE VALUE, not by a `step` attribute.
+       *
+       * The field used to be `<input type="time" step="1">`, where `step: 1` was what made the seconds part exist. It is
+       * now our own text field, because the native control DISCARDS Persian and Arabic-Indic digits - measured:
+       * `input.value = '۰۸:۴۵:۵۲'` leaves `value === ''`. So "has seconds" is asserted the way it now means: the value
+       * carries a third part.
+       */
+      hasSeconds: (timeInput?.value ?? '').split(':').length === 3,
+      isText: timeInput?.type === 'text',
+      ltr: timeInput?.dir === 'ltr',
       buttons,
       pointRows: document.querySelectorAll('main .step').length,
     };
   });
-  console.log(`  time=${shape.timeValue} step=${shape.hasStep} points=${shape.pointRows}`);
+  console.log(`  time=${shape.timeValue} seconds=${shape.hasSeconds} points=${shape.pointRows}`);
   console.log(`  buttons: ${JSON.stringify(shape.buttons)}`);
-  check('the Basic tab has a time field with seconds', shape.hasTime && shape.hasStep === '1', JSON.stringify(shape));
+  check('the Basic tab has a time field with seconds', shape.hasTime && shape.hasSeconds === true,
+    JSON.stringify(shape));
+  /**
+   * And it is deliberately NOT a native time input.
+   *
+   * A `<input type="time">` sets its own value to the empty string when given Persian digits, so a Persian keyboard
+   * produced an `input` event carrying nothing and the time never reached the model. This assertion is what stops the
+   * control being "simplified" back to the native one.
+   */
+  check('the time field is a text field, not the native one that deletes Persian digits',
+    shape.isText === true, `type=${shape.isText}`);
+  check('and it is laid out left-to-right so 09:00:00 does not render as 00:00:90', shape.ltr === true,
+    `dir=${shape.ltr}`);
   check('it starts with one click point', shape.pointRows === 1, `${shape.pointRows}`);
   check('there is a + to add a point', shape.buttons.some((b) => /^\+\s/.test(b)), JSON.stringify(shape.buttons));
   check('there is a Save', shape.buttons.some((b) => /save|ذخیره/i.test(b)), JSON.stringify(shape.buttons));
 
   // type a time in the Basic tab
-  const t2 = panel.locator('main input[type="time"]').first();
+  const t2 = panel.locator('main input.time-input').first();
   await t2.click();
   await t2.press('Control+a');
   await t2.type('09:15:30', { delay: 60 });
@@ -275,7 +313,7 @@ console.log('\n--- 4. saving from Basic creates a real automation that the full 
   // type the time HERE, in the same visit as the save: that is the real flow the user described (enter the time,
   // pick the points, save). Typing it in an earlier section and navigating away discards it, which is correct for a
   // form whose working copy is not the saved record.
-  const timeField = panel.locator('main input[type="time"]').first();
+  const timeField = panel.locator('main input.time-input').first();
   await timeField.click();
   await timeField.press('Control+a');
   await timeField.type('09:15:30', { delay: 55 });

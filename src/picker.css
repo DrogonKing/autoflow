@@ -120,6 +120,31 @@ button.primary:hover { background: var(--accent-dim); }
 .hint.saved-note { color: #2ea043; }
 
 /**
+ * The Pick control, and the state it is in.
+ *
+ * Two problems solved together: a pick in progress had no visible sign in the panel and no way out. The button now
+ * says it is picking, and the ✕ beside it is the way back - which matters because a pick started by mistake otherwise
+ * had no exit except clicking an element, and that element was then recorded.
+ */
+.pick-wrap { display: inline-flex; align-items: center; gap: 4px; }
+button.pick.picking {
+  background: #7a4a00; border-color: #f0883e; color: #ffd7a8;
+  animation: af-pick-pulse 1.4s ease-in-out infinite;
+}
+@keyframes af-pick-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(240, 136, 62, 0.5); }
+  50%      { box-shadow: 0 0 0 5px rgba(240, 136, 62, 0); }
+}
+button.cancel-pick { border-color: #f0883e; color: #f0883e; }
+button.cancel-pick:hover { background: #3a2a16; }
+@media (prefers-reduced-motion: reduce) {
+  button.pick.picking { animation: none; }
+}
+
+/** A pick that landed, for a moment - the same confirmation the Save button gives. */
+button.pick.picked { background: #2ea043; border-color: #2ea043; color: #fff; }
+
+/**
  * The moment after Save, stated for EVERY pointer state and placed AFTER :hover.
  *
  * MEASURED FAILURE, and it made the whole feature invisible: `button.primary:hover` has the same specificity as

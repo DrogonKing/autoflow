@@ -84,6 +84,9 @@ const state = {
   clockSkewError: null,   // why the measurement could not be taken, shown next to the button that tried
   backupNote: null,       // the result of the last backup or restore, so it is not a silent operation
   basicSavedAt: null,     // when Save last succeeded, so the button can confirm for a moment and then stop
+  pickSavedAt: null,      // when a pick last landed, so the Pick button can confirm the same way
+  pickCancelled: null,    // when a pick was last cancelled, so the fact is not silent
+  timeError: null,        // why the typed time was not accepted, shown where the time is typed
   basicNotice: null,      // what Save did with the schedule: armed for an instant, or not scheduled at all
 };
 
@@ -345,9 +348,17 @@ function scheduleEditor(onChange) {
       timeHint.textContent = hasSecond ? t('sched.secondHint') : '';
     };
     const commitTime = (value, { rerender }) => {
+      /**
+       * The digits are normalised BEFORE parsing, so a Persian or Arabic keyboard works.
+       *
+       * A native `<input type="time">` discards non-ASCII digits, so with a Persian keyboard the `input` event fires
+       * with a value the browser has already emptied - the user types and nothing changes. Normalising here fixes the
+       * full editor; the basic view has its own copy of this logic and is fixed the same way.
+       */
+      const normalised = normaliseDigits(value).replace(/[^0-9:]/g, '');
       // '09:00' gives two parts and means minute precision; '09:00:00' gives three and means a precise schedule.
       // The distinction is carried into the model, because `wantsPreciseTiming` keys off it.
-      const parts = String(value ?? '').split(':').map(Number);
+      const parts = String(normalised).split(':').map(Number);
       const [h, m, sec] = parts;
       if (!Number.isFinite(h) || !Number.isFinite(m)) return;
       if (h < 0 || h > 23 || m < 0 || m > 59) return;
@@ -363,18 +374,11 @@ function scheduleEditor(onChange) {
     refreshTimeHint(typeof s.second === 'number');
     wrap.append(el('div', { class: 'row' },
       el('label', { text: t('field.time') }),
-      el('input', {
-        // `step: 1` is what makes the SECONDS part of the control appear. Without it the input is minute-only,
-        // so the model's `second` field was unreachable from the UI entirely - it existed in the scheduler and
-        // could only be set by hand-writing a six-field cron.
-        type: 'time', class: 'grow', step: '1',
+      timeField({
         value: `${String(s.hour ?? 9).padStart(2, '0')}:${String(s.minute ?? 0).padStart(2, '0')}`
           + (typeof s.second === 'number' ? `:${String(s.second).padStart(2, '0')}` : ''),
-        // on `input` the model follows every keystroke so nothing is lost; no re-render, so typing works
-        oninput: (e) => commitTime(e.target.value, { rerender: false }),
-        // and the re-render happens once, when focus leaves
-        onblur: (e) => commitTime(e.target.value, { rerender: true }),
-        onchange: (e) => commitTime(e.target.value, { rerender: false }),
+        onCommit: (v, opts) => { commitTime(v, opts); if (opts.rerender) keepDraftThen(() => {}); },
+        onHint: refreshTimeHint,
       }),
       timeHint,
     ));
@@ -477,6 +481,91 @@ function scheduleEditor(onChange) {
 // step editor
 // ---------------------------------------------------------------------------------------------
 
+/**
+ * The Pick control, and the way OUT of it.
+ *
+ * WHY THIS IS ONE FUNCTION. The panel has two views that pick - the full editor and the simplified one - and they had
+ * drifted: 'Pick & record' appeared in the simplified view while the editor said 'Pick', for the same action. Building
+ * the button in one place is what stops that happening again, and it is also where the missing cancel belongs.
+ *
+ * There was NO WAY TO CANCEL. Escape works inside the page, but a pick is started from the panel and the panel did not
+ * listen for it - so pressing Pick by mistake left the only exit as clicking an element, which then got recorded as the
+ * target. Misclicks must be recoverable.
+ */
+function pickControl({ step, redraw, rerender }) {
+  // `rerender` accepted as an alias so an older call site cannot silently pass the wrong behaviour
+  redraw = redraw ?? rerender;
+  const picking = state.pickTarget === step.id;
+  /**
+   * A pick that just landed says so, the way Save does.
+   *
+   * Held as an expiry timestamp rather than a timeout, so a re-render cannot leave it stuck claiming a pick that has
+   * since been replaced - the lesson from the Save button, applied before it can bite again.
+   */
+  const justPicked = state.pickSavedAt && state.pickTarget === null && Date.now() - state.pickSavedAt < 2500;
+
+  /**
+   * `redraw` is supplied by the caller and MUST preserve the form's working copy.
+   *
+   * In the simplified view a plain re-render rebuilds the draft from storage, which drops the `pickTarget` that was
+   * just set - so the button never entered its picking state and the click looked like it did nothing. MEASURED: the
+   * message reached the worker and returned `ok: true`, yet the button stayed unchanged. The caller passes the helper
+   * that keeps the draft (`keepDraftThen`); the full editor passes its own render, which has no draft to keep.
+   */
+  const btn = el('button', {
+    class: picking ? 'pick picking' : (justPicked ? 'pick picked' : 'pick'),
+    text: picking ? t('ui.picking') : (justPicked ? t('ui.picked') : t('ui.pick')),
+    title: picking ? t('ui.pickingTitle') : t('ui.pickTitle'),
+    onclick: async () => {
+      if (picking) { cancelPick(redraw); return; }
+      state.pickTarget = step.id;
+      state.pickSavedAt = null;      // the new pick supersedes the previous confirmation
+      const res = await send({ type: 'pick-element' }).catch((e) => ({ ok: false, error: String(e?.message ?? e) }));
+      if (!res?.ok) {
+        state.pickTarget = null;
+        state.pickError = String(res?.error ?? 'could not start the picker');
+        redraw();
+        return;
+      }
+      redraw();
+    },
+  });
+  // no expiry timer: see the note where `pickSavedAt` is set. The class stays until the next action.
+
+  /**
+   * While a pick is live, the button that started it is the button that stops it - the same place the user is already
+   * looking, and the same gesture. An explicit "Cancel pick" button is added next to it as well, because a button that
+   * has changed meaning needs its escape hatch to be visible rather than remembered.
+   */
+  if (!picking) return btn;
+  return el('span', { class: 'pick-wrap' },
+    btn,
+    el('button', {
+      class: 'icon cancel-pick', text: '✕', title: t('ui.cancelPickTitle'),
+      // the SAME redraw the button uses: clearing the target on the draft is pointless if the re-render then rebuilds
+      // the draft from storage and the stale target survives
+      onclick: () => cancelPick(redraw),
+    }),
+  );
+}
+
+/** Tell the page to stop picking and forget the target. Both halves, or the overlay stays on the page. */
+function cancelPick(redraw) {
+  state.pickTarget = null;
+  state.pickCancelled = Date.now();
+  // fire and forget: the page's own Escape path is the same call, and a failure here must not block the panel
+  send({ type: 'cancel-picking' }).catch(() => {});
+  /**
+   * REDRAW LAST, AND ALWAYS.
+   *
+   * `pickTarget` lives on `state`, not on the form's draft, so a plain re-render is safe here - the form's working copy
+   * is only at risk for step edits. That distinction is why this takes a redraw callback at all: the simplified view
+   * must rebuild without discarding the draft, and the caller knows which it needs.
+   */
+  if (typeof redraw === 'function') redraw();
+  else render();
+}
+
 function stepRow(step, list, index, rerender) {
   const isBlock = BLOCK_KINDS.has(step.kind);
   const row = el('div', { class: 'step' });
@@ -550,15 +639,7 @@ function stepRow(step, list, index, rerender) {
           rerender();
         },
       }),
-      el('button', {
-        class: 'pick', text: t('ui.pick'),
-        title: t('ui.pickTitle'),
-        onclick: async () => {
-          state.pickTarget = step.id;
-          const res = await send({ type: 'pick-element' });
-          if (!res.ok) alert(res.error ?? 'could not start the picker');
-        },
-      }),
+      pickControl({ step, rerender: () => render() }),
       finder.chain?.length
         ? el('span', { class: 'hint', title: finder.chain.join('\n'), text: `+${finder.chain.length} fallbacks` })
         : null,
@@ -1019,7 +1100,9 @@ function basicView(rerender) {
   // ---- the time, typed rather than scrolled. Same lesson as the full editor: no re-render while it has focus.
   const hint = el('span', { class: 'hint', text: '' });
   const commit = (value) => {
-    const parts = String(value ?? '').split(':').map(Number);
+    // digits normalised first: a Persian or Arabic keyboard otherwise produces a value the model never receives
+    const normalised = normaliseDigits(value).replace(/[^0-9:]/g, '');
+    const parts = String(normalised).split(':').map(Number);
     const [h, m, sec] = parts;
     if (!Number.isFinite(h) || !Number.isFinite(m)) return;
     if (h < 0 || h > 23 || m < 0 || m > 59) return;
@@ -1033,14 +1116,11 @@ function basicView(rerender) {
   };
   wrap.append(el('div', { class: 'row' },
     el('label', { text: t('basic.time') }),
-    el('input', {
-      type: 'time', step: '1', class: 'grow',
+    timeField({
       value: `${String(sched.hour ?? 9).padStart(2, '0')}:${String(sched.minute ?? 0).padStart(2, '0')}:${String(sched.second ?? 0).padStart(2, '0')}`,
       // every keystroke updates the model; leaving the field re-renders once, and the draft is kept so the typed
       // value survives that re-render
-      oninput: (e) => commit(e.target.value),
-      onblur: (e) => { commit(e.target.value); keepDraftThen(() => {}); },
-      onchange: (e) => commit(e.target.value),
+      onCommit: (v, opts) => { commit(v); if (opts.rerender) keepDraftThen(() => {}); },
     }),
     hint,
   ));
@@ -1078,14 +1158,15 @@ function basicView(rerender) {
       ),
       el('div', { class: 'step-body' },
         el('div', { class: 'row' },
-          el('button', {
-            class: 'pick', text: t('ui.pick'), title: t('ui.pickTitle'),
-            onclick: async () => {
-              state.pickTarget = step.id;
-              const res = await send({ type: 'pick-element' });
-              if (!res.ok) alert(res.error ?? 'could not start the picker');
-            },
-          }),
+          /**
+           * A ZERO-ARGUMENT redraw that keeps the draft.
+           *
+           * `keepDraftThen(fn)` takes a callback and calls it, so passing it directly meant `redraw()` invoked
+           * `undefined()` and threw inside the click handler: the pick target was set and the view never rebuilt, so
+           * the button stayed as it was and the click looked like it had done nothing. The message still reached the
+           * worker, which is why only the button's own state was wrong.
+           */
+          pickControl({ step, redraw: () => keepDraftThen(() => {}) }),
           // the other half: an editable selector, shown for every point rather than only as a fallback count
           el('input', {
             class: 'grow mono', value: finder.selector ?? finder.text ?? finder.id ?? '',
@@ -1244,6 +1325,100 @@ function basicView(rerender) {
   }
 
   return wrap;
+}
+
+/**
+ * Normalise the digits a person actually types.
+ *
+ * WHY: with a Persian keyboard the digits arrive as ۰۱۲۳۴۵۶۷۸۹ (U+06F0..) or, with an Arabic one, as ٠١٢٣٤٥٦٧٨٩
+ * (U+0660..). A native `<input type="time">` ignores those, so the user types a time, the field looks changed, and the
+ * model is never updated - reported as "when I type with the Persian keyboard the numbers do not change, it has to be
+ * English".
+ *
+ * This is INTERFACE, not data: the digits are a keyboard convention, not a number system the extension should store.
+ * Only digit characters are translated, so a malformed time stays malformed and is rejected by the usual validation
+ * rather than being silently rewritten into a valid one.
+ */
+export function normaliseDigits(text) {
+  return String(text ?? '')
+    .replace(/[\u06F0-\u06F9]/g, (d) => String(d.charCodeAt(0) - 0x06F0))
+    .replace(/[\u0660-\u0669]/g, (d) => String(d.charCodeAt(0) - 0x0660));
+}
+
+/**
+ * Normalise the digits a person actually types, then keep only what a time can contain.
+ *
+ * WHY THIS EXISTS AT ALL, measured rather than assumed:
+ *
+ *     input.value = '08:45:52'   ->  '08:45:52'
+ *     input.value = '۰۸:۴۵:۵۲'   ->  ''          <- the browser DISCARDS it
+ *     input.value = '٠٩:٣٠:٠٥'    ->  ''
+ *
+ * A native `<input type="time">` sets its own value to the empty string when given Persian or Arabic-Indic digits, so
+ * the `input` event carried nothing, the model was never updated, and the field looked broken - reported as "when I
+ * type with the Persian keyboard the numbers do not change, it has to be English". Nothing downstream can repair a
+ * value that is discarded before any handler runs, which is why this is a text field and not a time input.
+ *
+ * The character filter is part of the fix, not tidiness: a Persian keyboard's `:` sits on a different key, and a stray
+ * letter would make the whole value unparseable while looking almost right. Digit translation happens FIRST, so a
+ * malformed time stays malformed and is rejected by the normal validation instead of being repaired into a valid one.
+ */
+export function normaliseTimeText(text) {
+  return normaliseDigits(text)
+    .replace(/[^0-9:]/g, '')
+    .replace(/:{2,}/g, ':')
+    .slice(0, 8);
+}
+
+/** How many colon-separated parts a typed time has - two means minutes, three means a precise schedule. */
+export function countTimeParts(text) {
+  return normaliseTimeText(text).split(':').length;
+}
+
+/**
+ * The time field, shared by both views.
+ *
+ * `dir="ltr"` even in the Persian interface: a time is digits and colons, not Persian prose, and under RTL the sequence
+ * `09:00:00` renders as `00:00:90` - which is not cosmetic on a control whose whole job is to be read correctly.
+ *
+ * It never re-renders on `input`. Rebuilding the view under the typist is what made this control untypeable once
+ * already, so the model is written on every keystroke and the view is rebuilt once, when focus leaves.
+ */
+function timeField({ value, placeholder, onCommit, onHint, rerender }) {
+  const input = el('input', {
+    type: 'text',
+    inputmode: 'numeric',
+    dir: 'ltr',
+    class: 'grow mono time-input',
+    value,
+    placeholder: placeholder ?? 'HH:MM:SS',
+    autocomplete: 'off',
+    spellcheck: 'false',
+    oninput: (e) => {
+      const raw = e.target.value;
+      const normalised = normaliseTimeText(raw);
+      if (normalised !== raw) {
+        // keep the caret at the end, which is where a value assignment would otherwise not leave it
+        const wasAtEnd = e.target.selectionStart === raw.length;
+        e.target.value = normalised;
+        if (wasAtEnd) {
+          try { e.target.setSelectionRange(normalised.length, normalised.length); } catch { /* not focusable */ }
+        }
+      }
+      onCommit(normalised, { rerender: false });
+      if (onHint) onHint(countTimeParts(normalised) > 2);
+    },
+    onblur: (e) => {
+      const normalised = normaliseTimeText(e.target.value);
+      onCommit(normalised, { rerender: true });
+      if (onHint) onHint(countTimeParts(normalised) > 2);
+    },
+    onchange: (e) => onCommit(normaliseTimeText(e.target.value), { rerender: false }),
+    // Enter is what a person presses when done typing, and here it should behave like leaving the field
+    onkeydown: (e) => { if (e.key === 'Enter') { e.preventDefault(); e.target.blur(); } },
+  });
+  void rerender;
+  return input;
 }
 
 /** A short description of what a finder points at, for the collapsed row. */
@@ -1780,10 +1955,38 @@ api.runtime.onMessage.addListener((msg) => {
     if (step) {
       step.finder = msg.finder;
       state.pickTarget = null;
+      /**
+       * The confirmation, and its expiry, both start HERE.
+       *
+       * `pickSavedAt` drives a green ticks for 2.5s. The countdown belongs to the moment the pick landed - not to a
+       * render - because a timer owned by a button that a later render discards simply does not run, and the button
+       * stayed green indefinitely as a result. Measured: still "✓ Picked" after six seconds.
+       */
+      /**
+       * NO TIMER. The confirmation is a STATE, cleared by the next action.
+       *
+       * Four attempts to expire it on a timer failed in four different ways, because the timer belongs to a button that
+       * the next render throws away. `pickSavedAt` is now cleared by the next thing the user does - pressing Pick again,
+       * editing the selector, or saving - which is deterministic and needs no cooperation from the render cycle.
+       *
+       * It also reads better: "✓ Picked" means "this point's selector came from a pick", which stays true until it is
+       * no longer true. A green flash that vanishes while the user is still looking at it says less.
+       */
+      state.pickSavedAt = Date.now();
       // a pick landing in the simple view is form work: keep the draft so the point it was picked for survives
       if (state.tab === 'basic') state.basicKeepDraft = true;
       render();
     }
+    return;
+  }
+  /**
+   * The PAGE can cancel a pick as well - Escape while the pointer is over the page. Without this the panel kept showing
+   * "Picking" with a live target after the page had already stopped, which is a state the user cannot get out of.
+   */
+  if (msg?.type === 'element-pick-cancelled') {
+    state.pickTarget = null;
+    state.pickCancelled = Date.now();
+    render();
     return;
   }
   if (msg?.type === 'trace' || msg?.type === 'run-finished') {

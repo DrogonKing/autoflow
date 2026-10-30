@@ -1104,10 +1104,34 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       }
 
       case 'pick-element': {
-        const tab = (await api.tabs.query({ active: true, currentWindow: true }))[0];
-        if (!tab?.id) throw new Error('no active tab');
-        await sendToTab(tab.id, { type: 'start-picking' });
-        return { ok: true };
+        /**
+         * NEVER PICK IN OURSELVES.
+         *
+         * The active tab is the PANEL when the panel is opened as a tab, or when it is the only tab in its window - and
+         * `start-picking` then went to the panel, which has no picker. The panel showed "Picking…" while nothing
+         * anywhere responded, and the only exit was to click something, which recorded nothing useful.
+         *
+         * A page is what can be picked in, so a page is what is looked for: the last-focused real page first, then any
+         * page at all. Reporting "no page" is better than starting a pick that cannot work.
+         */
+        /**
+         * PICKABLE MEANS THE CONTENT SCRIPT CAN RUN THERE.
+         *
+         * "Not our own tab" was too loose: `about:blank`, `chrome://`, `devtools://` and `view-source:` are all not
+         * ours and none of them can host a content script, so a pick aimed at one failed with "Cannot access contents
+         * of url ... Extension manifest must request permission to access this host". Measured, and it is what a
+         * newly-opened tab looks like.
+         *
+         * The condition is now positive - an http(s) or file URL - which is exactly the set where picking is possible.
+         */
+        const canPickIn = (t) => Boolean(t?.id) && /^(https?|file):/i.test(String(t?.url ?? ''));
+        const pages = (await api.tabs.query({})).filter(canPickIn);
+        if (!pages.length) throw new Error('no page to pick from - open the site you want to pick in');
+
+        const active = (await api.tabs.query({ active: true, lastFocusedWindow: true })).filter(canPickIn);
+        const target = active[0] ?? pages[pages.length - 1];
+        await sendToTab(target.id, { type: 'start-picking' });
+        return { ok: true, tabId: target.id, url: target.url };
       }
 
       case 'reschedule': {
@@ -1396,9 +1420,20 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       }
 
       case 'cancel-picking': {
-        const tab = (await api.tabs.query({ active: true, currentWindow: true }))[0];
-        if (tab?.id) api.tabs.sendMessage(tab.id, { type: 'stop-picking' }).catch(() => {});
-        return { ok: true };
+        /**
+         * Cancelling must reach the SAME tab that is picking, and that tab is not necessarily the active one - the user
+         * may have switched tabs since. Asking the page is more reliable than guessing: every content script is told to
+         * stop, and a page that is not picking ignores it.
+         */
+        // the same set the pick could have started in, so a cancel reaches exactly where a pick might be running
+        const pages = (await api.tabs.query({})).filter((t) => Boolean(t?.id)
+          && /^(https?|file):/i.test(String(t?.url ?? '')));
+        let stopped = 0;
+        for (const t of pages) {
+          const res = await api.tabs.sendMessage(t.id, { type: 'stop-picking' }).catch(() => null);
+          if (res?.ok) stopped += 1;
+        }
+        return { ok: true, stopped };
       }
 
       case 'diagnostics': {
