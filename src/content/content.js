@@ -618,7 +618,14 @@ function onPickerClick(e) {
   stopPicking();
   const info = describeElement(target);
   const finder = buildFinder(target);
-  api.runtime.sendMessage({ type: 'element-picked', info, finder }).catch(() => {});
+  /**
+   * THE PAGE TRAVELS WITH THE PICK.
+   *
+   * The worker stores it per automation, because a Basic automation has no URL pattern and a scheduled run needs a page
+   * to go to. Measured: without this, a scheduled Basic automation reported "no URL pattern, so a scheduled run has no
+   * safe tab" and clicked nothing. The content script knows its own location, so it says so.
+   */
+  api.runtime.sendMessage({ type: 'element-picked', info, finder, url: location.href }).catch(() => {});
 }
 
 function onPickerKey(e) {

@@ -546,7 +546,16 @@ function pickControl({ step, redraw, rerender }) {
       state.pickTarget = step.id;
       state.pickSavedAt = null;      // the new pick supersedes the previous confirmation
       state.pickSavedFor = null;
-      const res = await send({ type: 'pick-element' }).catch((e) => ({ ok: false, error: String(e?.message ?? e) }));
+      /**
+       * SAY WHICH AUTOMATION THIS PICK IS FOR.
+       *
+       * The worker records the page a pick came from against an automation, and this is the only moment anything knows
+       * the pairing: a Basic automation has no URL pattern, so without it a scheduled run has no page to go to - measured
+       * in the user's own export ("no URL pattern, so a scheduled run has no safe tab").
+       */
+      const owner = state.basic?.steps?.some((s) => s.id === step.id) ? state.basic : state.editing;
+      const res = await send({ type: 'pick-element', automationId: owner?.id ?? null })
+        .catch((e) => ({ ok: false, error: String(e?.message ?? e) }));
       if (!res?.ok) {
         state.pickTarget = null;
         state.pickError = String(res?.error ?? 'could not start the picker');
@@ -1740,6 +1749,8 @@ function automationsView(rerender) {
       class: 'grow', text: t('nav.pickAndRecord'),
       title: t('hint.pickTitleLong'),
       onclick: async () => {
+        // no automation is named here: this button is "pick something and see what it is", so there is nothing to record
+        // the page AGAINST. The per-step Pick button is the one that teaches an automation where its page is.
         const res = await send({ type: 'pick-element' });
         if (!res.ok) alert(res.error ?? 'could not start the picker');
       },
@@ -2296,6 +2307,24 @@ api.runtime.onMessage.addListener((msg) => {
     const step = inEditing ?? inBasic ?? null;
     if (step) {
       step.finder = msg.finder;
+      /**
+       * REMEMBER WHICH PAGE THIS CAME FROM.
+       *
+       * A Basic automation's form never asks for a URL, so a scheduled run had no page to go to and refused to run
+       * ("no URL pattern, so a scheduled run has no safe tab" - the user's export, 1.19.0). The page is known right
+       * here: the user is looking at it, and the pick came from it. The worker stores it per automation and uses it only
+       * when nothing better is known.
+       *
+       * `msg.url` is supplied by the content script; when it is absent the panel asks the worker for the tab it picked
+       * in, so an older content script cannot silently drop the record.
+       */
+      const target = inBasic ? state.basic : state.editing;
+      if (target?.id) {
+        const pageUrl = msg.url ?? state.pickPageUrl ?? null;
+        if (typeof pageUrl === 'string') {
+          send({ type: 'remember-pick-page', automationId: target.id, url: pageUrl }).catch(() => {});
+        }
+      }
       state.pickTarget = null;
       /**
        * The confirmation, and its expiry, both start HERE.

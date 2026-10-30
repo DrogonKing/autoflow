@@ -772,9 +772,34 @@ api.alarms.onAlarm.addListener(async (alarm) => {
        * tab` before it claims the slot. A scheduled run is the case that must NOT guess: nobody is watching, so a click
        * on an unrelated page is worse than no click.
        */
+      /**
+       * THE PAGE THIS AUTOMATION WAS BUILT ON, if nothing better is known.
+       *
+       * MEASURED (user's log): a Basic automation - whose form never asks for a URL - failed with "no URL pattern, so a
+       * scheduled run has no safe tab" and clicked nothing. Removing the active-tab fallback was right (B5: it delivered
+       * clicks to an unrelated site) but it left this case with no answer at all.
+       *
+       * The remembered page is not a guess: it is the page the user was looking at when they picked the element this
+       * automation clicks. It is only consulted AFTER the patterns have been tried, and only as a last resort.
+       */
+      const remembered = (await getSettings().catch(() => ({})))?.lastPickPages?.[id];
+      if (typeof remembered === 'string' && /^(https?|file):/i.test(remembered)) {
+        const open = (await api.tabs.query({})).find((t) => t.url === remembered);
+        if (open?.id) {
+          tabId = open.id;
+          recordEvent({ kind: 'tab-from-memory', automationId: id, url: remembered });
+        } else {
+          const created = await api.tabs.create({ url: remembered, active: false });
+          tabId = created.id;
+          await new Promise((r) => setTimeout(r, 1500));
+          recordEvent({ kind: 'tab-reopened', automationId: id, url: remembered });
+        }
+      }
+    }
+    if (!tabId) {
       throw new Error(patterns.length
         ? `no open tab matches ${patterns.filter((p) => String(p).trim()).join(', ')} - open the site, or give the automation a concrete URL`
-        : 'this automation has no URL pattern, so a scheduled run has no safe tab - add one, or run it by hand');
+        : 'this automation has never had an element picked in it, so a scheduled run has no page - pick one of its steps once, or add a URL');
     }
 
     // For a schedule with a second, the alarm arrived early on purpose. The target instant is recomputed from
@@ -1045,6 +1070,31 @@ api.action.onClicked.addListener(async (tab) => {
  * does. An earlier version of this function tested for the absence of `tab` and therefore classified the
  * panel as unknown and refused every message from its own UI.
  */
+/**
+ * What a CONTENT SCRIPT may ask for. Anything not in this list is refused from a page.
+ *
+ * `remember-pick-page` is deliberately NOT here: it is called by the extension's own panel, and a page must not be able
+ * to change where an automation is pointed.
+ */
+/**
+ * The pick currently in progress, so the page a pick came from can be recorded against the right automation.
+ *
+ * `element-picked` arrives from the content script with no idea which automation it is for - the panel knows, because it
+ * started the pick. Carrying it here is what lets the worker keep the record without the panel being involved.
+ */
+let pendingPick = null;
+
+/** Store the page an automation was built on. Used only when a scheduled run has no URL pattern to go on. */
+async function setPickPage(automationId, url) {
+  if (!automationId || !/^(https?|file):/i.test(String(url ?? ''))) return false;
+  try {
+    const s = await getSettings();
+    const map = { ...(s.lastPickPages ?? {}), [automationId]: String(url) };
+    await saveSettings({ lastPickPages: map });
+    return true;
+  } catch { return false; }
+}
+
 const CONTENT_SCRIPT_MESSAGES = new Set([
   'content-ready',
   'element-picked',
@@ -1112,9 +1162,26 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       case 'content-ready':
         return { ok: true };
 
-      case 'element-picked':
-        api.runtime.sendMessage({ type: 'element-picked', info: msg.info, finder: msg.finder }).catch(() => {});
+      case 'element-picked': {
+        /**
+         * THE WORKER RECORDS THE PAGE ITSELF.
+         *
+         * This is the moment the page is known for certain - the content script is running in it. Recording it here
+         * rather than in the panel means the record survives the panel being closed, which is the normal state when a
+         * schedule fires.
+         *
+         * The automation it belongs to comes from the pick that was started: `pick-element` carries `automationId`, and
+         * `pendingPick` holds it while the user is choosing.
+         */
+        const forAutomation = pendingPick?.automationId ?? null;
+        if (forAutomation && typeof msg.url === 'string') {
+          await setPickPage(forAutomation, msg.url);
+        }
+        pendingPick = null;
+        api.runtime.sendMessage({ type: 'element-picked', info: msg.info, finder: msg.finder, url: msg.url })
+          .catch(() => {});
         return { ok: true };
+      }
 
       /**
        * A CANCELLED PICK MUST REACH THE PANEL (B11).
@@ -1236,6 +1303,35 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         return { ok: true, tabId, page: res };
       }
 
+      /**
+       * THE PAGE A PICK CAME FROM IS REMEMBERED, because a scheduled run has to know where to go.
+       *
+       * MEASURED (user's log, 1.19.0):
+       *
+       *     runs:  basic  step-error  ERROR: this automation has no URL pattern, so a scheduled run has no safe tab
+       *
+       * The Basic form never asks for a URL, so every automation built there had no pattern - and removing the
+       * active-tab fallback (correctly, B5) left those automations unable to run on a schedule at all. The page is
+       * known at the one moment the user is actually pointing at it: when they pick an element in it.
+       */
+      /**
+       * A pick in progress is remembered by the WORKER, not by the panel.
+       *
+       * MEASURED: the first version stored the page from the panel's message handler, so the record only existed while
+       * the panel was open - and the case that matters is a scheduled run with the panel closed. The worker receives the
+       * pick from the content script either way, so the worker is where the record has to live.
+       *
+       * `automationId` is supplied by the panel when it starts the pick, because that is the only moment anything knows
+       * which automation the pick is for.
+       */
+      case 'remember-pick-page': {
+        const id = String(msg.automationId ?? '');
+        if (!id) return { ok: false, error: 'no automationId' };
+        if (!/^(https?|file):/i.test(String(msg.url ?? ''))) return { ok: false, error: 'not a page url' };
+        await setPickPage(id, String(msg.url));
+        return { ok: true };
+      }
+
       case 'pick-element': {
         /**
          * NEVER PICK IN OURSELVES.
@@ -1263,6 +1359,18 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
         const active = (await api.tabs.query({ active: true, lastFocusedWindow: true })).filter(canPickIn);
         const target = active[0] ?? pages[pages.length - 1];
+        /**
+         * WHICH AUTOMATION IS THIS PICK FOR, and the page it is happening in.
+         *
+         * Both are recorded now: the automation from the caller (the panel's Pick button knows its step), and the page
+         * from the tab being picked in. If the pick is cancelled the record is simply overwritten next time, so there is
+         * nothing to undo.
+         */
+        pendingPick = {
+          automationId: typeof msg.automationId === 'string' ? msg.automationId : null,
+          tabId: target.id,
+        };
+        if (pendingPick.automationId) await setPickPage(pendingPick.automationId, target.url);
         await sendToTab(target.id, { type: 'start-picking' });
         return { ok: true, tabId: target.id, url: target.url };
       }
