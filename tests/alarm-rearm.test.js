@@ -143,10 +143,19 @@ describe('B3: the storm guard must not disable the schedule', () => {
      * `service-worker.js`, and what matters is that the branch does not leave without arming. Asserted structurally
      * because a behavioural test needs a live worker, which the browser suite covers separately.
      */
-    // a plain path: `import.meta.url` is not a file: URL under vitest's transform, so `new URL(…, import.meta.url)`
-    // fails with "The URL must be of scheme file"
+    /**
+     * A PATH THAT WORKS ON ANY MACHINE.
+     *
+     * `new URL(…, import.meta.url)` failed under vitest's transform ("The URL must be of scheme file"), so this was
+     * changed to an absolute path - hardcoding `/root/autoflow`, which exists here and nowhere else. CI checked out to
+     * `/home/runner/work/...` and every unit test failed with `EACCES: permission denied`, which looked like a
+     * permissions problem rather than a test that only runs on one machine.
+     *
+     * `process.cwd()` is the repository root under vitest, and is what the other tests already rely on.
+     */
     const { readFileSync } = await import('node:fs');
-    const src = readFileSync('/root/autoflow/src/background/service-worker.js', 'utf8');
+    const { resolve } = await import('node:path');
+    const src = readFileSync(resolve(process.cwd(), 'src/background/service-worker.js'), 'utf8');
     const storm = src.indexOf("kind: 'storm-refused'");
     expect(storm).toBeGreaterThan(0);
 
