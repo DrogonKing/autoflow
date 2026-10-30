@@ -103,7 +103,7 @@ export function findAnchor(el, doc = el?.ownerDocument) {
        * `data-pricing-plan`, `data-loading-key` and `data-setting-id` were all skipped, and a page using any of them
        * as its identifier simply could not be anchored.
        */
-      if (/^(reactid|react-root|data-reactid|v-|ng-|aria-owns)/i.test(a.name)) continue;
+      if (/^(reactid|react-root|data-reactid|data-v-|data-ng-|v-|ng-|aria-owns)/i.test(a.name)) continue;
       // the extension marks the document itself; anchoring to a marker on <html> produces a selector that is
       // positional all the way down while LOOKING anchored, which is worse than no anchor at all
       if (a.name.startsWith('data-autoflow-')) continue;

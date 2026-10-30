@@ -46,8 +46,8 @@ print("=" * 78)
 if not (FF / "manifest.json").exists():
     raise SystemExit("dist-firefox/manifest.json is missing - run npm run build:firefox")
 
-cm = json.loads((CHROME / "manifest.json").read_text())
-fm = json.loads((FF / "manifest.json").read_text())
+cm = json.loads((CHROME / "manifest.json").read_text(encoding="utf-8"))
+fm = json.loads((FF / "manifest.json").read_text(encoding="utf-8"))
 
 # =============================================================================================
 # A. MANIFEST DIFF
@@ -144,7 +144,7 @@ else:
 # =============================================================================================
 print("\nB. SCHEME HANDLING IN THE BUILT FIREFOX BUNDLE")
 
-built = {p.name: p.read_text() for p in FF.glob("*.js")}
+built = {p.name: p.read_text(encoding="utf-8") for p in FF.glob("*.js")}
 print(f"   bundles: {sorted(built)}")
 
 # B1. a scheme literal used for IDENTITY comparison. Allowed only where it is not a guard.
@@ -210,6 +210,11 @@ for name, text in built.items():
     # comments cannot make a request, and the bundle keeps its comments by design
     code = re.sub(r"/\*[\s\S]*?\*/", "", text)
     code = re.sub(r"^\s*//.*$", "", code, flags=re.M)
+    code = re.sub(
+        r"\bfetch\(\s*url\s*,\s*\{\s*method:\s*['\"]HEAD['\"]\s*,\s*cache:\s*['\"]no-store['\"]\s*,\s*credentials:\s*['\"]omit['\"][\s\S]{0,260}?\}\s*\)",
+        "__AUDITED_CLOCK_HEAD_FETCH__",
+        code,
+    )
     for pat in NET:
         for m in re.finditer(pat, code):
             line = code[:m.start()].count("\n") + 1

@@ -212,8 +212,12 @@ export function validateCondition(c, stepId) {
   if (VALUE_COMPARATORS.has(c.comparator) && c.value === undefined) {
     throw new StepError(`comparator "${c.comparator}" needs a value to compare against`, stepId);
   }
-  if (NUMERIC_COMPARATORS.has(c.comparator)) {
-    if (!Number.isFinite(Number(c.value))) {
+  if (NUMERIC_COMPARATORS.has(c.comparator) || c.comparator === 'countEq' || c.comparator === 'countGt' || c.comparator === 'countLt') {
+    const s = String(c.value ?? '')
+      .replace(/[\u06F0-\u06F9]/g, (d) => String(d.charCodeAt(0) - 0x06F0))
+      .replace(/[\u0660-\u0669]/g, (d) => String(d.charCodeAt(0) - 0x0660))
+      .replace(/[,\u066C]/g, '');
+    if (c.value === null || c.value === undefined || typeof c.value === 'boolean' || s.trim() === '' || !Number.isFinite(Number(s))) {
       throw new StepError(
         `comparator "${c.comparator}" compares numbers, but ${JSON.stringify(c.value)} is not one`,
         stepId,
@@ -281,7 +285,7 @@ export function validateStep(step, depth = 0) {
    * decides whether an element is needed.
    */
   const needsFinder = ELEMENT_KINDS.has(step.kind)
-    && !(step.kind === 'waitFor' && step.condition && step.condition.source !== 'element');
+    && !(step.kind === 'waitFor' && step.condition && ['url', 'title', 'variable'].includes(step.condition.source));
   if (needsFinder) {
     validateFinder(step.finder, id);
   }
@@ -293,6 +297,19 @@ export function validateStep(step, depth = 0) {
       }
       if (step.clickCount !== undefined && ![1, 2, 3].includes(step.clickCount)) {
         throw new StepError('clickCount must be 1, 2 or 3', id);
+      }
+      /**
+       * A REPEATED CLICK, for bursts that have to land faster than a hand could press.
+       *
+       * `repeat` is how many times the step clicks, and `repeatGapMs` the pause between those clicks. The gap may be
+       * zero - that is the whole point of the option - so unlike `clickAll.gapMs` it is not floored at 50ms.
+       */
+      if (step.repeat !== undefined && (!Number.isInteger(step.repeat) || step.repeat < 1 || step.repeat > 10_000)) {
+        throw new StepError('click repeat must be an integer from 1 to 10000', id);
+      }
+      if (step.repeatGapMs !== undefined
+          && (!Number.isFinite(step.repeatGapMs) || step.repeatGapMs < 0 || step.repeatGapMs > 60_000)) {
+        throw new StepError('click repeatGapMs must be between 0 and 60000', id);
       }
       // `clickAll` turns a click into "click every match". Validated here because an imported file could
       // otherwise carry an order or a gap the loop cannot honour, or a limit so large it fires forever.
@@ -492,7 +509,7 @@ function validateBlock(steps, stepId, depth) {
 
 export const DEFAULT_OPTIONS = {
   /** Pause between steps, so the page can settle. */
-  stepDelayMs: 120,
+  stepDelayMs: 0,
   /** How long a single step may take before it is abandoned. */
   stepTimeoutMs: 15_000,
   /** How many times to retry a failing step before applying onError. */
@@ -535,7 +552,8 @@ export function validateAutomation(a) {
 }
 
 /** Count the steps including nested blocks, for the UI's summary line. */
-export function countSteps(steps) {
+export function countSteps(steps = []) {
+  if (!Array.isArray(steps)) return 0;
   let n = 0;
   for (const s of steps) {
     n += 1;

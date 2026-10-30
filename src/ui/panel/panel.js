@@ -9,7 +9,7 @@
  * differentiates this from a macro recorder.
  */
 
-import { describeSchedule, nextRun, SCHEDULE_KINDS, validateSchedule } from '../../core/schedule/schedule.js';
+import { describeSchedule, nextRun, SCHEDULE_KINDS, ScheduleError, validateSchedule } from '../../core/schedule/schedule.js';
 import { STEP_KINDS, STEP_LABELS, BLOCK_KINDS, makeStep, countSteps } from '../../core/model/steps.js';
 import { describeCondition } from '../../core/engine/conditions.js';
 import { readCsv } from '../../core/io/csv.js';
@@ -37,6 +37,18 @@ const el = (tag, props = {}, ...children) => {
     // extension page, which runs with more privilege than the page itself. Use `text` instead - it
     // cannot carry markup - and build structure with elements.
     else if (k.startsWith('on') && typeof v === 'function') node.addEventListener(k.slice(2).toLowerCase(), v);
+    /**
+     * THE VALUE IS SET AS A PROPERTY, not only as an attribute.
+     *
+     * A `<textarea>` has no `value` CONTENT attribute: `setAttribute('value', ...)` writes an attribute the element
+     * ignores, so `.value` stayed empty and the code editor opened blank every time - the script step looked empty
+     * and the user had no way to tell that the code was there (bug C2). Setting the property as well makes every
+     * control start out holding the value it is supposed to show.
+     */
+    else if (k === 'value') {
+      node.value = String(v);
+      node.setAttribute('value', String(v));
+    }
     else if (v !== null && v !== undefined && v !== false) node.setAttribute(k, v === true ? '' : String(v));
   }
   for (const c of children.flat()) {
@@ -135,11 +147,36 @@ const REASON_LABEL = {
   aborted: 'history.aborted',
 };
 
+/**
+ * A SCHEDULE DESCRIPTION THAT CANNOT THROW.
+ *
+ * `describeSchedule` validates the schedule first and throws `ScheduleError` for one the model would refuse. The
+ * panel renders a LIST of automations, and one of them carrying a broken schedule used to take the whole list down
+ * with it: the exception happened inside a render, so the panel showed nothing at all rather than one bad row
+ * (bug M1). The bad schedule now says so and the rest of the list survives.
+ */
+function scheduleLabel(schedule) {
+  try {
+    return describeSchedule(schedule);
+  } catch (e) {
+    return 'invalid schedule';
+  }
+}
+
 async function refresh() {
   const res = await send({ type: 'list-automations' }).catch(() => null);
   if (res?.ok) state.automations = res.automations;
   const active = await send({ type: 'get-active-run' });
   if (active?.ok) state.activeRun = active.run;
+  /**
+   * THE RUN HISTORY IS REFRESHED TOO.
+   *
+   * `state.runs` was only ever filled at boot, so the History tab showed whatever was there when the panel opened -
+   * and the Clear button appeared to do nothing, because the list it cleared was the one being re-rendered from a
+   * stale copy. Every refresh now asks for the runs as well (bug C6).
+   */
+  const runs = await send({ type: 'list-runs' }).catch(() => null);
+  if (runs?.ok) state.runs = runs.runs;
   render();
 }
 
@@ -388,19 +425,7 @@ function scheduleEditor(onChange) {
       timeField({
         value: `${String(s.hour ?? 9).padStart(2, '0')}:${String(s.minute ?? 0).padStart(2, '0')}`
           + (typeof s.second === 'number' ? `:${String(s.second).padStart(2, '0')}` : ''),
-        /**
-         * `onChange`, NOT `keepDraftThen`.
-         *
-         * MEASURED: `keepDraftThen` is declared inside `basicView`, and `scheduleEditor` is a top-level function that only
-         * receives `onChange` - so committing a time in the Automations tab threw `ReferenceError: keepDraftThen is not
-         * defined`. That is a crash on BLUR of the time field, in the tab used for multi-step automations.
-         *
-         * My own first check called this report wrong; it was right. The scope was mis-measured, not the claim.
-         *
-         * `onChange` is the redraw the caller passed in, and it is the same argument every other branch of this function
-         * already uses.
-         */
-        onCommit: (v, opts) => { commitTime(v, opts); if (opts.rerender) onChange(); },
+        onCommit: (v, opts) => commitTime(v, opts),
         onHint: refreshTimeHint,
       }),
       timeHint,
@@ -443,7 +468,9 @@ function scheduleEditor(onChange) {
       el('input', {
         class: 'grow', value: s.expression ?? '', placeholder: t('sched.cronPlaceholder'),
         onchange: (e) => {
-          state.editing.schedule = { kind: 'cron', expression: e.target.value };
+          // the OTHER FIELDS ARE KEPT: replacing the schedule outright dropped `sameDayOnly`, so ticking "today only"
+          // and then typing a cron expression silently turned it off again
+          state.editing.schedule = { ...s, kind: 'cron', expression: e.target.value };
           onChange();
         },
       }),
@@ -474,13 +501,20 @@ function scheduleEditor(onChange) {
 
   // the preview: what will actually happen, and when
   try {
-    validateSchedule(state.editing.schedule);
-    const label = describeSchedule(state.editing.schedule);
+    /**
+     * THE SNAPSHOT, NOT THE LIVE FIELD.
+     *
+     * `state.editing.schedule` is `undefined` for an automation that has no schedule yet, and the preview read it
+     * directly - so the editor showed "Invalid schedule: ..." for a perfectly ordinary automation. The snapshot `s`
+     * is the schedule this editor was built for, and it is always defined.
+     */
+    validateSchedule(s);
+    const label = describeSchedule(s);
     const upcoming = [];
     let cursor = Date.now();
-    if (state.editing.schedule.kind !== 'manual') {
+    if (s.kind !== 'manual') {
       for (let i = 0; i < 3; i++) {
-        const n = nextRun(state.editing.schedule, cursor);
+        const n = nextRun(s, cursor);
         if (n === null) break;
         upcoming.push(n);
         cursor = n;
@@ -488,8 +522,10 @@ function scheduleEditor(onChange) {
     }
     wrap.append(el('div', { class: 'preview' },
       el('div', { class: 'preview-label', text: label }),
-      ...upcoming.map((t) => el('div', { class: 'preview-next', text: `next: ${fmtTime(t)}  (${relTime(t)})` })),
-      upcoming.length === 0 && state.editing.schedule.kind !== 'manual'
+      // the parameter is named `ts` because `t` is the module's translator, and shadowing it here would have
+      // turned every `t(...)` in this function into a number
+      ...upcoming.map((ts) => el('div', { class: 'preview-next', text: `next: ${fmtTime(ts)}  (${relTime(ts)})` })),
+      upcoming.length === 0 && s.kind !== 'manual'
         ? el('div', { class: 'preview-warn', text: t('sched.willNotFire') })
         : null,
     ));
@@ -580,8 +616,12 @@ function pickControl({ step, redraw, rerender }) {
          * `redraw()` rebuilds the simple form from storage, which throws the draft away - so an error stored on the draft
          * was never rendered, and a failed pick looked like a pick that did nothing. Measured: the fault case showed an
          * empty selector with no message anywhere, while the reason ("no page to pick from") was known all along.
+         *
+         * And it is not only the simple form: from any other tab the error had nowhere to go at all, so a failed pick
+         * was silent everywhere except the one tab it did not belong to (bug C7). Both places now get it.
          */
         if (state.tab === 'basic') state.basicError = state.pickError;
+        else state.panelNotice = state.pickError;
         redraw();
         return;
       }
@@ -748,6 +788,30 @@ function stepRow(step, list, index, rerender) {
         : null,
     ));
 
+    /**
+     * A POINT FINDER NEEDS COORDINATES, and the selector field cannot hold them.
+     *
+     * The strategy select offers "point", but the row above it edits `selector`/`xpath`/`text`... - none of which is a
+     * coordinate - so choosing "point" produced a finder that could not be filled in and could not be saved. These two
+     * inputs are where the coordinates go.
+     */
+    if (finder.strategy === 'point') {
+      const xInput = el('input', { type: 'number', class: 'tiny', min: '0', value: String(finder.x ?? 0) });
+      const yInput = el('input', { type: 'number', class: 'tiny', min: '0', value: String(finder.y ?? 0) });
+      const commitPoint = () => {
+        step.finder = { ...finder, strategy: 'point', x: Number(xInput.value), y: Number(yInput.value) };
+        rerender();
+      };
+      xInput.addEventListener('change', commitPoint);
+      yInput.addEventListener('change', commitPoint);
+      body.append(el('div', { class: 'row opts' },
+        el('label', { text: 'x' }),
+        xInput,
+        el('label', { text: 'y' }),
+        yInput,
+      ));
+    }
+
     // ---- click EVERY match, not only the first
     //
     // Only offered for `click`, because that is the case the user hit: ten buttons with the same label, and a
@@ -758,7 +822,14 @@ function stepRow(step, list, index, rerender) {
       const all = normaliseAll(step.clickAll) ?? {};
       const on = step.clickAll && typeof step.clickAll === 'object';
       const setAll = (patchObj) => {
-        step.clickAll = { ...ALL_DEFAULTS, ...all, ...patchObj };
+        /**
+         * THE VALUES ARE CLAMPED HERE, not at save time.
+         *
+         * `gapMs` below 50 and a `limit` outside its range were written straight into the step, and the model refused
+         * them at Save - so a single stray keystroke made the whole automation unsaveable, with the reason buried in a
+         * message the user never saw. `normaliseAll` clamps to what the engine can actually honour.
+         */
+        step.clickAll = normaliseAll({ ...ALL_DEFAULTS, ...all, ...patchObj });
         rerender();
       };
       body.append(el('div', { class: 'row opts' },
@@ -814,13 +885,35 @@ function stepRow(step, list, index, rerender) {
     ));
   }
   if (step.kind === 'click') {
-    body.append(el('div', { class: 'row' },
+    body.append(el('div', { class: 'row wrap' },
       el('label', { text: t('field.button') }),
       el('select', { onchange: (e) => { step.button = e.target.value; rerender(); } },
         ...['left', 'right', 'middle'].map((b) => el('option', { value: b, text: b, selected: (step.button ?? 'left') === b }))),
       el('label', { text: t('field.clicks') }),
       el('select', { onchange: (e) => { step.clickCount = Number(e.target.value); rerender(); } },
         ...[1, 2, 3].map((n) => el('option', { value: String(n), text: String(n), selected: (step.clickCount ?? 1) === n }))),
+      /**
+       * A BURST, for the clicks that have to land faster than a hand could press them.
+       *
+       * `repeat` is how many times this step clicks and `repeatGapMs` the pause between them - and the pause may be
+       * zero, which is the point: a gap of 0 is what makes a burst of ten clicks take no time at all.
+       */
+      el('label', { text: t('field.repeat') }),
+      el('input', {
+        type: 'number', class: 'tiny', min: '1', max: '10000', value: String(step.repeat ?? 1),
+        onchange: (e) => {
+          step.repeat = Math.max(1, Math.min(10000, Math.floor(Number(e.target.value) || 1)));
+          rerender();
+        },
+      }),
+      el('label', { text: t('field.repeatGap') }),
+      el('input', {
+        type: 'number', class: 'tiny', min: '0', max: '60000', value: String(step.repeatGapMs ?? 0),
+        onchange: (e) => {
+          step.repeatGapMs = Math.max(0, Math.min(60000, Number(e.target.value) || 0));
+          rerender();
+        },
+      }),
     ));
   }
   if (step.kind === 'check') {
@@ -926,8 +1019,10 @@ function stepRow(step, list, index, rerender) {
     body.append(el('div', { class: 'row' },
       el('label', { text: t('field.type') }),
       el('select', { onchange: (e) => { step.loopType = e.target.value; rerender(); } },
+        // `label`, not `t`: `t` is the module's translator, and shadowing it here made every `t(...)` in this
+        // function a number instead of a translated string
         ...[['count', 'a number of times'], ['while', 'while a condition holds'], ['forEach', 'for each item in a list']]
-          .map(([v, t]) => el('option', { value: v, text: t, selected: (step.loopType ?? 'count') === v }))),
+          .map(([v, label]) => el('option', { value: v, text: label, selected: (step.loopType ?? 'count') === v }))),
     ));
     if ((step.loopType ?? 'count') === 'count') {
       body.append(el('div', { class: 'row' },
@@ -1007,7 +1102,14 @@ function stepRow(step, list, index, rerender) {
 }
 
 function conditionEditor(host, key, rerender) {
-  const c = host[key] ?? { source: 'text', comparator: 'exists' };
+  /**
+   * A CONDITION HAS A TARGET, and the default carries one.
+   *
+   * The default used to be `{ source: 'text', comparator: 'exists' }` - with no finder, and no control to add one.
+   * An `if` step therefore had nothing to point at, could not be saved, and the user was told only that the save
+   * failed. The finder is part of the default now, and the row below renders it for every source that reads the page.
+   */
+  const c = host[key] ?? { source: 'text', comparator: 'exists', finder: { strategy: 'css', selector: '' } };
   host[key] = c;
   const wrap = el('div', { class: 'cond' });
   wrap.append(el('div', { class: 'row' },
@@ -1029,69 +1131,96 @@ function conditionEditor(host, key, rerender) {
       ['text', 'matches', 'text matches regex'],
       ['value', 'eq', 'value equals'],
       ['value', 'notEmpty', 'value is not empty'],
+      // `js` is NOT a source and never was - it was accepted, never evaluated, and is a hazard rather than a feature.
+      // The attribute source replaces it, because "the href of this link equals ..." is a condition people actually want.
+      ['attribute', 'eq', 'attribute equals'],
       ['count', 'countGt', 'count is more than'],
       ['count', 'countLt', 'count is less than'],
       ['url', 'contains', 'the URL contains'],
       ['title', 'contains', 'the page title contains'],
       ['variable', 'eq', 'a variable equals'],
-      /**
-       * `js` IS GONE. It was offered here and REJECTED by the model since `src/core/model/steps.js` dropped the source, so
-       * choosing it produced a step that could not be saved - and before that it produced a condition that saved and could
-       * never be honoured. A picker must not offer a choice the validator refuses.
-       */
       ['text', 'checked', 'is checked'],
       ['text', 'enabled', 'is enabled'],
     ].map(([s, cmp, label]) => el('option', {
       value: `${s}|${cmp}`, text: label, selected: c.source === s && c.comparator === cmp,
     }))),
   ));
+
   /**
-   * A CONDITION NEEDS TO SAY WHAT IT READS, AND THIS EDITOR NEVER DID.
+   * THE TARGET, for every source that reads the page.
    *
-   * MEASURED: `conditionEditor` produced a source, a comparator and a value - and no target. The model requires a finder
-   * for the element-reading sources, so an `if` or `while` built here could not be saved; and if one arrived from a file,
-   * the run had nothing to look at. `variable` had the same gap: a name to compare against, and nowhere to type the name.
-   *
-   * The fields appear for exactly the sources that use them, which is what keeps this honest: a URL condition does not
-   * show a selector, because it does not read one.
+   * `url`, `title` and `variable` read something that is not an element, so they need no finder. Every other source
+   * does - and there was no row for it, so an `if` step could not say WHICH element it was about and could not be
+   * saved at all (bug C3). The row is the same one an ordinary step has, pick button included.
    */
-  const READ_ELEMENT = ['text', 'value', 'attribute', 'count'];
-  if (READ_ELEMENT.includes(c.source)) {
-    const finder = c.finder ?? { strategy: 'css', selector: '' };
-    c.finder = finder;
+  if (!['url', 'title', 'variable'].includes(c.source)) {
+    c.finder ??= { strategy: 'css', selector: '' };
+    const finder = c.finder;
     wrap.append(el('div', { class: 'row' },
-      el('label', { text: t('field.finder') }),
+      el('label', { text: t('field.find') }),
+      el('select', {
+        onchange: (e) => { c.finder = { ...finder, strategy: e.target.value }; rerender(); },
+      }, ...['css', 'xpath', 'text', 'id', 'name', 'label', 'placeholder', 'aria', 'role', 'point']
+        .map((s) => el('option', {
+          value: s,
+          text: t.has(`find.${s}`) ? t(`find.${s}`) : s,
+          selected: finder.strategy === s,
+        }))),
       el('input', {
-        class: 'grow mono', value: finder.selector ?? finder.text ?? finder.id ?? '',
-        placeholder: t('ph.selector'),
+        class: 'grow mono',
+        value: finder.selector ?? finder.xpath ?? finder.text ?? finder.id ?? finder.name ??
+               finder.label ?? finder.placeholder ?? finder.aria ?? finder.role ?? '',
+        placeholder: t('field.selector'),
         onchange: (e) => {
-          // only the primary strategy is replaced: a picked chain would outvote a correction, which is the trap the step
-          // editor already documents
-          const { chain, ...rest } = finder;
-          c.finder = { ...rest, strategy: 'css', selector: e.target.value };
+          // `finderKey`, not `key`: `key` is this function's own parameter (the property on the host step)
+          const finderKey = { css: 'selector', xpath: 'xpath', text: 'text', id: 'id', name: 'name',
+            label: 'label', placeholder: 'placeholder', aria: 'aria', role: 'role' }[finder.strategy];
+          if (finderKey) {
+            // editing drops the fallback chain: it pointed at the ORIGINALLY picked element and would outvote a
+            // corrected selector when the new one missed
+            const { chain, ...rest } = finder;
+            c.finder = { ...rest, [finderKey]: e.target.value };
+          }
           rerender();
         },
+      }),
+      // the pick control needs a step-shaped object, so the condition's own finder is exposed as one
+      pickControl({
+        step: {
+          id: host.id,
+          get finder() { return c.finder; },
+          set finder(v) { c.finder = v; },
+        },
+        rerender: () => render(),
+      }),
+    ));
+  }
+
+  /**
+   * THE NAME OF THE VARIABLE, and the name of the attribute.
+   *
+   * Both are part of the condition's meaning and neither had a control, so a condition on a variable or on an
+   * attribute could not be filled in - and could not be saved.
+   */
+  if (c.source === 'variable') {
+    wrap.append(el('div', { class: 'row' },
+      el('label', { text: 'variable' }),
+      el('input', {
+        class: 'grow mono', value: c.variable ?? '', placeholder: 'variable name',
+        onchange: (e) => { c.variable = e.target.value; rerender(); },
       }),
     ));
   }
   if (c.source === 'attribute') {
     wrap.append(el('div', { class: 'row' },
-      el('label', { text: t('field.attribute') }),
+      el('label', { text: 'attribute' }),
       el('input', {
-        class: 'grow mono', value: c.attribute ?? '', placeholder: 'data-symbol',
-        onchange: (e) => { c.attribute = e.target.value.trim(); rerender(); },
+        class: 'grow mono', value: c.attribute ?? '', placeholder: 'attribute name',
+        onchange: (e) => { c.attribute = e.target.value; rerender(); },
       }),
     ));
   }
-  if (c.source === 'variable') {
-    wrap.append(el('div', { class: 'row' },
-      el('label', { text: t('field.variable') }),
-      el('input', {
-        class: 'grow mono', value: c.variable ?? '', placeholder: 'symbol',
-        onchange: (e) => { c.variable = e.target.value.trim(); rerender(); },
-      }),
-    ));
-  }
+
   if (c.comparator !== 'exists' && c.comparator !== 'notExists' &&
       !['visible', 'hidden', 'checked', 'unchecked', 'enabled', 'disabled', 'empty', 'notEmpty'].includes(c.comparator)) {
     wrap.append(el('div', { class: 'row' },
@@ -1230,7 +1359,21 @@ function basicDraft() {
     // always a daily time
     return {
       ...existing,
-      schedule: { kind: 'daily', ...(existing.schedule ?? {}) },
+      /**
+       * THE SPREAD ORDER IS THE WHOLE FIX.
+       *
+       * `{ kind: 'daily', ...(existing.schedule ?? {}) }` put the STORED kind last, so a saved `cron` or `manual`
+       * schedule overwrote the `daily` this form is built around - and the form then edited a schedule kind it does
+       * not know how to show. The stored fields are spread first and the form's own kind is written last, so the
+       * form always edits a daily schedule and keeps the hour it had.
+       */
+      schedule: {
+        ...(existing.schedule ?? {}),
+        kind: 'daily',
+        hour: existing.schedule?.hour ?? 9,
+        minute: existing.schedule?.minute ?? 0,
+        second: existing.schedule?.second ?? 0,
+      },
       steps: applyPickedFinders((existing.steps ?? []).map((s) => ({ ...s }))),
     };
   }
@@ -1255,7 +1398,7 @@ function basicDraft() {
     urls: [],
     schedule: { kind: 'daily', hour: 9, minute: 0, second: 0 },
     steps: applyPickedFinders([{ id: `${BASIC_ID}-point-1`, kind: 'click', finder: { strategy: 'css', selector: '' } }]),
-    options: { stepDelayMs: 60, stepRetries: 2, maxRunMs: 30 * 60_000 },
+    options: { stepDelayMs: 0, stepRetries: 2, maxRunMs: 30 * 60_000 },
     createdAt: Date.now(),
   };
 }
@@ -1428,10 +1571,12 @@ function basicView(rerender) {
        *
        * The other call site (line ~718) is the one that had it right; this is the one that did not.
        */
-      pickControl({ step, redraw: () => { state.editorKeepDraft = true; render(); } }),
+      pickControl({ step, redraw: () => { state.basicKeepDraft = true; state.editorKeepDraft = true; render(); } }),
           // the other half: an editable selector, shown for every point rather than only as a fallback count
           el('input', {
-            class: 'grow mono', value: finder.selector ?? finder.text ?? finder.id ?? '',
+            class: 'grow mono',
+            value: finder.selector ?? finder.xpath ?? finder.text ?? finder.id ?? finder.name ??
+                   finder.label ?? finder.placeholder ?? finder.aria ?? finder.role ?? '',
             placeholder: t('field.selector'),
             onchange: (e) => {
               const key = { css: 'selector', xpath: 'xpath', text: 'text', id: 'id', name: 'name',
@@ -1480,15 +1625,22 @@ function basicView(rerender) {
       // a bug in the clicker rather than an unfinished form
       steps: draft.steps.filter((x) => Object.keys(x.finder ?? {}).some((k) => k !== 'strategy' && x.finder[k])),
     };
+    /**
+     * THE ANSWER IS REPORTED, because a caller has to be able to act on it.
+     *
+     * `save()` used to return nothing, so "Run now" could not tell a refused save from a good one and started the
+     * PREVIOUSLY saved automation - the user pressed Run now on a form that had just been rejected, and an old run
+     * went off instead. `false` means "nothing was saved"; `true` means "what you see is now what is stored".
+     */
     if (clean.steps.length === 0) {
       state.basicError = t('basic.needPoint');
       rerender();
-      return;
+      return false;
     }
     state.basicError = null;
     state.basicNotice = null;
     const res = await send({ type: 'save-automation', automation: clean });
-    if (!res?.ok) { state.basicError = res?.error ?? 'save failed'; rerender(); return; }
+    if (!res?.ok) { state.basicError = res?.error ?? 'save failed'; rerender(); return false; }
     await refresh();
     state.basic = { ...clean };
     state.basicStale = false;
@@ -1503,12 +1655,24 @@ function basicView(rerender) {
      */
     const sched = res.schedule ?? {};
     if (sched.scheduled) {
-      const when = Number.isFinite(sched.at) ? new Date(sched.at) : null;
+      /**
+       * THE TARGET INSTANT, and the whole day, not only the day of the month.
+       *
+       * `when.getDate() === new Date().getDate()` compared the day of the month only, so an alarm armed for
+       * TOMORROW at 09:00 read as "today" - because tomorrow has the same date number as today in the same month -
+       * and the notice said "scheduled for 09:00" with no date, which is exactly the whole-day jump the notice
+       * exists to expose. The worker may also report the target as `target` rather than `at`, and both are read here.
+       */
+      const targetMs = Number.isFinite(sched.target) ? sched.target : sched.at;
+      const when = Number.isFinite(targetMs) ? new Date(targetMs) : null;
       const time = when ? `${String(when.getHours()).padStart(2, '0')}:${String(when.getMinutes()).padStart(2, '0')}:${String(when.getSeconds()).padStart(2, '0')}` : '';
-      const sameDay = when ? when.getDate() === new Date().getDate() : true;
+      const now = new Date();
+      const sameDay = when
+        ? when.getFullYear() === now.getFullYear() && when.getMonth() === now.getMonth() && when.getDate() === now.getDate()
+        : true;
       state.basicNotice = t('basic.armedFor')
         .replace('{time}', time)
-        .replace('{day}', sameDay ? '' : new Date(sched.at).toLocaleDateString());
+        .replace('{day}', sameDay ? '' : when.toLocaleDateString());
     } else if (sched.reason === 'manual') {
       state.basicNotice = t('basic.notScheduled');
     } else if (Number.isFinite(sched.justMissedMs)) {
@@ -1518,6 +1682,7 @@ function basicView(rerender) {
     }
 
     rerender();
+    return true;
   };
 
   /**
@@ -1547,7 +1712,10 @@ function basicView(rerender) {
     el('button', {
       class: 'grow', text: t('action.runNow'),
       onclick: async () => {
-        await save();
+        // THE SAVE HAS TO SUCCEED FIRST: a refused save left the OLD automation in place, and starting it anyway
+        // ran something the user was not looking at (bug M5)
+        const ok = await save();
+        if (!ok) return;
         const res = await send({ type: 'start-run', automationId: BASIC_ID });
         if (!res?.ok) { state.basicError = res?.error ?? 'could not start'; rerender(); }
         else await refresh();
@@ -1926,7 +2094,7 @@ function automationsView(rerender) {
           name: 'New automation',
           steps: [makeStep('click', { finder: { strategy: 'css', selector: '' } })],
           schedule: { kind: 'manual' },
-          options: { stepDelayMs: 120, stepRetries: 2, maxRunMs: 30 * 60_000 },
+          options: { stepDelayMs: 0, stepRetries: 2, maxRunMs: 30 * 60_000 },
           enabled: true,
           createdAt: Date.now(),
         };
@@ -2003,10 +2171,10 @@ function automationsView(rerender) {
         }),
         el('span', { class: 'name', text: a.name }),
         el('span', { class: 'spacer' }),
-        el('span', { class: 'badge', text: `${countSteps(a.steps)} steps` }),
+        el('span', { class: 'badge', text: `${countSteps(a.steps ?? [])} steps` }),
       ),
       el('div', { class: 'card-meta' },
-        el('span', { class: 'sched-label', text: a.schedule ? describeSchedule(a.schedule) : 'manual' }),
+        el('span', { class: 'sched-label', text: a.schedule ? scheduleLabel(a.schedule) : 'manual' }),
         el('span', { class: 'hint', text: nextLabel }),
       ),
       el('div', { class: 'card-actions' },
@@ -2035,6 +2203,9 @@ function automationsView(rerender) {
           onclick: async () => {
             if (!confirm(`Delete "${a.name}"?`)) return;
             await send({ type: 'delete-automation', id: a.id });
+            // THE EDITOR OF A DELETED AUTOMATION IS CLOSED, or it keeps editing something that no longer exists -
+            // and saving it would bring it back (the editor's own copy is what is saved, not the stored record).
+            if (state.editing?.id === a.id) state.editing = null;
             await refresh();
           },
         }),
@@ -2058,6 +2229,23 @@ function automationsView(rerender) {
             placeholder: t('ph.siteScope'),
             onchange: (e) => { ed.urls = e.target.value.split(',').map((s) => s.trim()).filter(Boolean); },
           }),
+        ),
+        /**
+         * THE PAUSE BETWEEN STEPS.
+         *
+         * It was in the model and in the options page, but not here - so the one number that decides how fast an
+         * automation runs could not be changed for a single automation. Zero means no artificial pause at all.
+         */
+        el('div', { class: 'row' },
+          el('label', { text: t('opt.stepDelay') }),
+          el('input', {
+            type: 'number', class: 'small', min: '0', max: '60000',
+            value: String(ed.options?.stepDelayMs ?? 0),
+            onchange: (e) => {
+              ed.options = { ...(ed.options ?? {}), stepDelayMs: Math.max(0, Number(e.target.value) || 0) };
+            },
+          }),
+          el('span', { class: 'hint', text: t('opt.stepDelayHint') }),
         ),
         scheduleEditor(rerender),
         el('div', { class: 'sub-label', text: t('field.steps') }),
@@ -2209,7 +2397,7 @@ function scheduledView() {
         el('span', { class: `badge ${error ? 'bad' : a.enabled === false ? 'off' : 'ok'}`,
           text: error ? 'error' : a.enabled === false ? 'off' : next ? 'armed' : 'idle' }),
       ),
-      el('div', { class: 'card-meta' }, el('span', { class: 'sched-label', text: describeSchedule(a.schedule) })),
+      el('div', { class: 'card-meta' }, el('span', { class: 'sched-label', text: scheduleLabel(a.schedule) })),
       error
         ? el('div', { class: 'hint warn', text: error })
         : el('div', { class: 'hint', text: next ? `${fmtTime(next)} · ${relTime(next)}` : 'no future occurrence' }),
@@ -2342,8 +2530,8 @@ function historyView() {
       r.trace?.length
         ? el('details', {},
             el('summary', { text: `${r.trace.length} trace entries` }),
-            el('pre', { class: 'trace', text: r.trace.map((t) =>
-              `+${String(t.at).padStart(6)}ms  ${t.type}${t.kind ? ` ${t.kind}` : ''}${t.message ? ` — ${t.message}` : ''}`).join('\n') }),
+            el('pre', { class: 'trace', text: r.trace.map((entry) =>
+              `+${String(entry.at).padStart(6)}ms  ${entry.type}${entry.kind ? ` ${entry.kind}` : ''}${entry.message ? ` — ${entry.message}` : ''}`).join('\n') }),
           )
         : null,
     ));
@@ -2644,6 +2832,18 @@ api.runtime.onMessage.addListener((msg) => {
       if (single) {
         single.finder = msg.finder;
         rememberFinder(single.id, msg.finder);
+        /**
+         * THE PAGE IS REMEMBERED, EVEN FOR AN ADOPTED PICK.
+         *
+         * A Basic automation's form never asks for a URL, so a scheduled run had no page to go to and refused to run
+         * ("no URL pattern, so a scheduled run has no safe tab"). The page is known here - the pick came from it - so
+         * it is recorded against the automation that owns the step, exactly as it is for a pick that found its own
+         * step (bug C8).
+         */
+        const ownerId = state.tab === 'basic' ? (state.basic?.id ?? BASIC_ID) : state.editing?.id;
+        if (ownerId && typeof msg.url === 'string') {
+          send({ type: 'remember-pick-page', automationId: ownerId, url: msg.url }).catch(() => {});
+        }
         state.pickSavedAt = Date.now();
         state.pickSavedFor = single.id;
         state.pickTarget = null;
@@ -2680,6 +2880,19 @@ api.runtime.onMessage.addListener((msg) => {
       if (r?.ok) state.activeRun = r.run;
       if (state.tab === 'automations') render();
     });
+    /**
+     * A FINISHED RUN IS A NEW ENTRY IN THE HISTORY.
+     *
+     * The history was only re-read when the panel was opened, so a run that finished while the panel was open never
+     * appeared - and the History tab looked like it was lying about what had run. The runs are fetched again when a
+     * run finishes, and both tabs that show them are re-rendered.
+     */
+    if (msg?.type === 'run-finished') {
+      send({ type: 'list-runs' }).then((r) => {
+        if (r?.ok) state.runs = r.runs;
+        if (state.tab === 'history' || state.tab === 'automations') render();
+      }).catch(() => {});
+    }
   }
 });
 

@@ -95,10 +95,14 @@ function bringIntoView(el, block = 'center') {
  */
 export function realClick(el, { button = 'left', clickCount = 1, force = false } = {}) {
   if (!el) throw new ActionError('cannot click: no element');
-  bringIntoView(el);
-
-  const rect = el.getBoundingClientRect();
   const w = windowOf(el);
+  let rect = el.getBoundingClientRect();
+  const offscreen = rect.top < 0 || rect.left < 0 ||
+    rect.bottom > (w?.innerHeight || Infinity) || rect.right > (w?.innerWidth || Infinity);
+  if ((rect.width === 0 && rect.height === 0) || offscreen) {
+    bringIntoView(el);
+    rect = el.getBoundingClientRect();
+  }
   const cx = rect.left + rect.width / 2;
   const cy = rect.top + rect.height / 2;
   const buttonCode = { left: 0, middle: 1, right: 2 }[button] ?? 0;
@@ -147,7 +151,7 @@ export function realClick(el, { button = 'left', clickCount = 1, force = false }
   // does not cause navigation; anything else gets the synthetic one, which carries the real button and
   // detail. Doing both is the bug this replaced: a form submitted twice.
   const isLink = el.tagName === 'A' && !!(el.href || el.getAttribute?.('href'));
-  if (isLink && clickCount === 1) {
+  if (isLink && clickCount === 1 && button === 'left') {
     try { el.click(); } catch { /* ignore */ }
   } else {
     for (let i = 0; i < clickCount; i++) {
@@ -268,8 +272,10 @@ export function fillElement(el, value, { clearFirst = true } = {}) {
   const next = clearFirst ? String(value ?? '') : `${el.value ?? ''}${value ?? ''}`;
   // select() before assigning makes the change observable to a page watching selection
   try { el.select?.(); } catch { /* not selectable */ }
-  setNativeValue(el, '');
-  fireInput(el, '');
+  if (clearFirst && next !== '') {
+    setNativeValue(el, '');
+    fireInput(el, '');
+  }
   setNativeValue(el, next);
   fireInput(el, next);
   el.dispatchEvent(new Event('blur', { bubbles: false }));
@@ -331,11 +337,16 @@ export function scrollAction({ target = 'window', mode = 'by', x = 0, y = 0, el 
  * debounces keystrokes sees them individually.
  */
 export async function pressKeys(el, keys, { gapMs = 0, holdMs = 0 } = {}) {
-  const list = Array.isArray(keys) ? keys : String(keys).split('+').map((s) => s.trim()).filter(Boolean);
+  const list = Array.isArray(keys)
+    ? keys
+    : String(keys).trim() === '+'
+      ? ['+']
+      : String(keys).split('+').map((s) => s.trim()).filter(Boolean);
   const target = el ?? doc().activeElement ?? doc().body;
   const w = windowOf(target);
   const MODS = { ctrl: 'Control', control: 'Control', alt: 'Alt', shift: 'Shift', meta: 'Meta', cmd: 'Meta', win: 'Meta' };
   const modsDown = [];
+  const activeMods = new Set();
   const sequence = [];
 
   for (const raw of list) {
@@ -356,14 +367,15 @@ export async function pressKeys(el, keys, { gapMs = 0, holdMs = 0 } = {}) {
       code: isMod ? `${key}Left` : keyCodeName(key),
       bubbles: true, cancelable: true, composed: true,
       view: w,
-      ctrlKey: modsDown.includes('Control'), altKey: modsDown.includes('Alt'),
-      shiftKey: modsDown.includes('Shift'), metaKey: modsDown.includes('Meta'),
+      ctrlKey: activeMods.has('Control'), altKey: activeMods.has('Alt'),
+      shiftKey: activeMods.has('Shift'), metaKey: activeMods.has('Meta'),
     });
   };
   const down = (key) => target.dispatchEvent(keyEvent('keydown', key));
   const up = (key) => target.dispatchEvent(keyEvent('keyup', key));
 
   for (const m of modsDown) {
+    activeMods.add(m);
     down(m);
     if (gapMs) await sleep(gapMs);
   }
@@ -375,18 +387,22 @@ export async function pressKeys(el, keys, { gapMs = 0, holdMs = 0 } = {}) {
   }
   // modifiers come up in reverse, so the shortcut reads as one gesture
   for (const m of [...modsDown].reverse()) {
+    activeMods.delete(m);
     up(m);
     if (gapMs) await sleep(gapMs);
   }
   // typing into a field is expected to change its value, which dispatchEvent alone does not do
-  if (sequence.length && modsDown.length === 0 && sequence[0].length === 1) {
-    for (const k of sequence) insertCharAtCursor(target, k);
+  if (sequence.length && modsDown.length === 0) {
+    for (const k of sequence) {
+      if (k.length === 1) insertCharAtCursor(target, k);
+    }
   }
   return { method: 'key-sequence', keys: list, mods: modsDown };
 }
 
 function insertCharAtCursor(el, ch) {
   if (!el || typeof el.value !== 'string') return;
+  if (el.tagName === 'INPUT' && ['checkbox', 'radio', 'file', 'button', 'submit', 'reset', 'image', 'color', 'range'].includes((el.type || '').toLowerCase())) return;
   const start = el.selectionStart ?? el.value.length;
   const end = el.selectionEnd ?? start;
   const next = `${el.value.slice(0, start)}${ch}${el.value.slice(end)}`;

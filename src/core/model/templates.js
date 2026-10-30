@@ -84,7 +84,7 @@ const RANDOM_FUNCS = {
     return (Math.random() * (hi - lo) + lo).toFixed(Math.max(0, Math.min(10, d)));
   },
   string(length) {
-    const n = Math.max(1, Math.min(256, Number(length) || 8));
+    const n = Math.max(1, Math.min(256, length !== undefined && length !== '' ? Number(length) : 8));
     const alphabet = 'abcdefghijklmnopqrstuvwxyz0123456789';
     let out = '';
     for (let i = 0; i < n; i++) out += alphabet[Math.floor(Math.random() * alphabet.length)];
@@ -106,7 +106,7 @@ const RANDOM_FUNCS = {
     return `${RANDOM_FUNCS.string(8)}@example.com`;
   },
   number(length) {
-    const n = Math.max(1, Math.min(20, Number(length) || 6));
+    const n = Math.max(1, Math.min(20, length !== undefined && length !== '' ? Number(length) : 6));
     let out = String(Math.floor(Math.random() * 9) + 1);
     for (let i = 1; i < n; i++) out += Math.floor(Math.random() * 10);
     return out;

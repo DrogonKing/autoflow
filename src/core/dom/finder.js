@@ -73,6 +73,10 @@ export function findAll(root, finder, opts = {}) {
   const requireVisible = opts.requireVisible !== false;
   const requireActionable = opts.requireActionable === true;
 
+  if (finder?.strategy === 'css' && (finder.selector === '' || finder.selector === undefined)) {
+    return { elements: [], how: 'css (empty selector)', total: 0 };
+  }
+
   const { elements: primary, how } = resolveStrategy(root, finder);
   let pool = primary;
   if (pool.length === 0 && Array.isArray(finder.chain) && finder.chain.length) {
@@ -84,12 +88,16 @@ export function findAll(root, finder, opts = {}) {
     }
   }
   let candidates = pool;
+  let visibleNarrowed = false;
   if (requireVisible) {
     const visible = candidates.filter(isVisible);
-    if (visible.length) candidates = visible;
+    if (visible.length) {
+      candidates = visible;
+      visibleNarrowed = true;
+    }
   }
   if (requireActionable) {
-    const actionable = candidates.filter(isActionable);
+    const actionable = candidates.filter((el) => isActionable(el, { knownVisible: visibleNarrowed }));
     if (actionable.length) candidates = actionable;
     const clickable = candidates.filter(isClickableTarget);
     if (clickable.length) candidates = clickable;
@@ -137,11 +145,11 @@ export function isClickableTarget(el) {
   return false;
 }
 
-export function isActionable(el) {
+export function isActionable(el, { knownVisible = false } = {}) {
   if (!el) return false;
   if (el.disabled === true) return false;
   if (el.getAttribute && el.getAttribute('aria-disabled') === 'true') return false;
-  if (!isVisible(el)) return false;
+  if (!knownVisible && !isVisible(el)) return false;
   const rect = el.getBoundingClientRect();
   const doc = el.ownerDocument;
   const cx = rect.left + rect.width / 2;
@@ -151,7 +159,7 @@ export function isActionable(el) {
     // offscreen is still actionable for most actions (scrollIntoView first), so this is not a rejection
     return true;
   }
-  const top = doc.elementFromPoint(cx, cy);
+  const top = doc.elementFromPoint?.(cx, cy) ?? null;
   if (!top) return true;
   if (top === el || el.contains(top) || top.contains(el)) return true;
   // A transparent overlay is a real cause of "the click did nothing"
@@ -231,12 +239,13 @@ function textCandidates(root, text, exact) {
   });
   // Prefer the deepest match: a wrapper div contains the text of its button, and clicking the wrapper is
   // usually the wrong element.
-  return matches.sort((a, b) => {
-    const da = depth(a);
-    const db = depth(b);
-    if (da !== db) return db - da;
-    return (a.textContent?.length ?? 0) - (b.textContent?.length ?? 0);
-  });
+  return matches
+    .map((el) => ({ el, d: depth(el), len: el.textContent?.length ?? 0 }))
+    .sort((a, b) => {
+      if (a.d !== b.d) return b.d - a.d;
+      return a.len - b.len;
+    })
+    .map((x) => x.el);
 }
 
 function depth(el) {
@@ -251,11 +260,12 @@ function depth(el) {
 
 /** The elements a form label can point at. */
 function labelTargets(root, labelText, exact) {
-  const wanted = exact ? labelText.trim() : (labelText ?? '').trim().toLowerCase();
+  const cleanLabel = (labelText ?? '').trim();
+  const wanted = exact ? cleanLabel : cleanLabel.toLowerCase();
   const out = [];
   for (const label of root.querySelectorAll('label')) {
     const own = (label.textContent ?? '').replace(/\s+/g, ' ').trim();
-    const hit = exact ? own === labelText.trim() : own.toLowerCase().includes(wanted);
+    const hit = exact ? own === cleanLabel : own.toLowerCase().includes(wanted);
     if (!hit) continue;
     const forId = label.getAttribute('for');
     if (forId) {
@@ -346,7 +356,7 @@ export function resolveStrategy(root, finder) {
 
 /** Escape a value for use inside an attribute selector. */
 function cssEscape(value) {
-  return String(value).replace(/(["\\])/g, '\\$1');
+  return String(value).replace(/(["\\])/g, '\\$1').replace(/\r/g, '\\r').replace(/\n/g, '\\n');
 }
 
 /**
@@ -360,6 +370,12 @@ function cssEscape(value) {
 export function findElement(root, finder, opts = {}) {
   const requireVisible = opts.requireVisible !== false;
   const requireActionable = opts.requireActionable === true;
+
+  // an empty selector is the state the clear control leaves behind. It finds nothing - which is honest - and it must
+  // not surface a raw "the CSS selector "" is invalid" error to the user, which reads like a crash.
+  if (finder?.strategy === 'css' && (finder.selector === '' || finder.selector === undefined)) {
+    return { element: null, how: 'css (empty selector)', candidates: 0, tried: [] };
+  }
 
   const tried = [];
   const { elements: primary, how } = resolveStrategy(root, finder);
@@ -383,11 +399,15 @@ export function findElement(root, finder, opts = {}) {
   }
 
   let candidates = pool;
+  let visibleNarrowed = false;
   if (requireVisible) {
     const visible = candidates.filter(isVisible);
     // Only apply the visibility filter when it leaves something: a hidden element may be exactly what
     // the step needs (a hidden input is the normal case for a form fill).
-    if (visible.length) candidates = visible;
+    if (visible.length) {
+      candidates = visible;
+      visibleNarrowed = true;
+    }
   }
 
   if (candidates.length === 0) {
@@ -396,7 +416,7 @@ export function findElement(root, finder, opts = {}) {
 
   let chosen = candidates;
   if (requireActionable) {
-    const actionable = chosen.filter(isActionable);
+    const actionable = chosen.filter((el) => isActionable(el, { knownVisible: visibleNarrowed }));
     if (actionable.length) chosen = actionable;
 
     // Then prefer things that are meant to be clicked. Same defensive shape as the visibility filter above:
@@ -407,12 +427,6 @@ export function findElement(root, finder, opts = {}) {
     // button. Without it the header is a valid candidate: visible, enabled, uncovered.
     const clickable = chosen.filter(isClickableTarget);
     if (clickable.length) chosen = clickable;
-  }
-
-  // an empty selector is the state the clear control leaves behind. It finds nothing - which is honest - and it must
-  // not surface a raw "the CSS selector "" is invalid" error to the user, which reads like a crash.
-  if (finder.strategy === 'css' && (finder.selector === '' || finder.selector === undefined)) {
-    return { element: null, how: 'css (empty selector)', candidates: 0, tried: [] };
   }
 
   const index = finder.index ?? 0;
@@ -512,8 +526,17 @@ export function describeElement(el) {
     accessibleName: accessibleName(el).slice(0, 160),
     attributes: attrs,
     rect: { x: Math.round(rect.x), y: Math.round(rect.y), w: Math.round(rect.width), h: Math.round(rect.height) },
-    inIframe: el.ownerDocument !== el.ownerDocument.defaultView?.top?.document,
+    inIframe: isInIframe(el),
   };
+}
+
+/** A cross-origin frame's `top` is unreadable; that is itself the sign of being inside a frame. */
+function isInIframe(el) {
+  try {
+    return el.ownerDocument !== el.ownerDocument.defaultView?.top?.document;
+  } catch {
+    return true;
+  }
 }
 
 /**

@@ -46,13 +46,13 @@ export async function rescheduleAll(automations, { now = Date.now() } = {}) {
      * "what comes next". Asking from the fired target makes `nextRun` return the following occurrence directly.
      */
     const askFrom = Number.isFinite(fired) && fired < now ? fired : now;
-    wanted.add(name);
     const armed = armTarget(a.schedule, askFrom, { firedAt: fired });
     const at = armed.at;
     if (at === null && armed.missedMs === 0) {
       results.push({ id: a.id, name: a.name, ok: false, reason: 'this schedule will not fire again' });
       continue;
     }
+    wanted.add(name);
     /**
      * The target second has just gone by. arming for now is the honest reading of "I saved this time and I expect it to
      * happen" - the alternative, which was the behaviour, is a silent jump to tomorrow.
@@ -417,7 +417,7 @@ export async function listScheduled(automations, { now = Date.now() } = {}) {
       name: a.name,
       enabled: a.enabled !== false,
       schedule: description,
-      nextAt: alarm?.scheduledTime ?? next,
+      nextAt: next ?? alarm?.scheduledTime ?? null,
       armed: Boolean(alarm),
       error,
     };

@@ -24,7 +24,15 @@ export const MAX_EVENTS = 400;
  */
 export function pushEvent(events, event) {
   const list = Array.isArray(events) ? events.slice() : [];
-  const entry = { at: event.at ?? Date.now(), ...event };
+  /**
+   * THE TIMESTAMP IS COMPUTED FIRST, and the event's own fields are spread OVER it.
+   *
+   * `{ at: event.at ?? Date.now(), ...event }` let an explicit `at: undefined` overwrite the computed timestamp,
+   * because a spread copies own enumerable properties even when their value is `undefined` - so the entry ended up
+   * with no `at` at all and every stamp of it read "-". Spreading first and assigning `at` last makes the computed
+   * value authoritative whenever the event does not carry a real one.
+   */
+  const entry = { ...event, at: event?.at ?? Date.now() };
   list.push(entry);
   if (list.length > MAX_EVENTS) list.splice(0, list.length - MAX_EVENTS);
   return list;
@@ -61,6 +69,9 @@ export function decisionTrail(events) {
     'save-request', 'save-armed-nothing',
     'start-request', 'start-refused', 'start-queued',
     'start-accepted', 'run-finished', 'run-abandoned', 'worker-boot',
+    // THE TAB DECISIONS, and the queue wait: each of these is a step on the path from "the schedule fired" to
+    // "the click happened", so each of them belongs in the section a person reads first.
+    'no-matching-tab', 'tab-from-memory', 'tab-reopened', 'start-queued-wait', 'imported',
   ]);
   return (Array.isArray(events) ? events : []).filter((e) => KINDS.has(e.kind));
 }

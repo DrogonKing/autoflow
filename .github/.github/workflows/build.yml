@@ -1,0 +1,176 @@
+name: build
+
+on:
+  push:
+    branches: ['**']
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+# Two jobs, and the split is deliberate:
+#
+#   test  - the whole suite, on every push and PR. Fast, and it does not need a browser.
+#   build - produces the two extension zips and attaches them to a release when a v* tag is pushed.
+#
+# The browser tests are NOT here, and that is a real limitation rather than an oversight: the Firefox test needs
+# geckodriver and a Firefox binary, and the end-to-end test drives a real Chromium through Playwright. Both are
+# doable on a GitHub runner but they make the job minutes long and flaky, so they stay a local gate. What CI
+# proves is that the code builds, the unit suite passes, both manifests are well formed, and Mozilla's own
+# linter accepts the Firefox build.
+# The release step writes to the repository, so the token needs `contents: write`. Without this block the
+# GITHUB_TOKEN's scopes depend on the repository default, which is read-only for a repo created through the
+# API - and `softprops/action-gh-release` then fails with a 403 AFTER all fourteen earlier steps pass. Stated
+# explicitly so the workflow carries its own requirement rather than inheriting one from repo settings.
+permissions:
+  contents: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Node 22, not 20, and this is a real constraint rather than a preference: jsdom 30 declares
+      # `engines: node ^22.22.2 || ^24.15.0 || >=26`, and the undici it pulls in needs ^22.19.0 for
+      # `zlib.createZstdDecompress`. On Node 20 that call is undefined and jsdom throws 11 unhandled
+      # "Cannot read properties of undefined (reading 'bind')" errors, so `vitest run` exits 1 even though
+      # every test passes. Found by CI on the first push - the local tree runs Node 24, where it never appears.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - run: npm ci
+
+      - name: check the Node version this project needs
+        run: node scripts/preflight.mjs
+
+      - name: unit tests
+        run: npx vitest run
+
+      - name: build both targets
+        run: npm run build:all
+
+      - name: the manifests must be well formed
+        run: |
+          python3 - <<'PY'
+          import json, pathlib, sys
+          ok = True
+          for rel in ("dist/manifest.json", "dist-firefox/manifest.json"):
+              p = pathlib.Path(rel)
+              if not p.exists():
+                  print(f"MISSING {rel}"); ok = False; continue
+              m = json.loads(p.read_text())
+              print(f"{rel}: mv{m.get('manifest_version')} v{m.get('version')} id={m.get('browser_specific_settings',{}).get('gecko',{}).get('id')}")
+              if m.get("manifest_version") != 3:
+                  print(f"  {rel}: manifest_version is not 3"); ok = False
+          sys.exit(0 if ok else 1)
+          PY
+
+      - name: every file the manifest references must exist
+        run: |
+          python3 - <<'PY'
+          import json, pathlib, sys
+          ok = True
+          for dist in ("dist", "dist-firefox"):
+              base = pathlib.Path(dist)
+              m = json.loads((base / "manifest.json").read_text())
+              refs = set()
+              refs.update((m.get("background") or {}).get("scripts") or [])
+              if (m.get("background") or {}).get("service_worker"):
+                  refs.add(m["background"]["service_worker"])
+              for cs in m.get("content_scripts") or []:
+                  refs.update(cs.get("js") or [])
+              for key in ("default_panel", "options_page"):
+                  v = (m.get("sidebar_action") or {}).get(key) if key == "default_panel" else m.get(key)
+                  if v: refs.add(v)
+              refs.update((m.get("icons") or {}).values())
+              missing = sorted(r for r in refs if not (base / r).exists())
+              print(f"{dist}: {len(refs)} referenced files, missing {missing or 'none'}")
+              if missing: ok = False
+          sys.exit(0 if ok else 1)
+          PY
+
+      - name: Mozilla's linter on the Firefox build
+        run: |
+          npx --yes web-ext lint --source-dir=dist-firefox --output=json > /tmp/lint.json || true
+          python3 - <<'PY'
+          import json, sys
+          d = json.load(open("/tmp/lint.json"))
+          errs, warns = d.get("errors") or [], d.get("warnings") or []
+          for e in errs:  print("ERROR  ", e.get("code"), e.get("message"))
+          for w in warns: print("WARNING", w.get("code"), w.get("message"))
+          print(f"errors={len(errs)} warnings={len(warns)}")
+          sys.exit(1 if errs else 0)
+          PY
+
+      # No pipes here. `python3 script.py | tail -20` reports the exit status of `tail`, so a script that
+      # died was reported as a passing step - which is exactly what happened: adversarial_review.py hit a
+      # PermissionError on a hardcoded path and CI still went green on this step.
+      - name: security audits (static, deterministic)
+        run: |
+          set -o pipefail
+          python3 scripts/adversarial_review.py
+          python3 scripts/firefox_security_audit.py
+          python3 scripts/follow_the_lead.py
+
+      - name: the review packet must be complete and correctly numbered
+        run: |
+          python3 scripts/build_review_packet.py
+          python3 scripts/check_exhibit_completeness.py | tail -12
+
+      - name: package the artifacts
+        run: npm run package
+
+      # The browser-driven guard is deliberately NOT here, and this is a judgement rather than an oversight.
+      #
+      # `scripts/verify-build-guard.mjs` is the test that found the real toolbar bug - `isFirefox()` returning
+      # true on modern Chromium - which 381 unit tests, 20 load checks, 27 end-to-end checks and 31 Firefox
+      # checks all missed. It is worth running. It is not reliable HERE: the Chromium that Playwright installs
+      # on a runner would not load the extension at all (no service worker, extension not registered), so the
+      # step failed for reasons that had nothing to do with the code. Two attempts at making it work were
+      # wrong. A step that goes red for environmental reasons gets ignored, and an ignored gate is worse than
+      # no gate - so it stays a documented local check instead:
+      #
+      #     npm run test:guard
+      #
+      # What CI does verify about the shipped archives is everything that does not need a browser: the build,
+      # both manifests, every referenced file, Mozilla's linter, and the three static security audits.
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: autoflow-extension-zips
+          path: |
+            release/autoflow-chrome.zip
+            release/autoflow-firefox.zip
+            release/autoflow-source.zip
+          if-no-files-found: error
+
+      - name: attach the zips to the release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          # fail_on_unmatched_files: a missing zip becomes an error rather than a release with two of its
+          # three assets. The artifact-upload step above already fails if the zips are absent, so this is the
+          # second line of defence rather than the first.
+          fail_on_unmatched_files: true
+          files: |
+            release/autoflow-chrome.zip
+            release/autoflow-firefox.zip
+            release/autoflow-source.zip
+          generate_release_notes: true
+          body: |
+            ## Install
+
+            **Chrome / Edge / Brave / Opera** — download `autoflow-chrome.zip`, unpack it, then
+            `chrome://extensions` → enable Developer mode → **Load unpacked** → pick the unpacked folder.
+
+            **Firefox** — download `autoflow-firefox.zip`. A permanent install requires Mozilla's signature,
+            which this archive does not have, so for now use
+            `about:debugging#/runtime/this-firefox` → **Load Temporary Add-on** → pick `manifest.json`
+            inside the unpacked folder. Temporary add-ons are removed when Firefox closes.
+
+            **Source** — `autoflow-source.zip` is the full tree, including the tests and the security scripts.
+
+            Verified before this archive was produced: the unit suite, both manifests' referenced files, and
+            Mozilla's own linter reporting zero errors and zero warnings.

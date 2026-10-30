@@ -17,12 +17,19 @@ export const DEFAULT_LANGUAGE = 'system';
 
 /** Resolve `system` to a concrete language code this build actually ships. */
 export function resolveLanguage(preference, browserLanguage) {
-  if (preference && preference !== 'system' && CATALOGUES[preference]) return preference;
+  /**
+   * OWN PROPERTIES ONLY.
+   *
+   * `CATALOGUES[preference]` walks the prototype chain, so the preference "constructor" or "toString" resolved to
+   * a function rather than to a language - and the panel then called `translator()` on it. `Object.hasOwn` asks the
+   * question that is actually being asked: "is this one of the languages this build ships?"
+   */
+  if (preference && preference !== 'system' && Object.hasOwn(CATALOGUES, preference)) return preference;
   const lang = String(browserLanguage || '').toLowerCase();
   // exact match first, then the primary subtag: 'fa-IR' -> 'fa'
-  if (CATALOGUES[lang]) return lang;
+  if (Object.hasOwn(CATALOGUES, lang)) return lang;
   const primary = lang.split('-')[0];
-  if (CATALOGUES[primary]) return primary;
+  if (Object.hasOwn(CATALOGUES, primary)) return primary;
   return 'en';
 }
 
@@ -41,9 +48,16 @@ export function direction(language) {
  * "undefined", so a template mistake is visible instead of producing a sentence that reads as nonsense.
  */
 export function translate(language, key, vars) {
-  const catalogue = CATALOGUES[language] || CATALOGUES.en;
-  let value = catalogue[key];
-  if (value === undefined) value = CATALOGUES.en[key];
+  const catalogue = Object.hasOwn(CATALOGUES, language) ? CATALOGUES[language] : CATALOGUES.en;
+  /**
+   * OWN PROPERTIES ONLY, again.
+   *
+   * `catalogue['constructor']` is `Object`, and `catalogue['toString']` is a function - so a key that happened to be
+   * a prototype member was translated into the source of a built-in, and the UI printed `function Object() { ... }`.
+   * `Object.hasOwn` is the check that matches the intent: "is this key one of ours?"
+   */
+  let value = Object.hasOwn(catalogue, key) ? catalogue[key] : undefined;
+  if (value === undefined) value = Object.hasOwn(CATALOGUES.en, key) ? CATALOGUES.en[key] : undefined;
   if (value === undefined) return key; // visible, and a test should have caught it
   if (!vars) return value;
   return value.replace(/\{(\w+)\}/g, (m, name) =>
@@ -64,8 +78,8 @@ export function translator(language) {
   t.rtl = isRtl(language);
   t.dir = direction(language);
   t.has = (key) => {
-    const cat = CATALOGUES[language] || CATALOGUES.en;
-    return cat[key] !== undefined || CATALOGUES.en[key] !== undefined;
+    const cat = Object.hasOwn(CATALOGUES, language) ? CATALOGUES[language] : CATALOGUES.en;
+    return Object.hasOwn(cat, key) || Object.hasOwn(CATALOGUES.en, key);
   };
   return t;
 }

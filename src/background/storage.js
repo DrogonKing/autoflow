@@ -80,6 +80,13 @@ export const DEFAULT_SETTINGS = {
  */
 const local = () => api.storage.local;
 
+let storageLock = Promise.resolve();
+function withStorageLock(fn) {
+  const run = storageLock.then(fn, fn);
+  storageLock = run.catch(() => {});
+  return run;
+}
+
 export function get(keys) {
   return local().get(keys).then((result) => result ?? {});
 }
@@ -159,25 +166,29 @@ export async function getAutomation(id) {
  * once, and "write the array I loaded minutes ago" would silently drop the other surface's changes.
  */
 export async function saveAutomation(automation) {
-  if (!automation?.id) throw new Error('an automation needs an id');
-  const list = await listAutomations();
-  const idx = list.findIndex((a) => a.id === automation.id);
-  const record = {
-    ...automation,
-    updatedAt: Date.now(),
-    createdAt: automation.createdAt ?? (idx >= 0 ? list[idx].createdAt : Date.now()),
-  };
-  if (idx >= 0) list[idx] = record;
-  else list.push(record);
-  await set({ [KEYS.automations]: list, [KEYS.schemaVersion]: CURRENT_SCHEMA });
-  return record;
+  return withStorageLock(async () => {
+    if (!automation?.id) throw new Error('an automation needs an id');
+    const list = await listAutomations();
+    const idx = list.findIndex((a) => a.id === automation.id);
+    const record = {
+      ...automation,
+      updatedAt: Date.now(),
+      createdAt: automation.createdAt ?? (idx >= 0 ? list[idx].createdAt : Date.now()),
+    };
+    if (idx >= 0) list[idx] = record;
+    else list.push(record);
+    await set({ [KEYS.automations]: list, [KEYS.schemaVersion]: CURRENT_SCHEMA });
+    return record;
+  });
 }
 
 export async function deleteAutomation(id) {
-  const list = await listAutomations();
-  const next = list.filter((a) => a.id !== id);
-  await set({ [KEYS.automations]: next });
-  return next.length !== list.length;
+  return withStorageLock(async () => {
+    const list = await listAutomations();
+    const next = list.filter((a) => a.id !== id);
+    await set({ [KEYS.automations]: next });
+    return next.length !== list.length;
+  });
 }
 
 export async function duplicateAutomation(id) {
@@ -268,9 +279,12 @@ export async function readEvents() {
 
 /** Clear them, after an export or when starting a clean test. */
 export async function clearEvents() {
-  await flushEvents();
-  eventCache = [];
-  await set({ [KEYS.diagnosticEvents]: [] });
+  const write = eventWriteChain.then(async () => {
+    eventCache = [];
+    await set({ [KEYS.diagnosticEvents]: [] });
+  });
+  eventWriteChain = write.catch(() => {});
+  await write;
 }
 
 export async function getSettings() {
@@ -279,10 +293,12 @@ export async function getSettings() {
 }
 
 export async function saveSettings(patch) {
-  const current = await getSettings();
-  const next = { ...current, ...patch };
-  await set({ [KEYS.settings]: next });
-  return next;
+  return withStorageLock(async () => {
+    const current = await getSettings();
+    const next = { ...current, ...patch };
+    await set({ [KEYS.settings]: next });
+    return next;
+  });
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -290,14 +306,16 @@ export async function saveSettings(patch) {
 // ---------------------------------------------------------------------------------------------
 
 export async function recordRun(entry) {
-  const settings = await getSettings();
-  const { [KEYS.runs]: runs } = await get(KEYS.runs);
-  const list = Array.isArray(runs) ? runs : [];
-  const record = { ...entry, finishedAt: entry.finishedAt ?? Date.now() };
-  list.unshift(record);
-  const limited = list.slice(0, Math.max(1, settings.runHistoryLimit));
-  await set({ [KEYS.runs]: limited });
-  return record;
+  return withStorageLock(async () => {
+    const settings = await getSettings();
+    const { [KEYS.runs]: runs } = await get(KEYS.runs);
+    const list = Array.isArray(runs) ? runs : [];
+    const record = { ...entry, finishedAt: entry.finishedAt ?? Date.now() };
+    list.unshift(record);
+    const limited = list.slice(0, Math.max(1, settings.runHistoryLimit));
+    await set({ [KEYS.runs]: limited });
+    return record;
+  });
 }
 
 export async function listRuns() {
@@ -556,6 +574,7 @@ function conditionDepth(condition, depth, seen = new Set()) {
 }
 
 export async function importAll(doc, { replace = false, allowScripts = false } = {}) {
+  return withStorageLock(async () => {
   const incoming = Array.isArray(doc) ? doc : doc?.automations;
   if (!Array.isArray(incoming)) throw new Error('the file does not contain a list of automations');
 
@@ -660,4 +679,5 @@ export async function importAll(doc, { replace = false, allowScripts = false } =
 
   await set({ [KEYS.automations]: merged, [KEYS.schemaVersion]: CURRENT_SCHEMA });
   return { imported: imported.length, skipped, concerns: flagged };
+  });
 }

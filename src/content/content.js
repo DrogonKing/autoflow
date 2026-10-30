@@ -19,6 +19,9 @@ import {
 
 const PICKER_ATTR = 'data-autoflow-pick';
 
+let stepAborted = false;
+let highlightTimer = null;
+
 /**
  * Answer a message.
  *
@@ -51,7 +54,6 @@ function reply(sendResponse, payload) {
  * cannot spin forever - which is the failure mode that would fire orders.
  */
 async function clickEveryMatch(step, all) {
-  const started = Date.now();
   /**
    * The hard stop, and it is now REPORTED rather than silent.
    *
@@ -59,7 +61,7 @@ async function clickEveryMatch(step, all) {
    * with `stoppedEarly: false` - a completed run as far as anyone could see. When the ceiling is reached the result
    * now says so, because "I stopped" and "I finished" are different answers to a question about orders.
    */
-  const CEILING = 200;
+  const CEILING = all.limit > 0 ? Math.min(all.limit, 5000) : 200;
   let clicked = 0;
   let stoppedEarly = false;
   let reason = '';
@@ -88,6 +90,11 @@ async function clickEveryMatch(step, all) {
   let hitCeiling = false;
 
   for (let pass = 0; pass < CEILING; pass++) {
+    if (stepAborted) {
+      stoppedEarly = true;
+      reason = 'stopped by user';
+      break;
+    }
     // the whole candidate list on this pass, filtered the same way a single click would be
     const found = findAll(document, step.finder, { requireVisible: true, requireActionable: true });
     total = found.elements.length;
@@ -108,10 +115,12 @@ async function clickEveryMatch(step, all) {
     let ok = true;
     try {
       realClick(el, { button: step.button, clickCount: step.clickCount ?? 1 });
-      done.add(el);
     } catch (e) {
       ok = false;
       reason = String(e?.message ?? e);
+    } finally {
+      // marked either way: a failed click that is not marked is picked again and again, the same element each pass
+      done.add(el);
     }
 
     const decision = afterClick({
@@ -127,7 +136,7 @@ async function clickEveryMatch(step, all) {
     }
 
     // give the page a moment to process the click before looking again
-    if (all.gapMs > 0 && Date.now() - started < 120_000) {
+    if (all.gapMs > 0 && !stepAborted) {
       await new Promise((r) => setTimeout(r, all.gapMs));
     }
   }
@@ -174,19 +183,19 @@ async function waitUntil(targetMs) {
   // Phase 1: sleep in chunks, re-reading the clock so a throttled timer cannot overshoot.
   // A BACKGROUND TAB throttles setTimeout to about once per second, so this phase can return up to a second
   // early - which was measured: five runs landed 479-756ms BEFORE the target for exactly this reason.
-  while (remaining() > 250) {
+  while (remaining() > 250 && !stepAborted) {
     await new Promise((r) => setTimeout(r, Math.min(remaining() - 200, 500)));
   }
 
   // Phase 2: the last stretch on a short timer. This is where the accuracy comes from, and it only works
   // when the tab is not throttled - i.e. visible.
-  while (remaining() > 30) {
+  while (remaining() > 30 && !stepAborted) {
     await new Promise((r) => setTimeout(r, 5));
   }
 
   // Phase 3: the final window without timers at all. Bounded to the last 30ms so it cannot burn the CPU for
   // a noticeable stretch, and it is the only way to land inside the same frame as the target.
-  while (remaining() > 0) {
+  while (remaining() > 0 && !stepAborted) {
     // deliberate spin, bounded above
   }
   return Date.now() - targetMs;
@@ -206,70 +215,91 @@ function tabIsThrottled() {
   }
 }
 
+/**
+ * Perform one step and attach the timing it was held for.
+ *
+ * The timing fields are added here, once, to whatever the step returned - so every branch of the step reports them
+ * without each branch having to remember to.
+ */
 async function performStep(step) {
+  const timing = { waitedMs: null, throttled: false };
+  const result = await executeStep(step, timing);
+  if (timing.waitedMs === null) return result;
+  return {
+    ...result,
+    timingOffsetMs: timing.waitedMs,
+    ...(timing.throttled ? { timingThrottled: true } : {}),
+  };
+}
+
+async function executeStep(step, timing) {
+  stepAborted = false;
+
   const needsElement = step.kind !== 'wait' && step.kind !== 'goto' && step.kind !== 'reload' &&
     step.kind !== 'back' && step.kind !== 'forward' && step.kind !== 'newTab' &&
     step.kind !== 'switchTab' && step.kind !== 'closeTab' && step.kind !== 'runScript' &&
     step.kind !== 'notify' && step.kind !== 'sound' && step.kind !== 'download' &&
-    step.kind !== 'screenshot' && step.kind !== 'stop' && step.kind !== 'screenshot';
+    step.kind !== 'screenshot' && step.kind !== 'stop' && step.kind !== 'screenshot' &&
+    step.kind !== 'waitFor' && step.kind !== 'extract';
+  // a "click every match" step is allowed to find nothing: that is a count of zero, not an error
+  const clickAll = step.kind === 'click' && !!normaliseAll(step.clickAll);
+  const wantsElement = needsElement && !!step.finder && !clickAll;
+
+  const locate = () => findElement(document, step.finder, {
+    requireVisible: step.kind !== 'check' && step.kind !== 'fill',
+    requireActionable: step.kind === 'click' || step.kind === 'hover',
+  });
+
+  let el = null;
+  let how = '';
+  let tried = [];
+  const willWait = Number.isFinite(step.atMs) && step.atMs > Date.now();
+
+  if (wantsElement && willWait) {
+    try {
+      const found = locate();
+      el = found.element ?? null;
+      how = found.how;
+      tried = found.tried ?? [];
+    } catch {
+      el = null;
+    }
+  }
 
   // ---- precise timing: hold the step until its target instant
   //
   // `atMs` is set by the worker when the schedule carried a second. The wait happens HERE rather than in the
   // worker because the page's timer is the last thing before the click, and every millisecond spent in the
   // worker's path is a millisecond of lateness.
-  let waitedMs = null;
-  let waitWasThrottled = false;
-  if (Number.isFinite(step.atMs) && step.atMs > Date.now()) {
+  if (willWait) {
+    if (el) {
+      try { el.scrollIntoView?.({ block: 'center', inline: 'nearest', behavior: 'instant' }); } catch { /* not fatal */ }
+    }
     // recorded BEFORE the wait: a throttled tab is the single reason a precise schedule can still miss, so the
     // trace has to say whether it was throttled rather than leaving the offset unexplained
     const throttled = tabIsThrottled();
-    waitedMs = await waitUntil(step.atMs);
+    timing.waitedMs = await waitUntil(step.atMs);
     if (throttled) {
       // surfaced, not swallowed: this is the difference between "clicked at 09:00:00.02" and "clicked early"
-      waitWasThrottled = true;
+      timing.throttled = true;
     }
   }
 
-  let el = null;
-  let how = '';
-  if (needsElement && step.finder) {
-    const found = findElement(document, step.finder, {
-      requireVisible: step.kind !== 'check' && step.kind !== 'fill',
-      requireActionable: step.kind === 'click' || step.kind === 'hover',
-    });
-    if (!found.element) {
-      throw new ActionError(
-        `could not find ${how || 'the element'} - nothing matched (tried: ${
-          (found.tried ?? []).map((t) => t.how).join('; ')})`,
-        { tried: found.tried, finder: step.finder },
-      );
-    }
-    el = found.element;
+  if (wantsElement && (!el || !el.isConnected)) {
+    const found = locate();
+    el = found.element ?? null;
     how = found.how;
+    tried = found.tried ?? [];
   }
 
-  /**
-   * THE TIMING REPORT WAS DEFINED AND NEVER USED.
-   *
-   * MEASURED: this helper existed, and `withTiming` had exactly ONE occurrence in the file - its own definition. So
-   * `timingOffsetMs` and `timingThrottled` never reached a step result, which means a run never reported how late its
-   * precise click actually landed. That is the number every "the click missed the second" report depends on, and it was
-   * being computed and discarded.
-   *
-   * It is applied where the results leave: `runStep`'s own return, via `report`. One place, so a new step kind cannot
-   * forget it.
-   */
-  const withTiming = (r) => (waitedMs === null ? r
-    : { ...r, timingOffsetMs: waitedMs, ...(waitWasThrottled ? { timingThrottled: true } : {}) });
+  if (wantsElement && !el) {
+    throw new ActionError(
+      `could not find ${step.finder?.selector || step.finder?.text || step.finder?.id || 'the element'} - nothing matched`
+        + ` (tried: ${tried.map((t) => t.how).join('; ')})`,
+      { tried, finder: step.finder },
+    );
+  }
 
-  /**
-   * ONE EXIT POINT, so the timing report cannot be forgotten.
-   *
-   * Wrapping the switch rather than patching each of the fourteen `return` statements: a missed return would silently drop
-   * `timingOffsetMs` again, and that is exactly the bug being fixed.
-   */
-  const result = await (async () => {
   switch (step.kind) {
     case 'click': {
       // ---- click EVERY match, when the step asks for it
@@ -283,6 +313,25 @@ async function performStep(step) {
       const all = normaliseAll(step.clickAll);
       if (all) {
         return await clickEveryMatch(step, all);
+      }
+      if (Number.isInteger(step.repeat) && step.repeat > 1) {
+        // a burst: the same click several times in one step, for a page that needs a rapid sequence
+        let current = el;
+        let last = null;
+        let repeated = 0;
+        for (let i = 0; i < step.repeat; i++) {
+          if (stepAborted) break;
+          if (i > 0 && step.finder && (!current || !current.isConnected)) {
+            const again = locate();
+            current = again.element ?? current;
+          }
+          last = realClick(current, { button: step.button, clickCount: step.clickCount ?? 1 });
+          repeated += 1;
+          if (i < step.repeat - 1 && (step.repeatGapMs ?? 0) > 0 && !stepAborted) {
+            await new Promise((r) => setTimeout(r, step.repeatGapMs));
+          }
+        }
+        return { how, ...last, repeated };
       }
       return { how, ...realClick(el, { button: step.button, clickCount: step.clickCount ?? 1 }) };
     }
@@ -300,27 +349,40 @@ async function performStep(step) {
       return { how, ...selectOption(el, step.values ?? step.value) };
 
     case 'hover': {
+      if (!el) throw new ActionError('hover needs an element');
       const rect = el.getBoundingClientRect();
       const w = el.ownerDocument.defaultView;
       const opts = {
         bubbles: true, cancelable: true, composed: true, view: w,
         clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2,
       };
-      el.dispatchEvent(new w.MouseEvent('mouseover', opts));
-      el.dispatchEvent(new w.MouseEvent('mouseenter', { ...opts, bubbles: false }));
-      el.dispatchEvent(new w.MouseEvent('mousemove', opts));
+      const mouse = (type, init) => {
+        try {
+          return new w.MouseEvent(type, init);
+        } catch {
+          // a `view` that is not a genuine Window is refused by the constructor; the event is still valid without it
+          const { view, ...rest } = init;
+          return new w.MouseEvent(type, rest);
+        }
+      };
+      el.dispatchEvent(mouse('mouseover', opts));
+      el.dispatchEvent(mouse('mouseenter', { ...opts, bubbles: false }));
+      el.dispatchEvent(mouse('mousemove', opts));
       return { how, hovered: true };
     }
 
     case 'focus':
+      if (!el) throw new ActionError('focus needs an element');
       el.focus?.();
       return { how, focused: el.ownerDocument.activeElement === el };
 
     case 'blur':
+      if (!el) throw new ActionError('blur needs an element');
       el.blur?.();
       return { how, blurred: true };
 
     case 'submit': {
+      if (!el) throw new ActionError('submit needs an element');
       const form = el.tagName === 'FORM' ? el : el.form ?? el.closest?.('form');
       if (!form) throw new ActionError('there is no form to submit around this element');
       if (typeof form.requestSubmit === 'function') form.requestSubmit();
@@ -339,9 +401,14 @@ async function performStep(step) {
     case 'key':
       return { how, ...(await pressKeys(el, step.keys, { gapMs: step.gapMs ?? 0, holdMs: step.holdMs ?? 0 })) };
 
-    case 'wait':
-      await new Promise((r) => setTimeout(r, step.ms));
+    case 'wait': {
+      // in short slices, so a Stop from the user is honoured within a tenth of a second rather than after the full wait
+      const until = Date.now() + step.ms;
+      while (!stepAborted && Date.now() < until) {
+        await new Promise((r) => setTimeout(r, Math.min(100, Math.max(0, until - Date.now()))));
+      }
       return { waited: step.ms };
+    }
 
     case 'waitFor': {
       const timeout = step.timeoutMs ?? 15_000;
@@ -349,6 +416,7 @@ async function performStep(step) {
       const started = Date.now();
       let last = null;
       while (Date.now() - started <= timeout) {
+        if (stepAborted) throw new ActionError('stopped by user');
         last = observe(step.finder, step.condition);
         if (conditionMatches(step.condition, last)) {
           return { how, matchedAfterMs: Date.now() - started, observed: last };
@@ -473,15 +541,13 @@ async function performStep(step) {
     default:
       throw new ActionError(`the page side does not handle step kind "${step.kind}"`);
   }
-  })();
-  return withTiming(result);
 }
 
 /** Read the page for a condition, returning the shape the condition evaluator expects. */
 function observe(finder, condition) {
-  if (!finder || (condition && ['url', 'title', 'variable', 'js'].includes(condition.source))) {
-    if (condition?.source === 'url') return { value: location.href };
-    if (condition?.source === 'title') return { value: document.title };
+  if (condition?.source === 'url') return { value: location.href, found: true, flags: {} };
+  if (condition?.source === 'title') return { value: document.title, found: true, flags: {} };
+  if (!finder || (condition && ['variable', 'js'].includes(condition.source))) {
     return { value: null, found: false, flags: {} };
   }
   const result = findElement(document, finder, { requireVisible: false });
@@ -516,6 +582,9 @@ function conditionMatches(condition, observed) {
   if (['visible', 'hidden', 'checked', 'unchecked', 'enabled', 'disabled'].includes(cmp)) {
     return observed.flags?.[cmp] === true;
   }
+  if (cmp === 'countEq') return Number(observed.count ?? 0) === Number(condition.value);
+  if (cmp === 'countGt') return Number(observed.count ?? 0) > Number(condition.value);
+  if (cmp === 'countLt') return Number(observed.count ?? 0) < Number(condition.value);
   if (!observed.found) return false;
   const a = String(observed.value ?? '');
   const b = String(condition.value ?? '');
@@ -631,13 +700,22 @@ function onPickerMove(e) {
 }
 
 function onPickerClick(e) {
-  e.preventDefault();
-  e.stopPropagation();
   const target = e.target;
   if (isOurUi(target)) return;
+  e.preventDefault();
+  e.stopPropagation();
   stopPicking();
-  const info = describeElement(target);
-  const finder = buildFinder(target);
+  let info;
+  let finder;
+  try {
+    info = describeElement(target);
+    finder = buildFinder(target);
+  } catch (err) {
+    // a pick that cannot be described must not vanish silently: the panel is told the pick was cancelled
+    console.error('autoflow: could not describe the picked element', err);
+    api.runtime.sendMessage({ type: 'element-pick-cancelled' }).catch(() => {});
+    return;
+  }
   /**
    * THE PAGE TRAVELS WITH THE PICK.
    *
@@ -667,6 +745,7 @@ function startPicking() {
 
 function stopPicking() {
   picking = false;
+  lastHover = null;
   document.removeEventListener('mousemove', onPickerMove, true);
   document.removeEventListener('click', onPickerClick, true);
   document.removeEventListener('keydown', onPickerKey, true);
@@ -678,7 +757,7 @@ function stopPicking() {
 // message handling
 // ---------------------------------------------------------------------------------------------
 
-api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+function handleMessage(msg, sender, sendResponse) {
   if (!msg || typeof msg.type !== 'string') return false;
 
   /**
@@ -774,17 +853,14 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       reply(sendResponse, { ok: true });
       return true;
 
+    case 'abort-step':
+      stepAborted = true;
+      reply(sendResponse, { ok: true });
+      return true;
+
     case 'highlight': {
       if (msg.finder) {
         try {
-          /**
-           * `element`, NOT `elements`.
-           *
-           * MEASURED: `findElement` returns `{ element, how, candidates, tried }` - a single element - so this destructured
-           * a name that does not exist, leaving `undefined`, and the next line called `getBoundingClientRect()` on it. Every
-           * `highlight` message therefore threw, which is the typing indicator an `if` step uses to show what it is looking
-           * at: the feature looked like it did nothing.
-           */
           const { element } = findElement(document, msg.finder, { requireVisible: false });
           if (element) {
             const r = element.getBoundingClientRect();
@@ -795,7 +871,8 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             overlay.style.width = `${r.width}px`;
             overlay.style.height = `${r.height}px`;
             overlay.style.borderColor = '#00c853';
-            setTimeout(() => positionOverlay(null), msg.ms ?? 1500);
+            clearTimeout(highlightTimer);
+            highlightTimer = setTimeout(() => positionOverlay(null), msg.ms ?? 1500);
           }
         } catch { /* a highlight must never break anything */ }
       }
@@ -806,7 +883,16 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     default:
       return false;
   }
-});
+}
+
+// The same page can be injected twice (a re-injected script after an update or a navigation within the same
+// document). A listener is added once per message port, so a second injection does not answer every message twice.
+const registeredOnMessage = (globalThis.__autoflowRegisteredOnMessage ??= new WeakSet());
+const onMessageTarget = api.runtime.onMessage;
+if (onMessageTarget && !registeredOnMessage.has(onMessageTarget)) {
+  registeredOnMessage.add(onMessageTarget);
+  onMessageTarget.addListener(handleMessage);
+}
 
 // A marker in the DOM, because the page cannot see this script's `chrome` object: content scripts run
 // in an isolated world. This is how the extension's presence is observable from outside, and it lets the

@@ -24,6 +24,22 @@ export class ConditionError extends Error {
 }
 
 /**
+ * A number from an observed or expected value, or NaN when there is none.
+ *
+ * Persian and Arabic digits are converted and thousands separators removed, because a page formats numbers that way.
+ * null, undefined, booleans and blank text are NaN rather than 0, so an absent value is never silently a number.
+ */
+function parseNum(v) {
+  if (v === null || v === undefined || typeof v === 'boolean' || String(v).trim() === '') return NaN;
+  if (typeof v === 'number') return v;
+  const s = String(v)
+    .replace(/[\u06F0-\u06F9]/g, (d) => String(d.charCodeAt(0) - 0x06F0))
+    .replace(/[\u0660-\u0669]/g, (d) => String(d.charCodeAt(0) - 0x0660))
+    .replace(/[,\u066C]/g, '');
+  return Number(s);
+}
+
+/**
  * Compare one observed value.
  *
  * @param {string} comparator
@@ -57,8 +73,8 @@ export function compare(comparator, observed, expected, opts = {}) {
 
   // count comparators receive a number
   if (comparator === 'countEq' || comparator === 'countGt' || comparator === 'countLt') {
-    const n = Number(observed);
-    const m = Number(exp);
+    const n = parseNum(observed);
+    const m = parseNum(exp);
     if (!Number.isFinite(n) || !Number.isFinite(m)) {
       throw new ConditionError(
         `${comparator} compares counts, but got ${JSON.stringify(observed)} and ${JSON.stringify(expected)}`,
@@ -70,8 +86,8 @@ export function compare(comparator, observed, expected, opts = {}) {
   }
 
   if (NUMERIC_COMPARATORS.has(comparator)) {
-    const n = Number(observed);
-    const m = Number(exp);
+    const n = parseNum(observed);
+    const m = parseNum(exp);
     // Comparing text with > is a mistake worth reporting: "9" > "10" is true lexicographically, which
     // silently produces the wrong branch.
     if (!Number.isFinite(n) || !Number.isFinite(m)) {
@@ -96,6 +112,9 @@ export function compare(comparator, observed, expected, opts = {}) {
     case 'startsWith':  return norm(observed).startsWith(norm(exp));
     case 'endsWith':    return norm(observed).endsWith(norm(exp));
     case 'matches': {
+      if (expected === undefined || expected === null) {
+        throw new ConditionError('matches needs a regular expression pattern');
+      }
       /**
        * A regular expression supplied by the automation's author, run against a value from a page.
        *
@@ -111,7 +130,6 @@ export function compare(comparator, observed, expected, opts = {}) {
       } catch (e) {
         throw new ConditionError(`the regular expression ${JSON.stringify(exp)} is invalid: ${e.message}`);
       }
-      return re.test(observed === null || observed === undefined ? '' : String(observed));
     }
     default:
       throw new ConditionError(`unknown comparator ${JSON.stringify(comparator)}`);
@@ -193,15 +211,21 @@ export async function evaluateCondition(condition, ctx) {
 
   if (Array.isArray(condition.also) && condition.also.length) {
     const combine = condition.combine === 'any' ? 'any' : 'all';
-    // awaited one at a time rather than with Promise.all: a nested tree reads the page, and firing every branch at
-    // once would send one message per sub-condition when the answer is already decided
-    const rest = [];
-    for (const sub of condition.also) rest.push(await evaluateCondition(sub, ctx));
+    // awaited one at a time and short-circuited: a nested tree reads the page, and once the answer is decided
+    // there is no reason to send another message for the remaining sub-conditions
     if (combine === 'any') {
       // the primary condition participates: "this OR any of those"
-      return result || rest.some(Boolean);
+      if (result) return true;
+      for (const sub of condition.also) {
+        if (await evaluateCondition(sub, ctx)) return true;
+      }
+      return false;
     }
-    return result && rest.every(Boolean);
+    if (!result) return false;
+    for (const sub of condition.also) {
+      if (!(await evaluateCondition(sub, ctx))) return false;
+    }
+    return true;
   }
 
   return result;

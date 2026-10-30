@@ -11,7 +11,7 @@ Findings: 14
 ------------------------------------------------------------------------------
 MEDIUM (4)
 ------------------------------------------------------------------------------
-  src/background/service-worker.js:1340
+  src/background/service-worker.js:1361
     network-call
     const res = await fetch(url, {
   src/manifest.json:18
@@ -36,7 +36,7 @@ LOW (10)
   src/build-banner.js:94
     innerText-from-page
     fix.textContent = mismatch.fix;
-  src/core/dom/actions.js:258
+  src/core/dom/actions.js:262
     innerText-from-page
     el.textContent = clearFirst ? value : (el.textContent ?? '') + value;
   src/ui/options/options.js:19
@@ -45,26 +45,25 @@ LOW (10)
   src/ui/panel/panel.js:34
     innerText-from-page
     else if (k === 'text') node.textContent = v;
-  src/ui/panel/panel.js:358
+  src/ui/panel/panel.js:395
     innerText-from-page
     timeHint.textContent = t(`time.error.${state.timeError}`);
-  src/ui/panel/panel.js:362
+  src/ui/panel/panel.js:399
     innerText-from-page
     timeHint.textContent = hasSecond ? t('sched.secondHint') : '';
-  src/ui/panel/panel.js:618
+  src/ui/panel/panel.js:658
     innerText-from-page
     live.textContent = t('ui.pick');
-  src/ui/panel/panel.js:1360
+  src/ui/panel/panel.js:1503
     innerText-from-page
     hint.textContent = parsed.ok ? '' : t(`time.error.${parsed.error}`);
 
 ------------------------------------------------------------------------------
 Message handlers and sender validation
 ------------------------------------------------------------------------------
-  onMessage listeners found : 2
-  that inspect the sender  : 2
-    src/background/service-worker.js:1212  params=(msg, sender, sendResponse)  validates sender: yes
-    src/content/content.js:681  params=(msg, sender, sendResponse)  validates sender: yes
+  onMessage listeners found : 1
+  that inspect the sender  : 1
+    src/background/service-worker.js:1233  params=(msg, sender, sendResponse)  validates sender: yes
 
 ------------------------------------------------------------------------------
 Manifest

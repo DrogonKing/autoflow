@@ -152,7 +152,9 @@ function backupSection() {
           document.body.append(a);
           a.click();
           a.remove();
-          URL.revokeObjectURL(url);
+          // NOT IMMEDIATELY: revoking the URL in the same tick can cancel the download that is still reading it.
+          // Ten seconds is longer than any download needs to start, and the URL is released after that.
+          setTimeout(() => URL.revokeObjectURL(url), 10_000);
           toast(`Exported ${res.document.automations.length} automations`);
         },
       }),
@@ -162,6 +164,9 @@ function backupSection() {
         type: 'file', id: 'import-file', accept: '.json', style: 'display:none',
         onchange: async (e) => {
           const file = e.target.files?.[0];
+          // THE INPUT IS RESET, or choosing the SAME file again does nothing: a file input keeps its value after a
+          // change, and a second `change` event only fires when the value actually differs.
+          e.target.value = '';
           if (!file) return;
           const text = await file.text();
           let doc;
@@ -235,8 +240,19 @@ function diagnosticsSection() {
       el('button', {
         text: t('opt.copyGlyph'),
         onclick: async () => {
-          await navigator.clipboard.writeText(JSON.stringify(state.diagnostics, null, 2));
-          toast('Copied');
+          /**
+           * THE CLIPBOARD CAN REFUSE, and a refusal is not a crash.
+           *
+           * `navigator.clipboard.writeText` rejects when the page has no permission for it - which is the normal
+           * answer in a browser that withholds clipboard access - and an unhandled rejection left the button looking
+           * dead with no reason anywhere. The reason is now shown.
+           */
+          try {
+            await navigator.clipboard.writeText(JSON.stringify(state.diagnostics, null, 2));
+            toast(t('action.copied'));
+          } catch (e) {
+            toast(String(e?.message ?? e), true);
+          }
         },
       }),
     ),

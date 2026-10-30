@@ -6,11 +6,11 @@
   "low": [],
   "verified_absent": [
     "page -> service worker direct messaging (externally_connectable is not declared, so a page has no runtime id to send to)",
-    "page -> content script listener via sender.id check (content.js:479 rejects any sender whose id is not this extension)",
-    "content script -> privileged worker message (service-worker.js:594 allows only ['content-ready', 'element-picked', 'element-pick-cancelled', 'run-status'], none of which start a run, save, import, schedule or touch uploads)",
+    "page -> content script listener via sender.id check (content.js:780 rejects any sender whose id is not this extension)",
+    "content script -> privileged worker message (service-worker.js:1168 allows only ['content-ready', 'element-picked', 'element-pick-cancelled', 'run-status', 'read-file-for-upload'], none of which start a run, save, import, schedule or touch uploads)",
     "content script -> acting on ANOTHER tab (the worker resolves the tab from sender.tab, not from the message, so a content script cannot name a different tab)",
-    "imported file -> silent runScript (storage.js:255 audits every step of every imported automation and strips script steps unless explicitly allowed)",
-    "runScript -> extension privileges (content.js:346 injects a <script> into the page's own world, so it can reach the page and NOT chrome.*; the isolated world is unaffected)",
+    "imported file -> silent runScript (storage.js:384 audits every step of every imported automation and strips script steps unless explicitly allowed)",
+    "runScript -> extension privileges (content.js:630 injects a <script> into the page's own world, so it can reach the page and NOT chrome.*; the isolated world is unaffected)",
     "extracted page text -> extension page XSS (zero markup-write or eval sinks in the shipped UI and content script: no assignment to innerHTML/outerHTML, no insertAdjacentHTML, no document.write, no eval or new Function; every node is built with createElement + textContent)",
     "reading a page's markup (the `source: 'html'` option of an extract step returns e.innerHTML as a string; a read cannot execute anything, and it is coerced and stored as text)",
     "element text injection (the `el()` helper assigns textContent, so a <script> tag in extracted page text is rendered as characters)",
@@ -20,9 +20,8 @@
     "over-broad permissions (all 7 declared permissions are used)",
     "<all_urls> is required by the product (automations run on any site the user chooses); it is not a finding, but it does mean the content script is present on every page - which is why the message allowlist above is the load-bearing control",
     "network permissions (none of webRequest/proxy/declarativeNetRequest is declared)",
-    "page -> arbitrary file read (read-file-for-upload looks the name up in the user's own selection held in storage.session; it does not touch the filesystem by path)",
     "page -> path traversal in an upload key (the key is built by the extension's own file input, and the message type is not in the content-script allowlist)",
-    "exfiltration (zero fetch/XHR/WebSocket/sendBeacon/EventSource/importScripts in the shipped source; 17 files scanned with comments stripped)",
+    "exfiltration (zero fetch/XHR/WebSocket/sendBeacon/EventSource/importScripts in the shipped source; 25 files scanned with comments stripped)",
     "clipboard as an exfiltration channel (the only clipboard use is an explicit user 'copy' button in the options page)"
   ],
   "summary": "No critical or high finding in the shipped source. The load-bearing control is the message allowlist that keeps a content script (present on every origin) away from runs, saves, imports, scheduling and uploads. Zero network primitives. Extension pages have no markup or eval sinks. Residual risk is inherent: <all_urls> plus a stored runScript step means a compromise of extension storage is code execution, and the audit only stops an ACCIDENTAL smuggled script, by design."

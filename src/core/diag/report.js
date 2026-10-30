@@ -81,7 +81,21 @@ export function buildDecisionLines(events) {
       case 'start-request': return `${t}  requested   ${e.automationId}  trigger=${e.trigger}${e.lateByMs ? `  late=${e.lateByMs}ms` : ''}`;
       case 'start-queued': return `${t}  QUEUED      ${e.automationId}  behind ${e.behind ?? 'another run'}  (queue depth ${e.depth})`;
       case 'start-refused': return `${t}  REFUSED     ${e.automationId}  ${e.reason}`;
-      case 'start-accepted': return `${t}  ACCEPTED    ${e.automationId}  steps=${e.steps}  tab=${e.tabId}`;
+      case 'start-accepted': return `${t}  ACCEPTED    ${e.automationId}  trigger=${e.trigger ?? 'manual'}${e.steps !== undefined ? `  steps=${e.steps}` : ''}${e.tabId !== undefined ? `  tab=${e.tabId}` : ''}`;
+      /**
+       * THE TAB DECISIONS, in the same section as the rest of the start path.
+       *
+       * Each of these says a run could not start because there was no tab to run in, or which tab it took instead -
+       * which is the question an export has to answer when the click did not happen.
+       */
+      case 'no-matching-tab': return `${t}  NO TAB       ${e.automationId}  no open tab matched ${Array.isArray(e.patterns) ? e.patterns.join(', ') : (e.patterns ?? '-')}`;
+      case 'tab-from-memory': return `${t}  TAB (memory) ${e.automationId}  ${e.url ?? '-'}`;
+      case 'tab-reopened': return `${t}  TAB REOPENED ${e.automationId}  ${e.url ?? '-'}`;
+      case 'start-queued-wait': return `${t}  WAITED       ${e.automationId}  ${e.queuedMs ?? 0}ms${Number.isFinite(e.sampleMs) ? ` (sample ${e.sampleMs}ms)` : ''}`;
+      case 'imported': return `${t}  IMPORTED     ${e.imported ?? 0} automation(s)`
+        + `${e.rearmed !== undefined ? `  rearmed=${e.rearmed}` : ''}`
+        + `${e.replace ? '  (replaced what was saved)' : ''}`
+        + `${e.refused ? '  (refused)' : ''}`;
       case 'run-finished': return `${t}  finished    ${e.automationId}  ${e.reason}  steps=${e.steps}  ${e.error ? `error: ${e.error}` : ''}`;
       case 'run-abandoned': return `${t}  ABANDONED   ${e.automationId}  ${e.reason}`;
       case 'worker-boot': return `${t}  worker started (boot #${e.boot})`;
@@ -170,8 +184,24 @@ export function exportAsText(doc) {
   if (!(doc.automations ?? []).length) L.push('(none saved - the extension has no automations in this profile)');
   for (const a of (doc.automations ?? [])) {
     const sc = a.schedule ?? {};
-    L.push(`${a.id}  "${a.name}"  enabled=${a.enabled !== false}  schedule=${sc.kind ?? '-'}`
-      + (sc.kind === 'cron' ? ` ${sc.cron ?? ''}` : ` ${String(sc.hour ?? '-').padStart(2, '0')}:${String(sc.minute ?? 0).padStart(2, '0')}${Number.isFinite(sc.second) ? `:${String(sc.second).padStart(2, '0')}` : ''}`)
+    /**
+     * THE SCHEDULE, IN THE FORM THE SCHEDULE ACTUALLY HAS.
+     *
+     * A cron schedule has no hour and an interval has neither, so printing `HH:MM` for both produced lines that read
+     * "schedule=cron 00:00" - a plausible time for a schedule that has none. Each kind now prints the field it really
+     * carries, and a manual schedule prints nothing extra at all.
+     */
+    const when = sc.kind === 'cron'
+      ? ` ${sc.expression ?? sc.cron ?? ''}`
+      : sc.kind === 'interval'
+        ? ` every ${sc.everyMs}ms`
+        : sc.kind === 'manual'
+          ? ''
+          : Number.isFinite(sc.hour)
+            ? ` ${String(sc.hour).padStart(2, '0')}:${String(sc.minute ?? 0).padStart(2, '0')}`
+              + `${Number.isFinite(sc.second) ? `:${String(sc.second).padStart(2, '0')}` : ''}`
+            : '';
+    L.push(`${a.id}  "${a.name}"  enabled=${a.enabled !== false}  schedule=${sc.kind ?? '-'}${when}`
       + `  steps=${(a.steps ?? []).length}`);
   }
   L.push('');

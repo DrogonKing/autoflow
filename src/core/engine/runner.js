@@ -107,6 +107,7 @@ export class Runner {
       // a column and then type `${email}` rather than `${row.email}`
       variables.row = ctx.row;
       for (const [k, v] of Object.entries(ctx.row)) {
+        if (k === '__proto__' || k === 'constructor' || k === 'prototype') continue;
         if (!(k in variables)) variables[k] = v;
       }
     }
@@ -322,7 +323,10 @@ export class Runner {
         } catch (e) {
           if (e instanceof RunAborted) {
             if (e.message === '__break__') break;
-            if (e.message === '__continue__') continue;
+            if (e.message === '__continue__') {
+              iterations = i + 1;
+              continue;
+            }
           }
           throw e;
         }
@@ -345,7 +349,10 @@ export class Runner {
         state.vars['item'] = item;
         if (step.itemVariable) state.vars[step.itemVariable] = item;
         if (item && typeof item === 'object') {
-          for (const [k, v] of Object.entries(item)) state.vars[k] = v;
+          for (const [k, v] of Object.entries(item)) {
+            if (k === '__proto__' || k === 'constructor' || k === 'prototype') continue;
+            state.vars[k] = v;
+          }
           state.vars.row = item;
         }
         try {
@@ -353,7 +360,10 @@ export class Runner {
         } catch (e) {
           if (e instanceof RunAborted) {
             if (e.message === '__break__') break;
-            if (e.message === '__continue__') continue;
+            if (e.message === '__continue__') {
+              iterations = i + 1;
+              continue;
+            }
           }
           throw e;
         }
@@ -376,7 +386,10 @@ export class Runner {
       } catch (e) {
         if (e instanceof RunAborted) {
           if (e.message === '__break__') break;
-          if (e.message === '__continue__') continue;
+          if (e.message === '__continue__') {
+            iterations = i + 1;
+            continue;
+          }
         }
         throw e;
       }

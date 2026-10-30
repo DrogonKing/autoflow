@@ -352,3 +352,65 @@ body.options-page main { max-width: 720px; margin: 0 auto; padding: 20px; }
 body.options-page h1 { font-size: 18px; margin: 0 0 4px; }
 body.options-page section { margin: 18px 0; }
 body.options-page textarea { width: 100%; font-family: var(--mono); font-size: 11.5px; }
+
+/**
+ * THE TOASTS ON THE OPTIONS PAGE.
+ *
+ * They had no styling at all, so a toast was an unpositioned block at the bottom of the document - off-screen on a
+ * long page, and indistinguishable from ordinary text. It is now pinned to the bottom of the VIEWPORT, so a message
+ * about a failed import is visible wherever the user happens to be on the page.
+ */
+.toast {
+  position: fixed;
+  bottom: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 100;
+  max-width: 80vw;
+  padding: 8px 14px;
+  border-radius: var(--radius);
+  border: 1px solid var(--ok);
+  background: var(--surface-2);
+  color: var(--text);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45);
+  font-size: 12px;
+  text-align: center;
+  pointer-events: none;
+}
+/* a refusal is not a success, and it must not look like one */
+.toast.bad { border-color: var(--bad); color: #ff8a80; }
+
+/**
+ * THE CLOCK-SKEW WARNING.
+ *
+ * It is a block of text about the difference between this machine's clock and the server's - the one warning in the
+ * panel that is worth reading rather than skimming - so it is given a surface of its own instead of being an
+ * unstyled run of text in the schedule editor.
+ */
+.skew-warn {
+  margin: 6px 0;
+  padding: 8px 10px;
+  border: 1px solid var(--warn);
+  border-left-width: 3px;
+  border-radius: var(--radius);
+  background: rgba(176, 96, 0, 0.12);
+  color: var(--text);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+.skew-warn strong { color: var(--warn); }
+.skew-warn .hint { display: block; margin-top: 4px; }
+
+/* the two buttons under it, in a row, so they read as a pair of actions */
+.skew-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: 6px;
+}
+.skew-actions button {
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+}
+.skew-actions button:hover { background: var(--surface-2); }

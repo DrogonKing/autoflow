@@ -198,7 +198,12 @@ export function readCsv(text, opts = {}) {
   const rows = parseCsv(text, opts);
   if (rows.length === 0) throw new CsvError('the file is empty');
   const { columns, rows: objects } = rowsToObjects(rows, opts);
-  return { columns, rows: objects, rawRows: rows, delimiter: opts.delimiter ?? 'auto' };
+  // THE DELIMITER THAT WAS ACTUALLY USED, not the word "auto": a caller that wants to write the file back out
+  // needs the character, and "auto" tells it nothing.
+  const delimiter = opts.delimiter && opts.delimiter !== 'auto'
+    ? opts.delimiter
+    : detectDelimiter(String(text ?? '').replace(/^\uFEFF/, ''));
+  return { columns, rows: objects, rawRows: rows, delimiter };
 }
 
 // ---------------------------------------------------------------------------------------------

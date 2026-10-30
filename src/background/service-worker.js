@@ -24,17 +24,6 @@ import {
 import {
   rescheduleAll, scheduleOne, cancelOne, automationIdFromAlarm, startLatencyMs, recordFiredTarget,
   /**
-   * THESE TWO WERE USED BUT NEVER IMPORTED. MEASURED, statically and by name:
-   *   `recordStartLatency` - called by every scheduled run as it finishes, so the run completed and then threw
-   *       ReferenceError. That is why the next-day re-arm could be missing: the throw happened before the re-arm.
-   *   `ALARM_PREFIX` - used by the `cancel-alarms` and `diagnostics` handlers, so BOTH crashed.
-   *
-   * Same fault as `listScheduled` before it: the name goes into the file, the import list does not, and no test calls
-   * the message that would notice. `tests/worker-imports.test.js` now checks that every name used from a module is
-   * actually imported from it, which is the general fix for this class.
-   */
-  recordStartLatency, ALARM_PREFIX,
-  /**
    * `listScheduled` WAS NEVER IMPORTED.
    *
    * MEASURED: `list-scheduled` answered `{ ok: false, error: "listScheduled is not defined" }` while the alarm itself was
@@ -43,6 +32,19 @@ import {
    * this message, which is why it survived.
    */
   listScheduled,
+  /**
+   * THESE TWO WERE USED AND NEVER IMPORTED, in the tree this fix lands on.
+   *
+   * `recordStartLatency` is called by every scheduled run as it finishes (line ~587), so the run completed and then threw
+   * ReferenceError - and the next-day re-arm, which happens after that call, never ran. A daily automation would run once
+   * and stop, with a `scheduled: true` in the log to say otherwise.
+   *
+   * `ALARM_PREFIX` is used by `cancel-alarms` and by the `diagnostics` handler, so both crashed: the "cancel everything"
+   * button and the alarm section of the diagnostic export.
+   *
+   * Both are exported by alarms.js; neither was in this list. `tests/worker-imports.test.js` now checks the whole class.
+   */
+  recordStartLatency, ALARM_PREFIX,
 } from './alarms.js';
 import { nextRun, wantsPreciseTiming, PRECISE_WAKE_MS } from '../core/schedule/schedule.js';
 import { clockOffset } from '../core/clock/skew.js';
@@ -114,11 +116,11 @@ async function sendToTab(tabId, message, { injectIfMissing = true } = {}) {
      * THE CAP DEPENDS ON WHAT THE STEP IS ALLOWED TO DO.
      *
      * MEASURED: a flat 20s timeout covered every message to a tab, so a `wait`, `waitFor` or `clickAll` step whose own
-     * limit is longer was killed at 20 seconds with "message <type> timed out" - the step never got to fail on its own
-     * terms, and a legitimate long wait looked like a broken connection. `waitForLoad` alone waits up to 30s.
+     * budget is longer was killed at 20 seconds with "message <type> timed out" - the step never got to fail on its own
+     * terms, and a legitimate long wait looked like a broken connection. `waitForLoad` alone allows 30s.
      *
-     * The step's own budget decides. `message.timeoutMs` is what the runner passes for waits; everything else keeps the
-     * tight default, because for a click or a read a long silence really is a fault.
+     * The step's own budget decides. Anything under 20s stays at 20s, and the ceiling is ten minutes so a stale message
+     * cannot hang a run forever.
      */
     const budget = Number.isFinite(message?.timeoutMs) ? message.timeoutMs : 20_000;
     const cap = Math.min(Math.max(budget + 5_000, 20_000), 10 * 60_000);
@@ -151,8 +153,11 @@ async function sendToTab(tabId, message, { injectIfMissing = true } = {}) {
  * Each method's job is narrow: translate an abstract step into a browser action, and report a failure
  * with enough context that the trace explains what happened.
  */
-function makeHost(tabId, { stopFlag, onTrace, opts }) {
+function makeHost(initialTabId, { stopFlag, onTrace, opts }) {
+  let tabId = initialTabId;
   const startedAt = Date.now();
+  let lastAliveAt = 0;
+  let lastAlive = false;
 
   /**
    * The precise instant this run must act at, consumed once by the first element step.
@@ -195,40 +200,19 @@ function makeHost(tabId, { stopFlag, onTrace, opts }) {
     stopRequested: () => stopFlag.stopped === true,
 
     async isAlive() {
+      if (Date.now() - lastAliveAt < 50 && lastAlive) return true;
       const tab = await api.tabs.get(tabId).catch(() => null);
-      return Boolean(tab);
+      lastAlive = Boolean(tab);
+      lastAliveAt = Date.now();
+      return lastAlive;
     },
 
     onTrace,
 
     async execute(step) {
-      // Attach the precise target to the step that will act. It is put on the step rather than in a global so
-      // the content script cannot act on a stale value from a previous run in the same tab.
-      if (pendingAtMs !== null && step.kind !== 'wait' && step.kind !== 'notify' && step.kind !== 'goto') {
-        /**
-         * Bring the tab to the front first, when the automation asks for it.
-         *
-         * WHY: Chromium throttles setTimeout in a background tab to roughly once per second, which makes a
-         * second-accurate wait impossible - measured as five runs landing 479-756ms EARLY, all of them. A
-         * visible tab is not throttled, and `tabs.update({active:true})` is the only way an extension can lift
-         * it. It is opt-in because taking focus is a visible, intrusive action.
-         */
-        if (opts.focusBeforePrecise) {
-          try {
-            await api.tabs.update(tabId, { active: true });
-            await api.windows.update?.((await api.tabs.get(tabId))?.windowId, { focused: true });
-            // a short settle: the throttle decision is made per task, and one frame is enough for it to lift
-            await new Promise((r) => setTimeout(r, 60));
-          } catch {
-            // focus is best-effort; the run still proceeds, just possibly throttled and reported as such
-          }
-        }
-        const withTarget = step.atMs === undefined ? { ...step, atMs: pendingAtMs } : step;
-        pendingAtMs = null;       // once only: a later step must not wait for a moment already passed
-        step = withTarget;
-      }
       switch (step.kind) {
         case 'goto': {
+          lastAliveAt = 0;
           await api.tabs.update(tabId, { url: step.url });
           await waitForLoad();
           await new Promise((r) => setTimeout(r, opts.navigationSettleMs ?? 800));
@@ -238,6 +222,7 @@ function makeHost(tabId, { stopFlag, onTrace, opts }) {
         }
 
         case 'reload': {
+          lastAliveAt = 0;
           await api.tabs.reload(tabId, step.bypassCache ? { bypassCache: true } : undefined);
           await waitForLoad();
           await new Promise((r) => setTimeout(r, opts.navigationSettleMs ?? 800));
@@ -263,8 +248,10 @@ function makeHost(tabId, { stopFlag, onTrace, opts }) {
         }
 
         case 'newTab': {
+          lastAliveAt = 0;
           const tab = await api.tabs.create({ url: step.url, active: step.active !== false });
           if (step.active !== false) {
+            if (tab?.id != null) tabId = tab.id;
             await waitForLoad();
             await new Promise((r) => setTimeout(r, opts.navigationSettleMs ?? 800));
           }
@@ -272,6 +259,7 @@ function makeHost(tabId, { stopFlag, onTrace, opts }) {
         }
 
         case 'switchTab': {
+          lastAliveAt = 0;
           let target = null;
           if (step.tabIndex !== undefined) {
             const tabs = await api.tabs.query({ currentWindow: true });
@@ -283,6 +271,7 @@ function makeHost(tabId, { stopFlag, onTrace, opts }) {
           if (!target) throw new Error('no tab matched the switch request');
           await api.tabs.update(target.id, { active: true });
           if (step.runIn !== false) {
+            tabId = target.id;
             const ok = await waitForContent();
             if (!ok) throw new Error('the target tab has no reachable page');
           }
@@ -290,6 +279,7 @@ function makeHost(tabId, { stopFlag, onTrace, opts }) {
         }
 
         case 'closeTab': {
+          lastAliveAt = 0;
           let id = tabId;
           if (step.tabIndex !== undefined) {
             const tabs = await api.tabs.query({ currentWindow: true });
@@ -327,7 +317,7 @@ function makeHost(tabId, { stopFlag, onTrace, opts }) {
         case 'download': {
           let url = step.url;
           if (!url) {
-            const blob = new Blob([String(step.content ?? '')], { type: step.mime ?? 'text/plain' });
+            const blob = new Blob([String(step.content ?? '')], { type: step.mimeType || step.mime || 'application/octet-stream' });
             /**
              * A DATA URL, not a blob URL.
              *
@@ -335,7 +325,7 @@ function makeHost(tabId, { stopFlag, onTrace, opts }) {
              * blob registry - so any download step that carried content threw. A data URL is just a string and works
              * from the worker. It is base64, so it is about a third larger; that is the price of it working at all.
              */
-            url = `data:${step.mimeType || 'application/octet-stream'};base64,${await bytesToBase64(blob)}`;
+            url = `data:${step.mimeType || step.mime || 'application/octet-stream'};base64,${await bytesToBase64(blob)}`;
           }
           const id = await api.downloads.download({
             url,
@@ -355,6 +345,25 @@ function makeHost(tabId, { stopFlag, onTrace, opts }) {
         }
 
         default: {
+          // Attach the precise target only to a page-side step; worker-side steps must not consume it.
+          if (pendingAtMs !== null) {
+            /**
+             * Bring the tab to the front first, when the automation asks for it.
+             * Background-tab timer throttling makes a second-accurate wait impossible, so focus is best-effort.
+             */
+            if (opts.focusBeforePrecise) {
+              try {
+                await api.tabs.update(tabId, { active: true });
+                await api.windows.update((await api.tabs.get(tabId))?.windowId, { focused: true });
+                await new Promise((r) => setTimeout(r, 60));
+              } catch {
+                // focus is best-effort; the run still proceeds, just possibly throttled
+              }
+            }
+            const withTarget = step.atMs === undefined ? { ...step, atMs: pendingAtMs } : step;
+            pendingAtMs = null;
+            step = withTarget;
+          }
           // Everything else is performed in the page, and the content script answers with an envelope.
           // It MUST be unwrapped here: passing it through meant an `ok:false` looked like a success, so a
           // missing element or a rejected fill was recorded as step-ok and the run said "finished".
@@ -488,17 +497,7 @@ async function startAutomationLocked(automationId, {
   validateAutomation(automation);
 
   const settings = await getSettings();
-  /**
-   * THE SETTINGS WERE READ AND THEN DISCARDED.
-   *
-   * MEASURED: this function fetched `settings`, built `opts` from `automation.options` alone, and never mentioned
-   * `settings` again - so every per-machine PREFERENCE was invisible to the run. `focusBeforePrecise` is the one that
-   * bites: the worker reads `opts.focusBeforePrecise` to raise the tab before a second-precision click, and nothing ever
-   * put it there, so the option in the UI was inert and precise runs stayed in a throttled background tab.
-   *
-   * Settings are the fallback, the automation's own options win: a per-job override is deliberate, a default is not.
-   */
-  const opts = { focusBeforePrecise: settings?.focusBeforePrecise, ...automation.options, atMs };
+  const opts = { focusBeforePrecise: settings.focusBeforePrecise !== false, ...automation.options, atMs };
   const targetTabId = tabId ?? (await api.tabs.query({ active: true, currentWindow: true }))[0]?.id;
   if (!targetTabId) throw new Error('there is no active tab to run in');
 
@@ -670,6 +669,7 @@ async function startAutomationLocked(automationId, {
 export function stopActiveRun() {
   if (!activeRun) return false;
   activeRun.stopFlag.stopped = true;
+  if (activeRun.tabId != null) api.tabs.sendMessage(activeRun.tabId, { type: 'abort-step' }).catch(() => {});
   return true;
 }
 
@@ -746,12 +746,18 @@ api.runtime.onInstalled.addListener(async (details) => {
 ensureClickOpensPanel();
 
 api.runtime.onStartup.addListener(async () => {
-  // every alarm is re-derived from storage: an alarm set before a restart cannot be trusted
-  const automations = await listAutomations();
-  await rescheduleAll(automations);
+  try {
+    // every alarm is re-derived from storage: an alarm set before a restart cannot be trusted
+    const automations = await listAutomations();
+    await rescheduleAll(automations);
+  } catch (e) {
+    console.warn('[autoflow]', e);
+  }
 });
 
 api.alarms.onAlarm.addListener(async (alarm) => {
+  const alarmFiredAt = Date.now();
+  let attemptedTarget = Number.isFinite(alarm.scheduledTime) ? alarm.scheduledTime : null;
   const id = automationIdFromAlarm(alarm.name);
   // recorded FIRST, before anything can throw: the previous version's failure mode was an alarm that arrived and
   // then died inside this handler, leaving no evidence that it had ever fired
@@ -759,7 +765,7 @@ api.alarms.onAlarm.addListener(async (alarm) => {
   if (!id) return;
   try {
     const automation = await getAutomation(id);
-    if (!automation || automation.enabled === false) return;
+    if (!automation || automation.enabled === false || !automation.schedule || automation.schedule.kind === 'manual') return;
 
     // Find or make a tab for this automation. Reusing the active tab would hijack whatever the user is
     // doing, so a matching tab is preferred and a new one is created only if none matches.
@@ -913,16 +919,30 @@ api.alarms.onAlarm.addListener(async (alarm) => {
         atMs = next;                            // early, as designed
       } else {
         // was there a target we just missed? ask for the occurrence at or before now
-        const planned = nextRun(automation.schedule, now - LATE_TOLERANCE_MS);
-        if (planned && now - planned <= LATE_TOLERANCE_MS) {
+        const planned = nextRun(automation.schedule, now - LATE_TOLERANCE_MS - 1);
+        if (planned && planned <= now && now - planned <= LATE_TOLERANCE_MS) {
           lateBy = now - planned;
           atMs = null;                          // too late to wait for it; run now
+          attemptedTarget = planned;
           // reported, not just computed: "it fired late" and "it fired on time" must be distinguishable in the export
           recordEvent({ kind: 'fired-late', automationId: id, lateByMs: lateBy });
-        } else if (planned) {
-          recordEvent({ kind: 'fired-too-late', automationId: id, lateByMs: now - planned, toleranceMs: LATE_TOLERANCE_MS });
+        } else {
+          const missedTarget = nextRun(automation.schedule, now - 26 * 3600_000);
+          recordEvent({
+            kind: 'fired-too-late',
+            automationId: id,
+            lateByMs: missedTarget && missedTarget <= now ? now - missedTarget : null,
+            toleranceMs: LATE_TOLERANCE_MS,
+          });
+          await scheduleOne(automation, { now, preferNext: true }).catch(() => {});
+          return;
         }
       }
+    }
+
+    if (Number.isFinite(atMs)) attemptedTarget = atMs;
+    else if (!Number.isFinite(attemptedTarget)) {
+      attemptedTarget = nextRun(automation.schedule, alarmFiredAt - 120_000) ?? alarm.scheduledTime ?? Date.now();
     }
 
     /**
@@ -948,7 +968,6 @@ api.alarms.onAlarm.addListener(async (alarm) => {
      * `firedAt` is carried through so the run can report how long the scheduled path took to get going - that sample
      * is what the alarm's wake margin adapts to. Without it the margin stayed a constant guess.
      */
-    const alarmFiredAt = Date.now();
     /**
      * REFUSE A STORM.
      *
@@ -991,10 +1010,8 @@ api.alarms.onAlarm.addListener(async (alarm) => {
      * time, which for a non-precise schedule IS the target. Used by the failure path to re-arm for the NEXT occurrence
      * rather than for the one that just failed.
      */
-    const attemptedTarget = Number.isFinite(atMs) ? atMs
-      : (Number.isFinite(alarm.scheduledTime) ? alarm.scheduledTime : null);
     const runWhenSlotIsFree = (extra = {}) =>
-      startAutomation(id, { tabId, trigger: 'schedule', atMs, firedAt: alarmFiredAt, scheduledTarget: atMs, ...extra });
+      startAutomation(id, { tabId, trigger: 'schedule', atMs, firedAt: alarmFiredAt, scheduledTarget: attemptedTarget, ...extra });
 
     // a CSV-driven automation iterates its rows
     const data = automation.dataSource?.key ? await getDataRows(automation.dataSource.key) : null;
@@ -1060,26 +1077,30 @@ api.alarms.onAlarm.addListener(async (alarm) => {
 });
 
 api.commands.onCommand.addListener(async (command) => {
-  const settings = await getSettings();
-  if (settings.shortcutsEnabled === false) return;
+  try {
+    const settings = await getSettings();
+    if (settings.shortcutsEnabled === false) return;
 
-  if (command === 'panic-stop') {
-    stopActiveRun();
-    return;
-  }
-  if (command === 'start-stop') {
-    if (activeRun) stopActiveRun();
-    else {
-      const automations = await listAutomations();
-      const first = automations.find((a) => a.enabled);
-      if (first) await startAutomation(first.id).catch(() => {});
+    if (command === 'panic-stop') {
+      stopActiveRun();
+      return;
     }
-    return;
-  }
-  if (command === 'pick-element') {
-    const tab = (await api.tabs.query({ active: true, currentWindow: true }))[0];
-    if (tab?.id) api.tabs.sendMessage(tab.id, { type: 'start-picking' }).catch(() => {});
-    return;
+    if (command === 'start-stop') {
+      if (activeRun) stopActiveRun();
+      else {
+        const automations = await listAutomations();
+        const first = automations.find((a) => a.enabled);
+        if (first) await startAutomation(first.id).catch(() => {});
+      }
+      return;
+    }
+    if (command === 'pick-element') {
+      const tab = (await api.tabs.query({ active: true, currentWindow: true }))[0];
+      if (tab?.id) api.tabs.sendMessage(tab.id, { type: 'start-picking' }).catch(() => {});
+      return;
+    }
+  } catch (e) {
+    console.warn('[autoflow]', e);
   }
 });
 
@@ -1622,7 +1643,7 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           schedule = { scheduled: false, reason: String(e?.message ?? e) };
           recordEvent({ kind: 'arm-failed', automationId: saved.id, error: schedule.reason });
         }
-        if (!schedule.scheduled && saved.schedule?.kind !== 'manual' && saved.enabled !== false) {
+        if (!schedule.scheduled) {
           await cancelOne(saved.id);      // a disabled or unarmable schedule must not leave a stale alarm behind
         }
         /**

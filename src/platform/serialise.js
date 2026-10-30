@@ -45,21 +45,28 @@ export function makeCloneable(value, { maxDepth = 12 } = {}) {
     seen.add(node);
 
     if (Array.isArray(node)) {
-      return node.map((item, i) => walk(item, depth + 1, `${path}[${i}]`));
+      const out = node.map((item, i) => walk(item, depth + 1, `${path}[${i}]`));
+      seen.delete(node);
+      return out;
     }
 
     // a Map or Set is cloneable, but its contents may not be
     if (node instanceof Map) {
-      return Object.fromEntries([...node.entries()].map(([k, v], i) => [String(k), walk(v, depth + 1, `${path}.<${i}>`)]));
+      const out = Object.fromEntries([...node.entries()].map(([k, v], i) => [String(k), walk(v, depth + 1, `${path}.<${i}>`)]));
+      seen.delete(node);
+      return out;
     }
     if (node instanceof Set) {
-      return [...node.values()].map((v, i) => walk(v, depth + 1, `${path}.<${i}>`));
+      const out = [...node.values()].map((v, i) => walk(v, depth + 1, `${path}.<${i}>`));
+      seen.delete(node);
+      return out;
     }
 
     const out = {};
     for (const key of Object.keys(node)) {
       out[key] = walk(node[key], depth + 1, path ? `${path}.${key}` : key);
     }
+    seen.delete(node);
     return out;
   };
 
@@ -107,18 +114,29 @@ export function safeSend(send, payload, label = 'the reply') {
  * carried content had no URL to hand to the downloads API. Chunked rather than one `String.fromCharCode(...bytes)`
  * call: the spread form blows the argument limit at a few tens of kilobytes, which a downloaded file easily exceeds.
  */
-export function bytesToBase64(blob) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onerror = () => reject(new Error('could not read the blob for download'));
-    reader.onload = () => {
-      const result = String(reader.result ?? '');
-      // FileReader gives `data:<type>;base64,<payload>`; only the payload is wanted
-      const comma = result.indexOf(',');
-      resolve(comma >= 0 ? result.slice(comma + 1) : '');
-    };
-    reader.readAsDataURL(blob);
-  });
+export async function bytesToBase64(blob) {
+  if (typeof FileReader === 'function') {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onerror = () => reject(new Error('could not read the blob for download'));
+      reader.onload = () => {
+        const result = String(reader.result ?? '');
+        // FileReader gives `data:<type>;base64,<payload>`; only the payload is wanted
+        const comma = result.indexOf(',');
+        resolve(comma >= 0 ? result.slice(comma + 1) : '');
+      };
+      reader.readAsDataURL(blob);
+    });
+  }
+  if (typeof blob?.arrayBuffer === 'function') {
+    const bytes = new Uint8Array(await blob.arrayBuffer());
+    let binary = '';
+    for (let offset = 0; offset < bytes.length; offset += 32 * 1024) {
+      binary += String.fromCharCode(...bytes.subarray(offset, offset + 32 * 1024));
+    }
+    return btoa(binary);
+  }
+  throw new Error('could not read the blob for download');
 }
 
 export function cloneableOrString(value) {

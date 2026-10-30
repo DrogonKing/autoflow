@@ -100,7 +100,7 @@
     "zero direct chrome.* calls in the Firefox bundle - every API goes through the platform layer",
     "ZERO network primitives in every Firefox bundle file (fetch/XHR/WebSocket/sendBeacon/EventSource/importScripts/geolocation/clipboard-read), comments stripped - the `none` declaration is true",
     "runScript runs in the page's main world, where `fetch` is available to the script the user wrote. The EXTENSION makes no request; a script step could. That is why auditImportedAutomation strips script steps from an imported file by default, and it is the honest limit of the `none` declaration",
-    "sidePanel is referenced at background.js lines [1267, 1292] but is UNREACHABLE on Firefox: the platform layer's side surface branches on isFirefox() and returns from every path inside that branch before reaching it. A grep for the identifier reports a false positive here; the guard is what matters, and the real-browser test confirms which API Firefox actually exposes",
+    "sidePanel is referenced at background.js lines [1372, 1397] but is UNREACHABLE on Firefox: the platform layer's side surface branches on isFirefox() and returns from every path inside that branch before reaching it. A grep for the identifier reports a false positive here; the guard is what matters, and the real-browser test confirms which API Firefox actually exposes",
     "sidebar_action is declared with a default_panel, so Firefox has a side surface to open",
     "keyboard commands identical on both builds: {'open-panel': 'Alt+Shift+F', 'panic-stop': 'Alt+Shift+X', 'pick-element': 'Alt+Shift+P', 'start-stop': 'Alt+Shift+S'}",
     "the panic-stop shortcut (Alt+Shift+X) is declared on Firefox too, so the emergency control is not Chromium-only",
