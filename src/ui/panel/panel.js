@@ -343,8 +343,21 @@ function scheduleEditor(onChange) {
      * hint about the seconds is a fixed element whose text is updated rather than a conditional node, because a
      * conditional node would be a reason to re-render.
      */
-    const timeHint = el('span', { class: 'hint', text: '' });
+    /**
+     * One element reporting TWO things: why a value was refused, or that seconds are in play.
+     *
+     * The reason wins when there is one, because a refused time is a problem the user has to fix, and the seconds hint
+     * is only informative. Both are written into the same node rather than swapped, since creating a node conditionally
+     * would be a reason to re-render - and re-rendering under the typist is what made this control untypeable.
+     */
+    const timeHint = el('span', { class: 'hint time-hint', text: '' });
     const refreshTimeHint = (hasSecond) => {
+      if (state.timeError) {
+        timeHint.className = 'hint time-hint warn time-error';
+        timeHint.textContent = t(`time.error.${state.timeError}`);
+        return;
+      }
+      timeHint.className = 'hint time-hint';
       timeHint.textContent = hasSecond ? t('sched.secondHint') : '';
     };
     const commitTime = (value, { rerender }) => {
@@ -355,19 +368,16 @@ function scheduleEditor(onChange) {
        * with a value the browser has already emptied - the user types and nothing changes. Normalising here fixes the
        * full editor; the basic view has its own copy of this logic and is fixed the same way.
        */
-      const normalised = normaliseDigits(value).replace(/[^0-9:]/g, '');
-      // '09:00' gives two parts and means minute precision; '09:00:00' gives three and means a precise schedule.
-      // The distinction is carried into the model, because `wantsPreciseTiming` keys off it.
-      const parts = String(normalised).split(':').map(Number);
-      const [h, m, sec] = parts;
-      if (!Number.isFinite(h) || !Number.isFinite(m)) return;
-      if (h < 0 || h > 23 || m < 0 || m > 59) return;
-      if (parts.length > 2 && (!Number.isFinite(sec) || sec < 0 || sec > 59)) return;
-      const next = { ...(state.editing.schedule ?? s), hour: h, minute: m };
-      if (parts.length > 2) next.second = sec;
-      else delete next.second;
-      state.editing.schedule = next;
-      refreshTimeHint(parts.length > 2);
+      const parsed = parseTypedTime(value);
+      state.timeError = parsed.ok ? null : parsed.error;
+      if (parsed.ok) {
+        const next = { ...(state.editing.schedule ?? s), hour: parsed.hour, minute: parsed.minute };
+        if (parsed.precise) next.second = parsed.second;
+        else delete next.second;
+        state.editing.schedule = next;
+      }
+      // refreshed EITHER WAY: a rejection has to be visible next to the field, not only absent from the model
+      refreshTimeHint(parsed.ok && parsed.precise);
       if (rerender) onChange();
     };
 
@@ -1083,6 +1093,9 @@ function basicView(rerender) {
    */
   if (!state.basicKeepDraft || !state.basic) {
     state.basic = basicDraft();
+  } else {
+    // the form changed itself and the result must survive any follow-up build in this render sequence
+    bodyKeptDraftForFollowUp = true;
   }
   state.basicKeepDraft = false;
   const draft = state.basic;
@@ -1098,21 +1111,25 @@ function basicView(rerender) {
   wrap.append(el('p', { class: 'hint', text: t('basic.intro') }));
 
   // ---- the time, typed rather than scrolled. Same lesson as the full editor: no re-render while it has focus.
-  const hint = el('span', { class: 'hint', text: '' });
+  // `time-hint` is a stable hook: the intro paragraph is also a `.hint`, so a class is the only reliable way to address
+  // the element that carries the REASON a time was refused.
+  const hint = el('span', { class: 'hint time-hint', text: '' });
   const commit = (value) => {
-    // digits normalised first: a Persian or Arabic keyboard otherwise produces a value the model never receives
-    const normalised = normaliseDigits(value).replace(/[^0-9:]/g, '');
-    const parts = String(normalised).split(':').map(Number);
-    const [h, m, sec] = parts;
-    if (!Number.isFinite(h) || !Number.isFinite(m)) return;
-    if (h < 0 || h > 23 || m < 0 || m > 59) return;
-    if (parts.length > 2 && (!Number.isFinite(sec) || sec < 0 || sec > 59)) return;
-    // written to the MODEL on every keystroke, and never followed by a re-render here: rebuilding the view while
-    // the field has focus is what made this control untypeable, and a rebuild reads the schedule back from storage
-    // which would discard the half-typed value.
-    draft.schedule = { kind: 'daily', hour: h, minute: m, second: parts.length > 2 ? sec : 0 };
+    /**
+     * The same parse as the full editor, and the same visible reason - these two views edit ONE record, so a value
+     * accepted by one and rejected by the other would be a bug waiting to be reported.
+     *
+     * Written to the MODEL on every keystroke and never followed by a re-render here: rebuilding the view while the
+     * field has focus is what made this control untypeable, and a rebuild reads the schedule back from storage, which
+     * would discard the half-typed value.
+     */
+    const parsed = parseTypedTime(value);
+    state.timeError = parsed.ok ? null : parsed.error;
+    hint.textContent = parsed.ok ? '' : t(`time.error.${parsed.error}`);
+    hint.className = parsed.ok ? 'hint time-hint' : 'hint time-hint warn time-error';
+    if (!parsed.ok) return;
+    draft.schedule = { kind: 'daily', hour: parsed.hour, minute: parsed.minute, second: parsed.second };
     state.basic = draft;
-    hint.textContent = t('basic.savedHint');
   };
   wrap.append(el('div', { class: 'row' },
     el('label', { text: t('basic.time') }),
@@ -1363,16 +1380,70 @@ export function normaliseDigits(text) {
  * letter would make the whole value unparseable while looking almost right. Digit translation happens FIRST, so a
  * malformed time stays malformed and is rejected by the normal validation instead of being repaired into a valid one.
  */
+/**
+ * Every character a keyboard may send where a Western keyboard has `:`.
+ *
+ * THE BUG THIS FIXES, measured: with a Persian keyboard the separator is not U+003A. It is often U+066B (٫, the Arabic
+ * decimal separator), U+066C (٬), U+061B (؛), or a fullwidth U+FF1A - and all of them were being DELETED by the
+ * character filter, so `۱۲:۳۰` became `1230`, which is not a time, so the value was rejected in silence and the model
+ * kept whatever it had before. That is the whole of "when I type with the Persian keyboard it does not change".
+ */
+const TIME_SEPARATORS = /[\u066B\u066C\u061B\uFF1A\uFE55\u05C3\u2236\u002E\u06D4]/g;
+
 export function normaliseTimeText(text) {
   return normaliseDigits(text)
+    .replace(TIME_SEPARATORS, ':')
     .replace(/[^0-9:]/g, '')
     .replace(/:{2,}/g, ':')
     .slice(0, 8);
 }
 
-/** How many colon-separated parts a typed time has - two means minutes, three means a precise schedule. */
+/** How many colon-separated parts a typed text has - two means minutes, three means a precise schedule. */
 export function countTimeParts(text) {
   return normaliseTimeText(text).split(':').length;
+}
+
+/**
+ * Parse a typed time, and say WHY when it is not one.
+ *
+ * The reason is the point. Every rejection used to be silent: the field showed the user's text, the model did not
+ * change, and nothing anywhere said the time was unusable - so a schedule that had already passed stayed in place and
+ * the user waited for a run that was never going to happen. Returning `{ ok: false, error }` lets the panel say it.
+ *
+ * The rules encode what a time IS, and they are deliberately strict about structure:
+ *   - an empty field is not a time (it is an incomplete one, and clearing the field must not schedule midnight)
+ *   - a single separator is not a time, and must not silently become 00:00
+ *   - a part with more than two digits is a typo, not a number to wrap - `14:144` is rejected, not read as 14:99
+ *   - a trailing separator means the next part is still being typed, so the value is incomplete rather than clamped
+ *   - `9:00` means MINUTE precision. Seconds are never invented, because inventing them turns a minute-precision
+ *     schedule into a precise one, and precise schedules are the ones where whole seconds matter.
+ */
+export function parseTypedTime(text) {
+  const normalised = normaliseTimeText(text);
+  if (normalised === '') return { ok: false, error: 'empty' };
+
+  /**
+   * TOO LONG TO BE A TIME, checked BEFORE the field's own 8-character limit can truncate it.
+   *
+   * `normaliseTimeText` slices to 8 because that is the longest time there is, but slicing first meant
+   * `14:30:55:99` became `14:30:55` and was ACCEPTED - a silent repair, which is the exact failure mode this parser
+   * exists to stop. The unsliced form is examined here, so a fourth part is refused.
+   */
+  const unbounded = normaliseDigits(text).replace(TIME_SEPARATORS, ':').replace(/[^0-9:]/g, '');
+  if (unbounded.length > 8) return { ok: false, error: 'tooManyDigits' };
+
+  const rawParts = normalised.split(':');
+  if (rawParts.some((p) => p === '')) return { ok: false, error: 'incomplete' };
+  if (rawParts.length > 3) return { ok: false, error: 'tooManyParts' };
+  if (rawParts.length < 2) return { ok: false, error: 'incomplete' };
+  if (rawParts.some((p) => p.length > 2)) return { ok: false, error: 'tooManyDigits' };
+
+  const [h, m, s] = rawParts.map(Number);
+  if (h > 23) return { ok: false, error: 'hourRange' };
+  if (m > 59) return { ok: false, error: 'minuteRange' };
+  if (rawParts.length > 2 && s > 59) return { ok: false, error: 'secondRange' };
+
+  return { ok: true, hour: h, minute: m, second: rawParts.length > 2 ? s : 0, precise: rawParts.length > 2 };
 }
 
 /**
@@ -1384,6 +1455,45 @@ export function countTimeParts(text) {
  * It never re-renders on `input`. Rebuilding the view under the typist is what made this control untypeable once
  * already, so the model is written on every keystroke and the view is rebuilt once, when focus leaves.
  */
+/**
+ * Run something AFTER the interaction that is currently in progress has finished.
+ *
+ * WHY THIS EXISTS, measured. A blur fires on `mousedown`, which happens BEFORE `mouseup` and `click`. So a handler that
+ * re-renders inside blur replaces the element the pointer is already down on, and the click is then delivered to
+ * nothing. For the user that is "I type a time, click Add a point, and nothing happens" - the first click after leaving
+ * the time field is swallowed. Deferring by one task is not enough: `mouseup` is its own task and lands after a
+ * `setTimeout(0)`, so the same thing happens.
+ *
+ * The honest fix is to wait for the interaction to complete: if a pointer is currently down, the re-render waits for
+ * `mouseup`. The timer is the escape hatch for every blur that has no click behind it - Tab, or the window losing focus
+ * - so nothing is left un-refreshed.
+ */
+function afterCurrentInteraction(fn) {
+  let done = false;
+  const run = () => {
+    if (done) return;
+    done = true;
+    document.removeEventListener('mouseup', run, true);
+    fn();
+  };
+  document.addEventListener('mouseup', run, true);
+  setTimeout(run, 250);   // a blur with no click behind it must still refresh, and promptly
+}
+
+/**
+ * Map a caret position in the raw text onto the normalised text.
+ *
+ * Normalising is not length-preserving in general: a Persian digit becomes one ASCII digit and a separator becomes `:`,
+ * both the same length, but a rejected letter is DELETED, which shifts everything after it. Counting the output produced
+ * by the input before the caret is the only way to keep the insertion point on the character being edited rather than at
+ * whichever end a boolean test happened to choose.
+ */
+export function caretsAfterNormalising(raw, caret, normalised) {
+  const text = String(raw ?? '');
+  const upTo = text.slice(0, Math.max(0, Math.min(caret ?? 0, text.length)));
+  return Math.max(0, Math.min(normaliseTimeText(upTo).length, String(normalised ?? '').length));
+}
+
 function timeField({ value, placeholder, onCommit, onHint, rerender }) {
   const input = el('input', {
     type: 'text',
@@ -1398,20 +1508,33 @@ function timeField({ value, placeholder, onCommit, onHint, rerender }) {
       const raw = e.target.value;
       const normalised = normaliseTimeText(raw);
       if (normalised !== raw) {
-        // keep the caret at the end, which is where a value assignment would otherwise not leave it
-        const wasAtEnd = e.target.selectionStart === raw.length;
+        /**
+         * THE CARET IS MAPPED, not guessed.
+         *
+         * Reported: "when I type with the Persian keyboard it starts from the right instead of like English". The old
+         * code placed the caret by asking a boolean - was it at the end? - which is wrong the moment normalisation
+         * changes a character in place near the caret: replacing `۱۲` with `12` at the START of the value has the same
+         * length but the insertion point must stay where the typing is. The position is mapped across the translation.
+         */
+        const mapped = caretsAfterNormalising(raw, e.target.selectionStart, normalised);
         e.target.value = normalised;
-        if (wasAtEnd) {
-          try { e.target.setSelectionRange(normalised.length, normalised.length); } catch { /* not focusable */ }
-        }
+        try { e.target.setSelectionRange(mapped, mapped); } catch { /* not focusable */ }
       }
       onCommit(normalised, { rerender: false });
       if (onHint) onHint(countTimeParts(normalised) > 2);
     },
     onblur: (e) => {
       const normalised = normaliseTimeText(e.target.value);
-      onCommit(normalised, { rerender: true });
+      onCommit(normalised, { rerender: false });
       if (onHint) onHint(countTimeParts(normalised) > 2);
+      /**
+       * The re-render waits for the click that caused this blur to finish.
+       *
+       * MEASURED: running it inline replaced the element under the pointer before `mouseup`, so the click was delivered
+       * to nothing - "I type a time, click Add a point, and nothing happens". Nothing is lost by waiting, because the
+       * model was already written above.
+       */
+      afterCurrentInteraction(() => onCommit(normalised, { rerender: true }));
     },
     onchange: (e) => onCommit(normaliseTimeText(e.target.value), { rerender: false }),
     // Enter is what a person presses when done typing, and here it should behave like leaving the field
@@ -1876,7 +1999,79 @@ function historyView() {
 // render
 // ---------------------------------------------------------------------------------------------
 
+/**
+ * RENDER IS NOT RE-ENTRANT, and it has to be told so.
+ *
+ * MEASURED FAILURE, from a real session:
+ *
+ *     NotFoundError: Failed to execute 'replaceChildren' on 'Element': The node to be removed is no longer a child of
+ *     this node. Perhaps it was moved in a 'blur' event handler?
+ *
+ * `replaceChildren()` removes the current children one by one, and removing a FOCUSED element fires `blur`. The blur
+ * handler commits the value and asks for a re-render, which runs `replaceChildren()` again on the same parent - so the
+ * outer removal loop then tries to detach nodes the inner render already moved, and throws. The panel was left in a
+ * half-built state.
+ *
+ * The fix is the standard one: a render in progress cannot be re-entered. A nested request is remembered and honoured
+ * ONCE after the current tree is complete, which is what the caller actually wants - the state it changed is picked up
+ * either way, and the DOM is never mutated by two builds at the same time.
+ */
+let renderInProgress = false;
+let renderRequested = false;
+
 function render() {
+  if (renderInProgress) {
+    // do NOT re-enter: the current build is halfway through removing the previous nodes
+    renderRequested = true;
+    return;
+  }
+  bodyKeptDraftForFollowUp = false;   // reset per sequence, or one kept draft would pin every later render
+  renderInProgress = true;
+  try {
+    renderTree();
+  } finally {
+    renderInProgress = false;
+  }
+  /**
+   * Honour a nested request, but not unboundedly.
+   *
+   * One follow-up is enough for the blur case, and the cap exists so a pathological focus/blur cycle cannot spin - an
+   * unbounded re-render loop would be worse than the crash it replaced.
+   */
+  /**
+   * THE FORM'S WORKING COPY MUST SURVIVE THE FOLLOW-UP BUILDS.
+   *
+   * `state.basicKeepDraft` is consumed at the START of a render, so a second build in the same sequence reads it as
+   * false and rebuilds the draft from storage - which discarded a point that had just been added, measured as
+   * "+ adds a point" failing with the count still at 1.
+   *
+   * MEASURED ORDERING MISTAKE, worth stating because the first version of this fix got it wrong: the flag was restored
+   * AFTER the loop, so the follow-up builds ran while it was false and destroyed the draft, and the restore then had
+   * nothing left to protect. The intent of the flag is "the form changed itself, keep what it produced", and that holds
+   * for every build triggered by that change, so it is put back BEFORE each one.
+   */
+  for (let i = 0; i < 3 && renderRequested; i++) {
+    renderRequested = false;
+    if (bodyKeptDraftForFollowUp) state.basicKeepDraft = true;
+    renderInProgress = true;
+    try {
+      renderTree();
+    } finally {
+      renderInProgress = false;
+    }
+  }
+  renderRequested = false;
+}
+
+/**
+ * Set when a render's own view asked for the draft to be preserved.
+ *
+ * `basicView` consumes `state.basicKeepDraft` and then clears it; this records that it WAS set, so a follow-up build in
+ * the same sequence can restore it rather than throwing the form's changes away.
+ */
+let bodyKeptDraftForFollowUp = false;
+
+function renderTree() {
   const root = document.getElementById('root');
   const rerender = () => render();
   root.replaceChildren();

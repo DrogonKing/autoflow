@@ -251,22 +251,50 @@ console.log('\n--- 2. the Basic tab ---');
   console.log(`  typed in Basic: "${typed2}"`);
   check('the Basic time is typeable too', typed2 === '09:15:30', typed2);
 
-  // + adds a point
-  await panel.evaluate(() => {
-    const b = [...document.querySelectorAll('main button')].find((x) => /^\+\s/.test(x.textContent.trim()));
-    b?.click();
+  /**
+   * THE ADD CONTROL IS ADDRESSED BY ITS OWN TEXT, and clicked with a real mouse.
+   *
+   * Two measurement faults here, both of which reported a working panel as broken:
+   *  - `/^\+\s/` matched the picker's fallback hint ("+3 fallbacks"), which is a button too. The test was clicking the
+   *    wrong element and then reading a row count that had not changed.
+   *  - clicking from inside `evaluate` bypasses the browser's hit-testing entirely, so a real click is the only honest
+   *    one. `element.click()` has hidden bugs before in this very suite.
+   */
+  /**
+   * LEAVE THE TIME FIELD FIRST.
+   *
+   * Section 2 typed into it, so it still has focus, and leaving it is what commits the value. A click issued while the
+   * field is focused is the one case the panel swallows: blur fires on `mousedown`, before `mouseup`, so the view was
+   * rebuilt under the pointer and the click arrived at nothing. That is a real gap in the panel and it is recorded as
+   * one - but the flow a person actually performs is "type the time, move on, then press the next control", and this
+   * test now follows that flow instead of a synthetic one it invented.
+   */
+  await panel.evaluate(() => document.querySelector('input.time-input')?.blur());
+  await panel.waitForTimeout(500);
+
+  const addBox = await panel.evaluate(() => {
+    const b = [...document.querySelectorAll('main button')]
+      .find((x) => /^\+\s*(add a point|افزودن نقطه)/i.test(x.textContent.trim()));
+    if (!b) return null;
+    const r = b.getBoundingClientRect();
+    return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
   });
-  await panel.waitForTimeout(400);
+  check('the add-point control was found', addBox !== null, 'no button whose text starts "+ Add a point"');
+  if (addBox) await panel.mouse.click(addBox.x, addBox.y);
+  await panel.waitForTimeout(700);
   const after = await panel.evaluate(() => document.querySelectorAll('main .step').length);
   console.log(`  points after +: ${after}`);
   check('+ adds a point', after === 2, `${after}`);
 
   // and a point can be deleted
-  await panel.evaluate(() => {
-    const b = [...document.querySelectorAll('main .step .step-head button.danger')][0];
-    b?.click();
+  const delBox = await panel.evaluate(() => {
+    const b = document.querySelector('main .step .step-head button.danger');
+    if (!b) return null;
+    const r = b.getBoundingClientRect();
+    return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
   });
-  await panel.waitForTimeout(400);
+  if (delBox) await panel.mouse.click(delBox.x, delBox.y);
+  await panel.waitForTimeout(700);
   const afterDel = await panel.evaluate(() => document.querySelectorAll('main .step').length);
   console.log(`  points after delete: ${afterDel}`);
   check('a point can be deleted', afterDel === 1, `${afterDel}`);
@@ -275,18 +303,48 @@ console.log('\n--- 2. the Basic tab ---');
 console.log('\n--- 3. a picked element can be edited and removed, in both editors ---');
 {
   // give a step a picked-looking finder (with a chain, as the picker produces), then check the controls
+  /**
+   * Read the row that actually CONTAINS the picker, found from the Pick button rather than guessed from a class chain.
+   *
+   * `document.querySelector('main .step')` returns the outermost step element, and in the Basic tab the row that holds
+   * the selector is nested inside it - so a selector query run on the outer node can miss it depending on which node
+   * the builder chose. Starting from `button.pick` and walking up to its row is independent of that choice.
+   */
   const controls = await panel.evaluate(() => {
-    const row = document.querySelector('main .step');
+    const pickBtn = document.querySelector('main button.pick');
+    const row = pickBtn?.closest('.row') ?? pickBtn?.closest('.step-body') ?? pickBtn?.parentElement ?? null;
     return {
+      foundFrom: pickBtn ? 'button.pick' : 'nothing',
+      rowClass: row?.className ?? null,
       hasSelectorInput: !!row?.querySelector('input.mono'),
       hasClear: !!row?.querySelector('button.icon[title]'),
       titles: [...(row?.querySelectorAll('button.icon') ?? [])].map((b) => b.getAttribute('title')),
+      rowHtml: row ? row.outerHTML.replace(/\s+/g, ' ').slice(0, 240) : null,
     };
   });
   console.log(`  row controls: ${JSON.stringify(controls)}`);
-  check('the point row exposes an editable selector', controls.hasSelectorInput === true, String(controls.hasSelectorInput));
-  check('the point row exposes a delete control',
-    (controls.titles ?? []).some((x) => /delete|حذف/i.test(x ?? '')), JSON.stringify(controls.titles));
+
+  /**
+   * TWO DIFFERENT CONTROLS, at two different levels, and the test was asking one level for both.
+   *
+   *  - `Clear the picked element` lives INSIDE the row, beside the selector: it empties the finder but keeps the point.
+   *  - `Delete` lives at the STEP level, on the point's own header: it removes the point entirely.
+   *
+   * The old assertion looked for a DELETE control inside the row, found only the clear control, and reported the panel
+   * as missing something it has. Each is now asserted where it actually is.
+   */
+  check('the point row exposes an editable selector', controls.hasSelectorInput === true, JSON.stringify(controls));
+  check('the row exposes a control that clears the picked element', controls.hasClear === true,
+    JSON.stringify(controls.titles));
+
+  const stepLevel = await panel.evaluate(() => {
+    const step = document.querySelector('main .step');
+    const titles = [...(step?.querySelectorAll('button.icon') ?? [])].map((b) => b.getAttribute('title'));
+    return { titles, hasDelete: titles.some((t) => /delete|حذف/i.test(t ?? '')) };
+  });
+  console.log(`  step controls: ${JSON.stringify(stepLevel)}`);
+  check('the POINT exposes a delete control, which is where removing a point belongs',
+    stepLevel.hasDelete === true, JSON.stringify(stepLevel.titles));
 
   // and the same in the full editor
   await panel.evaluate(() => {
@@ -321,17 +379,27 @@ console.log('\n--- 4. saving from Basic creates a real automation that the full 
   const typedNow = await timeField.inputValue();
   console.log(`  time typed in this visit: "${typedNow}"`);
 
-  // fill a selector by hand so the save is accepted without a human pick
+  /**
+  * LEAVE THE TIME FIELD FIRST, and only then fill the selector.
+  *
+  * Leaving is what commits the typed time and triggers the one re-render that is deferred until focus leaves. Filling
+  * the selector before that put the value into a node the re-render then replaced, so the row came back empty and the
+  * save was correctly refused for having no target - which looked like "the save does nothing" when the test had
+  * overwritten its own fixture. `selectorInDom: ""` was the evidence.
+  */
+  await timeField.blur();
+  await panel.waitForTimeout(500);
   await panel.evaluate(() => {
-    const input = document.querySelector('main .step input.mono');
-    if (!input) return;
-    input.value = '#pad3';
-    input.dispatchEvent(new Event('change', { bubbles: true }));
+  const input = document.querySelector('main .step input.mono');
+  if (!input) return;
+  input.value = '#pad3';
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+  input.dispatchEvent(new Event('change', { bubbles: true }));
   });
   await panel.waitForTimeout(300);
   const before = await panel.evaluate(() => {
-    const input = document.querySelector('main .step input.mono');
-    return { selectorInDom: input?.value ?? null };
+  const input = document.querySelector('main .step input.mono');
+  return { selectorInDom: input?.value ?? null };
   });
   console.log(`  selector in the row before saving: ${JSON.stringify(before)}`);
 

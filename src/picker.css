@@ -120,6 +120,26 @@ button.primary:hover { background: var(--accent-dim); }
 .hint.saved-note { color: #2ea043; }
 
 /**
+ * The time field.
+ *
+ * `dir="ltr"` on the element sets the ALIGNMENT, but the editing direction of a value can still be right-to-left when
+ * the browser treats it as bidirectional - which is exactly "when I type with the Persian keyboard it starts from the
+ * right instead of like English". `unicode-bidi: plaintext` makes the direction follow the value's own characters, and
+ * `direction: ltr` pins the insertion point to the left. The digits are also spaced out slightly, because a time is read
+ * digit by digit and the default tracking makes 09:30:00 hard to scan.
+ */
+input.time-input {
+  direction: ltr;
+  unicode-bidi: plaintext;
+  text-align: left;
+  letter-spacing: 0.06em;
+  font-variant-numeric: tabular-nums;
+}
+
+/** A time that cannot be used. Amber rather than red: it is an unfinished value, not an error the user caused. */
+.hint.warn.time-error { color: #f0883e; }
+
+/**
  * The Pick control, and the state it is in.
  *
  * Two problems solved together: a pick in progress had no visible sign in the panel and no way out. The button now

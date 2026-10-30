@@ -1,7 +1,7 @@
 {
-  "en_keys": 272,
-  "fa_keys": 272,
-  "used_keys": 179,
+  "en_keys": 279,
+  "fa_keys": 279,
+  "used_keys": 178,
   "missing_in_en": [],
   "missing_in_fa": [],
   "unused_keys": [
@@ -12,6 +12,7 @@
     "action.newList",
     "app.tagline",
     "basic.name",
+    "basic.savedHint",
     "empty.data",
     "empty.scheduled",
     "field.enabled",
@@ -96,6 +97,13 @@
     "tab.history",
     "tab.log",
     "tab.scheduled",
+    "time.error.empty",
+    "time.error.hourRange",
+    "time.error.incomplete",
+    "time.error.minuteRange",
+    "time.error.secondRange",
+    "time.error.tooManyDigits",
+    "time.error.tooManyParts",
     "timer.nextPreview",
     "timer.title"
   ],
