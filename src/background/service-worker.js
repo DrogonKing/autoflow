@@ -400,6 +400,19 @@ export async function startAutomation(automationId, opts = {}) {
   const queue = opts.trigger === 'schedule';
   const deadline = Date.now() + (queue ? SCHEDULE_QUEUE_WAIT_MS : 0);
   let depth = 0;
+  /**
+   * HOW LONG THIS RUN SPENT WAITING FOR THE SLOT.
+   *
+   * MEASURED (B4): `recordStartLatency(startedAt - firedAt)` is the wake-up cost - and it silently includes any time
+   * spent queued behind another automation. The latency sample drives the wake margin, so one 6-second queue wait took
+   * the margin from 1580 ms to 7500 ms, and the decay is `max(new, 0.8 * old)` so five fast runs afterwards left it at
+   * 3466 ms. A margin that large means the alarm wakes the worker seconds before the target, which is how a click aimed
+   * at a second lands early.
+   *
+   * A queue wait is not a property of the machine, so it is measured separately and subtracted.
+   */
+  let queuedMs = 0;
+  const waitStartedAt = Date.now();
 
   recordEvent({ kind: 'start-request', automationId, trigger: opts.trigger ?? 'manual', lateByMs: opts.lateByMs });
 
@@ -407,6 +420,8 @@ export async function startAutomation(automationId, opts = {}) {
     if (!activeRun && !startingUp) {
       const token = { claimedAt: Date.now() };
       startingUp = token;                     // synchronous: no await between the test above and this
+      // the slot is free now: any delay up to this instant was the queue, not the worker waking up
+      queuedMs = depth > 0 ? Date.now() - waitStartedAt : 0;
       // logged HERE, at the instant of acceptance, before any await. Recorded later it landed after the run it
       // started, which read as if the run were accepted once it had already finished.
       recordEvent({ kind: 'start-accepted', automationId, trigger: opts.trigger ?? 'manual' });
@@ -414,7 +429,7 @@ export async function startAutomation(automationId, opts = {}) {
         // the acceptance is logged INSIDE the locked body, at the moment it is accepted. Logging it after the await
         // put ACCEPTED after FINISHED in the trail, which reads as if the run were accepted once it had already
         // ended - unhelpful in precisely the case this log exists for.
-        return await startAutomationLocked(automationId, { ...opts, token });
+        return await startAutomationLocked(automationId, { ...opts, token, queuedMs });
       } catch (e) {
         if (startingUp === token) startingUp = null;
         recordEvent({ kind: 'start-refused', automationId, reason: String(e?.message ?? e) });
@@ -472,6 +487,8 @@ async function startAutomationLocked(automationId, {
     firedAt: Number.isFinite(opts?.firedAt) ? opts.firedAt : null,
     // the scheduled instant this run was for, so the post-run re-arm can record it as fired (B1/B2)
     scheduledTarget: Number.isFinite(opts?.scheduledTarget) ? opts.scheduledTarget : null,
+    // how long this run waited for the slot before it started; subtracted from the latency sample (B4)
+    queuedMs: Number.isFinite(opts?.queuedMs) ? opts.queuedMs : 0,
     trigger,
     stopFlag,
     trace: [],
@@ -535,6 +552,7 @@ async function startAutomationLocked(automationId, {
     startedAt: activeRun?.startedAt ?? Date.now(),
     firedAt: activeRun?.firedAt ?? null,
     scheduledTarget: activeRun?.scheduledTarget ?? null,
+    queuedMs: activeRun?.queuedMs ?? 0,
     trigger,
     error: result.error ? { message: result.error.message ?? String(result.error), stepId: result.error.stepId } : null,
     trace: result.trace?.slice(-200) ?? [],
@@ -549,7 +567,20 @@ async function startAutomationLocked(automationId, {
    * sample was never taken and the margin could not adapt at all.
    */
   if (trigger === 'schedule' && Number.isFinite(finished.startedAt) && Number.isFinite(finished.firedAt)) {
-    await recordStartLatency(Math.max(0, finished.startedAt - finished.firedAt)).catch(() => {});
+    /**
+     * THE QUEUE WAIT IS SUBTRACTED, not measured as if it were the machine.
+     *
+     * MEASURED (B4): without this, one automation waiting behind another recorded the wait as worker latency and took
+     * the wake margin from 1580 ms to 7500 ms - and the margin only comes back down by 20% per fast run, so it stayed
+     * inflated for the rest of the session. The margin exists to cover worker boot, settings, tab resolution and the
+     * message round-trip; a queue is none of those.
+     */
+    const queuedMsLocal = Number.isFinite(finished?.queuedMs) ? finished.queuedMs : 0;
+    const wake = Math.max(0, finished.startedAt - finished.firedAt - queuedMsLocal);
+    await recordStartLatency(wake).catch(() => {});
+    if (queuedMsLocal > 250) {
+      recordEvent({ kind: 'start-queued-wait', automationId, queuedMs: queuedMsLocal, sampleMs: wake });
+    }
   }
   recordEvent({
     kind: 'run-finished', automationId, reason: finished.reason, steps: finished.steps,
@@ -1605,10 +1636,20 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           // after showing the user what the file contains
           allowScripts: msg.allowScripts === true,
         });
-        const rearm = await rescheduleAll(await listAutomations());
+        /**
+         * WHAT WAS IMPORTED IS NOT ARMED, and what was already here still is.
+         *
+         * MEASURED (B7): rearming everything meant a restored file armed and started automations the user had never seen -
+         * a file is data from outside this machine, and nothing in it should be able to schedule an order before a person
+         * has read it. Imported records now arrive `enabled: false`, so `rescheduleAll` skips them by itself; this call
+         * exists to keep the EXISTING schedules correct, which a replace can disturb.
+         *
+         * A restore that produced nothing returns `refused` (storage refused to erase), and nothing is rearmed.
+         */
+        const rearm = report.refused ? [] : await rescheduleAll(await listAutomations());
         const rearmed = rearm.filter((r) => r.ok && r.at).length;
-        recordEvent({ kind: 'imported', imported: report.imported ?? 0, rearmed, replace: msg.replace === true });
-        return { ok: true, ...report, rearmed };
+        recordEvent({ kind: 'imported', imported: report.imported ?? 0, rearmed, replace: msg.replace === true, refused: report.refused === true });
+        return { ok: report.refused !== true, ...report, rearmed };
       }
 
       case 'audit-import': {

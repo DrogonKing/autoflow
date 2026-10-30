@@ -559,7 +559,17 @@ export async function importAll(doc, { replace = false, allowScripts = false } =
   const incoming = Array.isArray(doc) ? doc : doc?.automations;
   if (!Array.isArray(incoming)) throw new Error('the file does not contain a list of automations');
 
-  const existing = replace ? [] : await listAutomations();
+  /**
+   * THE EXISTING AUTOMATIONS ARE ALWAYS LOADED, and `replace` no longer means "start from nothing".
+   *
+   * MEASURED: with `replace` emptying this list, a file holding one usable automation and two broken ones took the user
+   * from 2 automations to 1 - their own work deleted by a restore, reported as a successful import of one item.
+   *
+   * `replace` now means what a person means by it: for an id that appears in BOTH the file and here, the file's version
+   * wins. It does not mean "delete everything the file does not mention" - removing an automation is the Delete button,
+   * not a side effect of restoring a backup.
+   */
+  const existing = await listAutomations();
   const byId = new Map(existing.map((a) => [a.id, a]));
   const imported = [];
   const skipped = [];
@@ -600,6 +610,15 @@ export async function importAll(doc, { replace = false, allowScripts = false } =
       if (byId.has(a.id) && !replace) {
         a.id = `${a.id}-imported-${i}`;
       }
+      /**
+       * AN IMPORTED AUTOMATION ARRIVES SWITCHED OFF.
+       *
+       * MEASURED (B7): imported records keep their own `enabled: true`, and the caller then reschedules everything - so a
+       * restore armed and STARTED automations the user had never looked at. A file is data from outside this machine;
+       * nothing in it should be able to schedule an order before a person has read it. Turning it on is one click, and
+       * the click is the review.
+       */
+      a.enabled = false;
       byId.set(a.id, a);
       imported.push(a);
     } catch (e) {
@@ -607,7 +626,38 @@ export async function importAll(doc, { replace = false, allowScripts = false } =
     }
   });
 
+  /**
+   * A REPLACE THAT ACCEPTED NOTHING MUST NOT ERASE ANYTHING.
+   *
+   * MEASURED (B7): `replace: true` starts from an empty list, so a backup file whose every item was refused - corrupt,
+   * from another version, or holding a script step that is held back - saved the EMPTY list. The user's own backup
+   * button erased every automation they had, and the result read as a successful restore of nothing.
+   *
+   * Refusing to touch anything is the only honest outcome: nothing was imported, so there is nothing to replace.
+   */
+  if (replace && imported.length === 0) {
+    return {
+      imported: 0,
+      skipped,
+      concerns: flagged,
+      refused: true,
+      reason: skipped.length
+        ? `nothing in the file could be imported (${skipped.length} item(s) refused), so the automations already here were left alone`
+        : 'the file contained no automations, so the automations already here were left alone',
+    };
+  }
+
+  /**
+   * A REPLACE ALSO USUALLY MEANS THE FILE IS INCOMPLETE, so what it does not mention is KEPT.
+   *
+   * CASE 1, MEASURED: a file with one usable automation and two broken ones replaced two working automations with one -
+   * 2 -> 1, the user's own work deleted by a restore. Anything the file does not mention is left where it is; removing
+   * an automation is the panel's Delete button, not a side effect of restoring.
+   */
+  // `byId` already holds the existing automations (or a copy of them, under replace) plus what was imported, so the
+  // merge is the same either way. `replace` decides which of two records wins for the same id, nothing else.
   const merged = [...byId.values()];
+
   await set({ [KEYS.automations]: merged, [KEYS.schemaVersion]: CURRENT_SCHEMA });
   return { imported: imported.length, skipped, concerns: flagged };
 }

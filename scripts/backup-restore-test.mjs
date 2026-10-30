@@ -121,11 +121,26 @@ console.log('\n--- 2. a FRESH profile restores them, and they are scheduled agai
   const restored = await bridge.evaluate(async ({ doc }) => {
     const res = await chrome.runtime.sendMessage({ type: 'import-all', document: doc, replace: true, allowScripts: false });
     const list = await chrome.runtime.sendMessage({ type: 'list-automations' });
-    const alarms = await new Promise((r) => chrome.alarms.getAll((a) => r(a ?? [])));
+    const alarmsNow = await new Promise((r) => chrome.alarms.getAll((a) => r(a ?? [])));
+
+    /**
+     * THEN TURN ONE ON, and check that doing so arms it.
+     *
+     * Imported automations arrive switched off (B7), so the restore is complete only if enabling one produces an alarm.
+     * Without this half the new behaviour would be indistinguishable from a dead end where nothing ever runs.
+     */
+    const one = (list?.automations ?? [])[0];
+    const afterEnable = one
+      ? await chrome.runtime.sendMessage({ type: 'save-automation', automation: { ...one, enabled: true } })
+        .then((r) => r?.schedule ?? { scheduled: false })
+      : { scheduled: false, reason: 'nothing was restored to enable' };
+
     return {
       import: res,
       ids: (list?.automations ?? []).map((a) => a.id).sort(),
-      alarms: alarms.map((a) => a.name).sort(),
+      alarms: alarmsNow.map((a) => a.name).sort(),
+      enabledFlags: (list?.automations ?? []).map((a) => a.enabled),
+      afterEnable,
     };
   }, { doc: backup });
 
@@ -136,8 +151,20 @@ console.log('\n--- 2. a FRESH profile restores them, and they are scheduled agai
   check('the import succeeded', restored.import?.ok === true, JSON.stringify(restored.import).slice(0, 200));
   check('BOTH automations are back', JSON.stringify(restored.ids) === JSON.stringify(['carry-a', 'carry-b']),
     JSON.stringify(restored.ids));
-  check('AND THEY ARE RE-ARMED, so the restore is complete rather than just stored',
-    restored.alarms.filter((n) => n.includes('carry-')).length === 2, JSON.stringify(restored.alarms));
+  /**
+   * THE CONTRACT CHANGED, deliberately (B7).
+   *
+   * A restore used to arm - and therefore START - whatever the file contained, without anyone reading it. Imported
+   * automations now arrive switched off, and arming happens when the user turns one on. So the assertion is the pair:
+   * nothing armed on import, and enabling one DOES arm it. Without the second half, "off until you enable it" could be a
+   * dead end where nothing ever runs.
+   */
+  check('they arrive SWITCHED OFF, so a file from outside cannot schedule an order before anyone reads it',
+    restored.alarms.filter((n) => n.includes('carry-')).length === 0, JSON.stringify(restored.alarms));
+  check('and every restored automation says it is disabled',
+    restored.enabledFlags?.every((e) => e === false) === true, JSON.stringify(restored.enabledFlags));
+  check('turning one on DOES arm it, so being off is not a dead end',
+    restored.afterEnable?.scheduled === true, JSON.stringify(restored.afterEnable).slice(0, 200));
 
   await ctx.close();
   rmSync(profileB, { recursive: true, force: true });
