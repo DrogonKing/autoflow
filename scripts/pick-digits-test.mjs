@@ -236,17 +236,22 @@ console.log('\n--- 3. a real pick lands, and the button confirms it ---');
   check('the picked element reached the form', typeof selector === 'string' && selector.length > 0, selector);
 
   /**
-   * THE CONFIRMATION IS A STATE, NOT A FLASH.
+   * THE CONFIRMATION EXPIRES ON ITS OWN, and the contract changed to make that possible.
    *
-   * Four attempts to expire it on a timer failed in four different ways, because the timer belonged to a button the
-   * next render discarded. It is now cleared by the next ACTION, which is deterministic - so the assertion is that it
-   * SURVIVES (it reports where the selector came from), and that picking again replaces it.
+   * It used to be asserted as PERMANENT - "it describes where the selector came from, so it stays until the next
+   * action" - which was a description of a bug rather than a decision: the green stayed on the panel long after the
+   * pick was finished, and the reason it never cleared was that the timer updated a button the next render had already
+   * replaced. The button is now addressed by the point it belongs to (`data-step-id`), so the expiry works, and this
+   * asserts the pair: present right after the pick, gone a little later.
    */
-  await panel.waitForTimeout(3200);
-  const stillThere = await pickButton();
-  console.log(`  3.2s later: ${JSON.stringify(stillThere)}`);
-  check('the confirmation is still there, because it describes where the selector came from',
-    stillThere?.picked === true, JSON.stringify(stillThere));
+  const rightAfter = await pickButton();
+  check('the confirmation is shown right after the pick lands', rightAfter?.picked === true, JSON.stringify(rightAfter));
+
+  await panel.waitForTimeout(2600);
+  const later = await pickButton();
+  console.log(`  2.6s later: ${JSON.stringify(later)}`);
+  check('and it clears itself, so the green does not linger on a finished pick',
+    later?.picked === false, JSON.stringify(later));
 }
 
 console.log('\n--- 4. PERSIAN DIGITS in the time field reach the model ---');

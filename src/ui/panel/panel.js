@@ -85,6 +85,7 @@ const state = {
   backupNote: null,       // the result of the last backup or restore, so it is not a silent operation
   basicSavedAt: null,     // when Save last succeeded, so the button can confirm for a moment and then stop
   pickSavedAt: null,      // when a pick last landed, so the Pick button can confirm the same way
+  pickSavedFor: null,     // WHICH point it landed for - without this the confirmation shows on every point
   pickCancelled: null,    // when a pick was last cancelled, so the fact is not silent
   timeError: null,        // why the typed time was not accepted, shown where the time is typed
   basicNotice: null,      // what Save did with the schedule: armed for an instant, or not scheduled at all
@@ -512,7 +513,19 @@ function pickControl({ step, redraw, rerender }) {
    * Held as an expiry timestamp rather than a timeout, so a re-render cannot leave it stuck claiming a pick that has
    * since been replaced - the lesson from the Save button, applied before it can bite again.
    */
-  const justPicked = state.pickSavedAt && state.pickTarget === null && Date.now() - state.pickSavedAt < 2500;
+  /**
+   * ONLY THE POINT THAT WAS PICKED CONFirms.
+   *
+   * MEASURED BUG: the condition was `state.pickSavedAt && state.pickTarget === null` - a timestamp with no record of
+   * WHICH point it belonged to. Since `pickTarget` is null once a pick lands, that was true for every Pick button on
+   * the panel, so all of them went green at once. Reported as "when it goes green, all the previously created picks go
+   * green too, when only the selected one should" - visual only, the behaviour was right.
+   *
+   * The identity of the point is now part of the state, so the confirmation is per-point like the picking state already
+   * was. Two points can never confirm for one pick, which is the property the test asserts.
+   */
+  const justPicked = state.pickSavedFor === step.id && state.pickTarget === null
+    && Date.now() - (state.pickSavedAt ?? 0) < 1500;
 
   /**
    * `redraw` is supplied by the caller and MUST preserve the form's working copy.
@@ -526,10 +539,13 @@ function pickControl({ step, redraw, rerender }) {
     class: picking ? 'pick picking' : (justPicked ? 'pick picked' : 'pick'),
     text: picking ? t('ui.picking') : (justPicked ? t('ui.picked') : t('ui.pick')),
     title: picking ? t('ui.pickingTitle') : t('ui.pickTitle'),
+    // the point this button belongs to, so the confirmation can find the CURRENT button after a re-render replaces it
+    'data-step-id': step.id,
     onclick: async () => {
       if (picking) { cancelPick(redraw); return; }
       state.pickTarget = step.id;
       state.pickSavedAt = null;      // the new pick supersedes the previous confirmation
+      state.pickSavedFor = null;
       const res = await send({ type: 'pick-element' }).catch((e) => ({ ok: false, error: String(e?.message ?? e) }));
       if (!res?.ok) {
         state.pickTarget = null;
@@ -540,7 +556,37 @@ function pickControl({ step, redraw, rerender }) {
       redraw();
     },
   });
-  // no expiry timer: see the note where `pickSavedAt` is set. The class stays until the next action.
+  /**
+   * THE CONFIRMATION CLEARS ITSELF, without a re-render.
+   *
+   * MEASURED: the green stayed forever unless something else re-rendered, because the class is computed when the view is
+   * built and nothing builds it again - `before the window nothing is green` passed and `after the window nothing is
+   * green` failed, with the button still reading "Picked" two seconds later.
+   *
+   * A re-render would clear it, and is the wrong instrument: rebuilding the view 1.5 seconds after a pick would replace
+   * a field the user may be typing in, which is the fault this panel has already had once. So the class, the text and
+   * the title are restored on THIS element, and the state is reset so any later render agrees. If the element has since
+   * been replaced the update is skipped - harmless, because the new render computes the same expiry and finds it over.
+   */
+  if (justPicked) {
+    setTimeout(() => {
+      if (state.pickSavedFor === step.id) { state.pickSavedAt = null; state.pickSavedFor = null; }
+      /**
+       * THE CURRENT BUTTON IS FOUND, not the one this closure captured.
+       *
+       * MEASURED: the first version updated `btn` directly and the green never went away - the pick itself triggers a
+       * re-render, so the node the timer held had been replaced and the update landed on an element nobody could see.
+       * Every sample from 300ms to 3500ms read "✓ Picked". Looking the button up by the point it belongs to is
+       * independent of which render produced it, and a missing button is simply nothing to do - the next render
+       * computes the expiry from the state that was cleared above.
+       */
+      const live = document.querySelector(`main button.pick[data-step-id="${step.id}"]`);
+      if (!live) return;
+      live.classList.remove('picked');
+      live.textContent = t('ui.pick');
+      live.title = t('ui.pickTitle');
+    }, 1500);
+  }
 
   /**
    * While a pick is live, the button that started it is the button that stops it - the same place the user is already
@@ -2269,6 +2315,8 @@ api.runtime.onMessage.addListener((msg) => {
        * no longer true. A green flash that vanishes while the user is still looking at it says less.
        */
       state.pickSavedAt = Date.now();
+      // WHICH point this confirmation belongs to. Without it the confirmation is global and every Pick button claims it.
+      state.pickSavedFor = step.id;
       // a pick landing in the simple view is form work: keep the draft so the point it was picked for survives
       if (state.tab === 'basic') state.basicKeepDraft = true;
       render();
