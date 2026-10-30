@@ -1232,8 +1232,33 @@ function basicView(rerender) {
    * on.
    */
   const hasFinder = (s) => Boolean(s?.finder && Object.keys(s.finder).some((k) => k !== 'strategy' && s.finder[k]));
+  /**
+   * ANY UNSAVED CHANGE COUNTS, NOT ONLY AN ADDED POINT.
+   *
+   * MEASURED (user report, 1.24.0): "when I set the time and then press Pick, the time resets to 09". The condition here
+   * only looked at STEPS - one empty point with no finder was "no work", so `basicDraft()` rebuilt the form from storage
+   * and the schedule came back as the 09:00 default. The time had been typed, accepted by the model, and then thrown
+   * away by a render that Pick itself triggered.
+   *
+   * A form has more state than its list of points. The comparison is against the SAVED record, which is the only honest
+   * definition of "unsaved": anything that differs is the user's work.
+   */
+  const savedBasic = state.automations?.find((a) => a.id === BASIC_ID) ?? null;
+  const draftDiffers = (() => {
+    if (!state.basic) return false;
+    const draft = state.basic;
+    // a time that differs from the saved one (or any time at all, when nothing is saved yet)
+    const ds = draft.schedule ?? null;
+    const ss = savedBasic?.schedule ?? null;
+    if (!ss || !ds) return Boolean(ds) !== Boolean(ss);
+    if (ds.hour !== ss.hour || ds.minute !== ss.minute || ds.second !== ss.second) return true;
+    if ((draft.name ?? '') !== (savedBasic?.name ?? '')) return true;
+    // and a point that has a finder, or more points than were saved
+    return (draft.steps ?? []).length > (savedBasic?.steps ?? []).length
+      || (draft.steps ?? []).some(hasFinder);
+  })();
   const unsavedWork = Boolean(state.basic) && !state.basicStale
-    && ((state.basic.steps ?? []).length > 1 || (state.basic.steps ?? []).some(hasFinder));
+    && ((state.basic.steps ?? []).length > 1 || (state.basic.steps ?? []).some(hasFinder) || draftDiffers);
   if (!state.basic || (!state.basicKeepDraft && !unsavedWork)) {
     state.basic = basicDraft();
     state.basicStale = false;
