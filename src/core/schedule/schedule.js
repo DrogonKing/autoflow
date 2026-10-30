@@ -158,7 +158,20 @@ export const PRECISE_WAKE_MS = 1500;
 export function wantsPreciseTiming(schedule) {
   if (!schedule) return false;
   if (typeof schedule.second === 'number') return true;
-  if (schedule.kind === 'cron') return String(schedule.cron ?? '').trim().split(/\s+/).length >= 6;
+  /**
+   * `expression`, NOT `cron`.
+   *
+   * MEASURED: `{kind:'cron', expression:'0 0 9 30 10 *'}` -> false, so a six-field cron NEVER activated precise timing -
+   * the seconds field was accepted by the parser and then ignored by the alarm, which is the difference between firing at
+   * the second and firing somewhere in the minute. The only shape that returned true was `{cron: ...}`, a field the model
+   * refuses to validate and the UI never writes, so the precise path was reachable only from a hand-edited file.
+   *
+   * `expression` is what `validateSchedule` requires, what `nextCronRun` parses, and what the editor stores.
+   */
+  if (schedule.kind === 'cron') {
+    const expr = String(schedule.expression ?? schedule.cron ?? '');
+    return expr.trim().split(/\s+/).filter(Boolean).length >= 6;
+  }
   return false;
 }
 

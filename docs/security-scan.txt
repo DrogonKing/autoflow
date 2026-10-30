@@ -11,7 +11,7 @@ Findings: 14
 ------------------------------------------------------------------------------
 MEDIUM (4)
 ------------------------------------------------------------------------------
-  src/background/service-worker.js:1297
+  src/background/service-worker.js:1340
     network-call
     const res = await fetch(url, {
   src/manifest.json:18
@@ -51,10 +51,10 @@ LOW (10)
   src/ui/panel/panel.js:362
     innerText-from-page
     timeHint.textContent = hasSecond ? t('sched.secondHint') : '';
-  src/ui/panel/panel.js:606
+  src/ui/panel/panel.js:618
     innerText-from-page
     live.textContent = t('ui.pick');
-  src/ui/panel/panel.js:1272
+  src/ui/panel/panel.js:1360
     innerText-from-page
     hint.textContent = parsed.ok ? '' : t(`time.error.${parsed.error}`);
 
@@ -63,8 +63,8 @@ Message handlers and sender validation
 ------------------------------------------------------------------------------
   onMessage listeners found : 2
   that inspect the sender  : 2
-    src/background/service-worker.js:1179  params=(msg, sender, sendResponse)  validates sender: yes
-    src/content/content.js:661  params=(msg, sender, sendResponse)  validates sender: yes
+    src/background/service-worker.js:1212  params=(msg, sender, sendResponse)  validates sender: yes
+    src/content/content.js:681  params=(msg, sender, sendResponse)  validates sender: yes
 
 ------------------------------------------------------------------------------
 Manifest

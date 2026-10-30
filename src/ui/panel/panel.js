@@ -388,7 +388,19 @@ function scheduleEditor(onChange) {
       timeField({
         value: `${String(s.hour ?? 9).padStart(2, '0')}:${String(s.minute ?? 0).padStart(2, '0')}`
           + (typeof s.second === 'number' ? `:${String(s.second).padStart(2, '0')}` : ''),
-        onCommit: (v, opts) => { commitTime(v, opts); if (opts.rerender) keepDraftThen(() => {}); },
+        /**
+         * `onChange`, NOT `keepDraftThen`.
+         *
+         * MEASURED: `keepDraftThen` is declared inside `basicView`, and `scheduleEditor` is a top-level function that only
+         * receives `onChange` - so committing a time in the Automations tab threw `ReferenceError: keepDraftThen is not
+         * defined`. That is a crash on BLUR of the time field, in the tab used for multi-step automations.
+         *
+         * My own first check called this report wrong; it was right. The scope was mis-measured, not the claim.
+         *
+         * `onChange` is the redraw the caller passed in, and it is the same argument every other branch of this function
+         * already uses.
+         */
+        onCommit: (v, opts) => { commitTime(v, opts); if (opts.rerender) onChange(); },
         onHint: refreshTimeHint,
       }),
       timeHint,
@@ -1022,13 +1034,64 @@ function conditionEditor(host, key, rerender) {
       ['url', 'contains', 'the URL contains'],
       ['title', 'contains', 'the page title contains'],
       ['variable', 'eq', 'a variable equals'],
-      ['js', 'eq', 'a script returns'],
+      /**
+       * `js` IS GONE. It was offered here and REJECTED by the model since `src/core/model/steps.js` dropped the source, so
+       * choosing it produced a step that could not be saved - and before that it produced a condition that saved and could
+       * never be honoured. A picker must not offer a choice the validator refuses.
+       */
       ['text', 'checked', 'is checked'],
       ['text', 'enabled', 'is enabled'],
     ].map(([s, cmp, label]) => el('option', {
       value: `${s}|${cmp}`, text: label, selected: c.source === s && c.comparator === cmp,
     }))),
   ));
+  /**
+   * A CONDITION NEEDS TO SAY WHAT IT READS, AND THIS EDITOR NEVER DID.
+   *
+   * MEASURED: `conditionEditor` produced a source, a comparator and a value - and no target. The model requires a finder
+   * for the element-reading sources, so an `if` or `while` built here could not be saved; and if one arrived from a file,
+   * the run had nothing to look at. `variable` had the same gap: a name to compare against, and nowhere to type the name.
+   *
+   * The fields appear for exactly the sources that use them, which is what keeps this honest: a URL condition does not
+   * show a selector, because it does not read one.
+   */
+  const READ_ELEMENT = ['text', 'value', 'attribute', 'count'];
+  if (READ_ELEMENT.includes(c.source)) {
+    const finder = c.finder ?? { strategy: 'css', selector: '' };
+    c.finder = finder;
+    wrap.append(el('div', { class: 'row' },
+      el('label', { text: t('field.finder') }),
+      el('input', {
+        class: 'grow mono', value: finder.selector ?? finder.text ?? finder.id ?? '',
+        placeholder: t('ph.selector'),
+        onchange: (e) => {
+          // only the primary strategy is replaced: a picked chain would outvote a correction, which is the trap the step
+          // editor already documents
+          const { chain, ...rest } = finder;
+          c.finder = { ...rest, strategy: 'css', selector: e.target.value };
+          rerender();
+        },
+      }),
+    ));
+  }
+  if (c.source === 'attribute') {
+    wrap.append(el('div', { class: 'row' },
+      el('label', { text: t('field.attribute') }),
+      el('input', {
+        class: 'grow mono', value: c.attribute ?? '', placeholder: 'data-symbol',
+        onchange: (e) => { c.attribute = e.target.value.trim(); rerender(); },
+      }),
+    ));
+  }
+  if (c.source === 'variable') {
+    wrap.append(el('div', { class: 'row' },
+      el('label', { text: t('field.variable') }),
+      el('input', {
+        class: 'grow mono', value: c.variable ?? '', placeholder: 'symbol',
+        onchange: (e) => { c.variable = e.target.value.trim(); rerender(); },
+      }),
+    ));
+  }
   if (c.comparator !== 'exists' && c.comparator !== 'notExists' &&
       !['visible', 'hidden', 'checked', 'unchecked', 'enabled', 'disabled', 'empty', 'notEmpty'].includes(c.comparator)) {
     wrap.append(el('div', { class: 'row' },

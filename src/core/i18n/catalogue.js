@@ -332,6 +332,12 @@ export const en = {
   'pick.needsStep': 'That pick was recorded, but no point was waiting for it, so nothing took the selector. Press Pick next to the point you want it on, then click the element.',
   'pick.needsStepWith': 'That pick found {sel}, but no point was waiting for it. Press Pick next to the point you want it on, then click the element.',
 
+  'field.finder': 'Selector',
+  'field.attribute': 'Attribute',
+  'field.variable': 'Variable',
+  'ph.selector': 'CSS selector, e.g. .buy-button',
+  'action.dismiss': 'Dismiss',
+
 };
 
 /**
@@ -641,6 +647,12 @@ export const fa = {
   'sched.weekday': 'روز هفته',
   'pick.needsStep': 'آن انتخاب ثبت شد، اما هیچ نقطه‌ای منتظرش نبود، پس سلکتور جایی نرفت. اول Pick کنار همان نقطه را بزن، بعد عنصر را در صفحه کلیک کن.',
   'pick.needsStepWith': 'آن انتخاب {sel} را پیدا کرد، اما هیچ نقطه‌ای منتظرش نبود. اول Pick کنار همان نقطه را بزن، بعد عنصر را در صفحه کلیک کن.',
+
+  'field.finder': 'سلکتور',
+  'field.attribute': 'ویژگی (attribute)',
+  'field.variable': 'متغیر',
+  'ph.selector': 'سلکتور CSS، مثلاً ‎.buy-button',
+  'action.dismiss': 'بستن',
 
 };
 

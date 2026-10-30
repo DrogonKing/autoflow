@@ -24,6 +24,17 @@ import {
 import {
   rescheduleAll, scheduleOne, cancelOne, automationIdFromAlarm, startLatencyMs, recordFiredTarget,
   /**
+   * THESE TWO WERE USED BUT NEVER IMPORTED. MEASURED, statically and by name:
+   *   `recordStartLatency` - called by every scheduled run as it finishes, so the run completed and then threw
+   *       ReferenceError. That is why the next-day re-arm could be missing: the throw happened before the re-arm.
+   *   `ALARM_PREFIX` - used by the `cancel-alarms` and `diagnostics` handlers, so BOTH crashed.
+   *
+   * Same fault as `listScheduled` before it: the name goes into the file, the import list does not, and no test calls
+   * the message that would notice. `tests/worker-imports.test.js` now checks that every name used from a module is
+   * actually imported from it, which is the general fix for this class.
+   */
+  recordStartLatency, ALARM_PREFIX,
+  /**
    * `listScheduled` WAS NEVER IMPORTED.
    *
    * MEASURED: `list-scheduled` answered `{ ok: false, error: "listScheduled is not defined" }` while the alarm itself was
@@ -99,7 +110,19 @@ async function sendToTab(tabId, message, { injectIfMissing = true } = {}) {
     // The payload crosses a message port, which structured-clones it. A function anywhere inside would
     // fail the send on Firefox; sanitising here means a page-derived value can never break the channel.
     const safeMessage = message?.step ? { ...message, step: cloneableOrString(message.step) } : message;
-    return await withTimeout(api.tabs.sendMessage(tabId, safeMessage), 20_000, `message ${message.type}`);
+    /**
+     * THE CAP DEPENDS ON WHAT THE STEP IS ALLOWED TO DO.
+     *
+     * MEASURED: a flat 20s timeout covered every message to a tab, so a `wait`, `waitFor` or `clickAll` step whose own
+     * limit is longer was killed at 20 seconds with "message <type> timed out" - the step never got to fail on its own
+     * terms, and a legitimate long wait looked like a broken connection. `waitForLoad` alone waits up to 30s.
+     *
+     * The step's own budget decides. `message.timeoutMs` is what the runner passes for waits; everything else keeps the
+     * tight default, because for a click or a read a long silence really is a fault.
+     */
+    const budget = Number.isFinite(message?.timeoutMs) ? message.timeoutMs : 20_000;
+    const cap = Math.min(Math.max(budget + 5_000, 20_000), 10 * 60_000);
+    return await withTimeout(api.tabs.sendMessage(tabId, safeMessage), cap, `message ${message.type}`);
   } catch (e) {
     // Each browser words this differently:
     //   Chromium: "Could not establish connection. Receiving end does not exist."
@@ -465,7 +488,17 @@ async function startAutomationLocked(automationId, {
   validateAutomation(automation);
 
   const settings = await getSettings();
-  const opts = { ...automation.options, atMs };
+  /**
+   * THE SETTINGS WERE READ AND THEN DISCARDED.
+   *
+   * MEASURED: this function fetched `settings`, built `opts` from `automation.options` alone, and never mentioned
+   * `settings` again - so every per-machine PREFERENCE was invisible to the run. `focusBeforePrecise` is the one that
+   * bites: the worker reads `opts.focusBeforePrecise` to raise the tab before a second-precision click, and nothing ever
+   * put it there, so the option in the UI was inert and precise runs stayed in a throttled background tab.
+   *
+   * Settings are the fallback, the automation's own options win: a per-job override is deliberate, a default is not.
+   */
+  const opts = { focusBeforePrecise: settings?.focusBeforePrecise, ...automation.options, atMs };
   const targetTabId = tabId ?? (await api.tabs.query({ active: true, currentWindow: true }))[0]?.id;
   if (!targetTabId) throw new Error('there is no active tab to run in');
 

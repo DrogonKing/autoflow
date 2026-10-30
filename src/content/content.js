@@ -249,9 +249,27 @@ async function performStep(step) {
     how = found.how;
   }
 
+  /**
+   * THE TIMING REPORT WAS DEFINED AND NEVER USED.
+   *
+   * MEASURED: this helper existed, and `withTiming` had exactly ONE occurrence in the file - its own definition. So
+   * `timingOffsetMs` and `timingThrottled` never reached a step result, which means a run never reported how late its
+   * precise click actually landed. That is the number every "the click missed the second" report depends on, and it was
+   * being computed and discarded.
+   *
+   * It is applied where the results leave: `runStep`'s own return, via `report`. One place, so a new step kind cannot
+   * forget it.
+   */
   const withTiming = (r) => (waitedMs === null ? r
     : { ...r, timingOffsetMs: waitedMs, ...(waitWasThrottled ? { timingThrottled: true } : {}) });
 
+  /**
+   * ONE EXIT POINT, so the timing report cannot be forgotten.
+   *
+   * Wrapping the switch rather than patching each of the fourteen `return` statements: a missed return would silently drop
+   * `timingOffsetMs` again, and that is exactly the bug being fixed.
+   */
+  const result = await (async () => {
   switch (step.kind) {
     case 'click': {
       // ---- click EVERY match, when the step asks for it
@@ -455,6 +473,8 @@ async function performStep(step) {
     default:
       throw new ActionError(`the page side does not handle step kind "${step.kind}"`);
   }
+  })();
+  return withTiming(result);
 }
 
 /** Read the page for a condition, returning the shape the condition evaluator expects. */
@@ -757,9 +777,17 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     case 'highlight': {
       if (msg.finder) {
         try {
-          const { elements } = findElement(document, msg.finder, { requireVisible: false });
-          if (elements) {
-            const r = elements.getBoundingClientRect();
+          /**
+           * `element`, NOT `elements`.
+           *
+           * MEASURED: `findElement` returns `{ element, how, candidates, tried }` - a single element - so this destructured
+           * a name that does not exist, leaving `undefined`, and the next line called `getBoundingClientRect()` on it. Every
+           * `highlight` message therefore threw, which is the typing indicator an `if` step uses to show what it is looking
+           * at: the feature looked like it did nothing.
+           */
+          const { element } = findElement(document, msg.finder, { requireVisible: false });
+          if (element) {
+            const r = element.getBoundingClientRect();
             const overlay = ensureOverlay();
             overlay.style.display = 'block';
             overlay.style.left = `${r.left}px`;

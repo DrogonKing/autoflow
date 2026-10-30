@@ -189,6 +189,14 @@ const area = (name) => ({
 // the surface
 // ---------------------------------------------------------------------------------------------
 
+/**
+ * `windows` IS PART OF THE API, AND IT WAS MISSING.
+ *
+ * MEASURED: `api.windows` was undefined, so the optional-chain call in the worker (`api.windows.update?.(...)`) silently
+ * did nothing - and the one thing it is for is raising a tab's window before a second-precision click. `tabs.update({
+ * active: true })` alone moves the tab, not the window: if the window is behind another, the tab is active inside a
+ * window that is not focused, and Chromium throttles it exactly as before.
+ */
 export const api = {
   get id() {
     return ns().runtime.id;
@@ -251,6 +259,16 @@ export const api = {
     getAll: () => call(ns().alarms.getAll.bind(ns().alarms), null, []),
   },
 
+  windows: {
+    /**
+     * `update` with `{focused: true}` is what actually lifts a window, and `tabs.update({active:true})` cannot do it.
+     *
+     * Firefox exposes the same call as `browser.windows.update`, so `ns()` picks whichever the host provides - the same
+     * arrangement as every other entry here.
+     */
+    update: (windowId, props) => call(ns().windows.update.bind(ns().windows), null, [windowId, props]),
+    getCurrent: () => call(ns().windows.getCurrent.bind(ns().windows), null, []),
+  },
   tabs: {
     query: (q) => call(ns().tabs.query.bind(ns().tabs), null, [q]),
     get: (id) => call(ns().tabs.get.bind(ns().tabs), null, [id]),
