@@ -546,6 +546,8 @@ function pickControl({ step, redraw, rerender }) {
       state.pickTarget = step.id;
       state.pickSavedAt = null;      // the new pick supersedes the previous confirmation
       state.pickSavedFor = null;
+      // recorded so a lost target can be SEEN: the ring is the only observer of the moment the message arrives
+      recordPickDebug({ event: 'pressed', stepId: step.id, tab: state.tab, basicSteps: (state.basic?.steps ?? []).map((s) => s.id) });
       /**
        * SAY WHICH AUTOMATION THIS PICK IS FOR.
        *
@@ -556,9 +558,18 @@ function pickControl({ step, redraw, rerender }) {
       const owner = state.basic?.steps?.some((s) => s.id === step.id) ? state.basic : state.editing;
       const res = await send({ type: 'pick-element', automationId: owner?.id ?? null })
         .catch((e) => ({ ok: false, error: String(e?.message ?? e) }));
+      recordPickDebug({ event: 'pick-element-result', ok: res?.ok === true, error: res?.error ?? null, tabId: res?.tabId ?? null });
       if (!res?.ok) {
         state.pickTarget = null;
         state.pickError = String(res?.error ?? 'could not start the picker');
+        /**
+         * THE ERROR HAS TO BE VISIBLE, IN THE TAB THE USER IS LOOKING AT.
+         *
+         * `redraw()` rebuilds the simple form from storage, which throws the draft away - so an error stored on the draft
+         * was never rendered, and a failed pick looked like a pick that did nothing. Measured: the fault case showed an
+         * empty selector with no message anywhere, while the reason ("no page to pick from") was known all along.
+         */
+        if (state.tab === 'basic') state.basicError = state.pickError;
         redraw();
         return;
       }
@@ -1111,6 +1122,44 @@ function stepsEditor(list, rerender, label) {
 const BASIC_ID = 'basic';
 const BASIC_NAME_KEY = 'basic.name';
 
+/**
+ * FINDERS FROM A PICK, kept OUTSIDE the draft.
+ *
+ * MEASURED, and this is the fault that read as "پیک کار نمیکند": `element-picked` set `step.finder` on the draft and
+ * called `render()`, but any render that does not keep the draft rebuilds it from storage via `basicDraft()` - and the
+ * finder was gone. The button still said "✓ Picked", because its class comes from `state.pickSavedFor` (an id), not from
+ * the finder, so the UI claimed success with an empty selector underneath.
+ *
+ * It also explains why it sometimes worked: with no intervening render the draft survived.
+ *
+ * Keeping the finders here means a rebuild cannot lose them - the map is the record, the draft is only a view of it.
+ */
+function rememberFinder(stepId, finder) {
+  if (!stepId || !finder) return;
+  state.pickedFinders = { ...(state.pickedFinders ?? {}), [stepId]: finder };
+}
+
+/**
+ * Apply every remembered finder to a draft's steps, in place.
+ *
+ * THE MAP IS AUTHORITATIVE for any step it has an entry for. The first version of this added a condition -
+ * `!(s.finder && Object.keys(s.finder).length > 1)` - meant to keep an existing good finder. It did the opposite: an
+ * EMPTY finder is `{ strategy: 'css', selector: '' }`, which has exactly one key, so the guard read it as "a real finder
+ * already exists" and skipped the entry. Measured: `the picked element reached the form` failing with the map populated
+ * and the field empty. A condition that has to be right about an unrelated shape is a second bug waiting to happen - the
+ * entry exists or it does not.
+ */
+function applyPickedFinders(steps) {
+  const map = state.pickedFinders ?? {};
+  for (const s of steps ?? []) {
+    if (s?.id && map[s.id]) s.finder = { ...map[s.id] };
+    for (const key of ['steps', 'then', 'else']) {
+      if (Array.isArray(s?.[key])) applyPickedFinders(s[key]);
+    }
+  }
+  return steps;
+}
+
 function basicDraft() {
   const existing = state.automations.find((a) => a.id === BASIC_ID);
   if (existing) {
@@ -1119,17 +1168,30 @@ function basicDraft() {
     return {
       ...existing,
       schedule: { kind: 'daily', ...(existing.schedule ?? {}) },
-      steps: (existing.steps ?? []).map((s) => ({ ...s })),
+      steps: applyPickedFinders((existing.steps ?? []).map((s) => ({ ...s }))),
     };
   }
-  // a fresh draft: 09:00:00 and one empty click, so the form is usable the moment it is opened
+  /**
+   * A FRESH DRAFT NEEDS A STABLE STEP ID.
+   *
+   * MEASURED, and this is why picks kept vanishing: this function runs on every render that does not keep the draft, and
+   * `makeStep` mints a NEW random id each time. `state.pickTarget` holds the id the button had when it was pressed, so as
+   * soon as one such render happened the pick arrived for an id that no longer existed - and the listener dropped it in
+   * silence. Observed directly: the Pick button carried `smvuzxgjy1`, the form below it carried `smvuzxhtp2` a few hundred
+   * milliseconds later.
+   *
+   * That also explains why it sometimes worked: with no render between the press and the click on the page, the id
+   * survived. A fault that depends on timing is the worst kind to report, because the report is "it does not work".
+   *
+   * The first point of the simple form is positional - it IS "point 1" - so its id is derived rather than random.
+   */
   return {
     id: BASIC_ID,
     name: t(BASIC_NAME_KEY),
     enabled: true,
     urls: [],
     schedule: { kind: 'daily', hour: 9, minute: 0, second: 0 },
-    steps: [makeStep('click', { finder: { strategy: 'css', selector: '' } })],
+    steps: applyPickedFinders([{ id: `${BASIC_ID}-point-1`, kind: 'click', finder: { strategy: 'css', selector: '' } }]),
     options: { stepDelayMs: 60, stepRetries: 2, maxRunMs: 30 * 60_000 },
     createdAt: Date.now(),
   };
@@ -1146,8 +1208,35 @@ function basicView(rerender) {
    * `state.basicKeepDraft` is set by exactly those, so their result is not thrown away. A flag that had to be right
    * on every path was the earlier, fragile version of this.
    */
-  if (!state.basicKeepDraft || !state.basic) {
+  /**
+   * AN UNSAVED FORM SURVIVES A RENDER.
+   *
+   * `basicDraft()` builds its point list from the SAVED record, which is empty until Save - so any render that did not
+   * keep the draft silently threw away the points the user had added, and the pick that was in flight went with them.
+   * MEASURED: `pick-confirm-test` added two points to reach three, pressed Pick, and the panel came back with ONE button.
+   *
+   * Keeping the draft in memory is what the flag is for, but the flag only knew about actions the form itself triggered.
+   * A render caused by anything else - a status update, a settings refresh, a pick arriving - dropped the work. So the
+   * draft is now kept whenever it HAS unsaved content, which is a property of the draft rather than a flag somebody has
+   * to remember to set.
+   */
+  /**
+   * KEEPING UNSAVED WORK MUST NOT OUTLIVE THE SAVE.
+   *
+   * MEASURED: the first version of this kept any draft with more than one point, so a form left over from a previous run
+   * came back with two points where the saved record has one - `ui-basic-test` reported "it starts with one click point: 2"
+   * and every count after that was off by one.
+   *
+   * `basicStale` already records the moments the stored record is the truth (after a save, and on leaving the tab), so it
+   * takes precedence. The rule is: keep the draft while the user is working on it, rebuild it whenever storage has moved
+   * on.
+   */
+  const hasFinder = (s) => Boolean(s?.finder && Object.keys(s.finder).some((k) => k !== 'strategy' && s.finder[k]));
+  const unsavedWork = Boolean(state.basic) && !state.basicStale
+    && ((state.basic.steps ?? []).length > 1 || (state.basic.steps ?? []).some(hasFinder));
+  if (!state.basic || (!state.basicKeepDraft && !unsavedWork)) {
     state.basic = basicDraft();
+    state.basicStale = false;
   } else {
     // the form changed itself and the result must survive any follow-up build in this render sequence
     bodyKeptDraftForFollowUp = true;
@@ -2262,6 +2351,22 @@ function renderTree() {
   }
   root.append(nav);
 
+  /**
+   * A NOTICE THAT BELONGS TO NO TAB.
+   *
+   * MEASURED: a pick from the header's "Inspect element" button found no point waiting, and the explanation went into
+   * `state.basicError` - which is only rendered inside the Basic tab. Pressed from any other tab, the pick vanished with
+   * no word at all, which is the complaint this whole thread is about. A refusal has to be visible where the user is.
+   */
+  if (state.panelNotice) {
+    const notice = el('div', { class: 'preview warn', text: state.panelNotice });
+    notice.append(el('button', {
+      class: 'icon', text: t('ui.close'), title: t('action.dismiss'),
+      onclick: () => { state.panelNotice = null; render(); },
+    }));
+    root.append(notice);
+  }
+
   const body = el('main');
   if (state.tab === 'basic') body.append(basicView(rerender));
   else if (state.tab === 'automations') body.append(automationsView(rerender));
@@ -2287,8 +2392,33 @@ function renderTree() {
 // wiring
 // ---------------------------------------------------------------------------------------------
 
+/**
+ * A tiny ring of what the pick listener saw, readable from the page for a test and for a bug report.
+ *
+ * The fault it exists for: a pick arrives for a step id that no longer exists, the listener finds nothing, and the user
+ * sees "nothing happened". Nothing else in the extension can observe that moment.
+ */
+globalThis.__pickDebug = [];
+function recordPickDebug(entry) {
+  try {
+    globalThis.__pickDebug.push({ at: Date.now(), ...entry });
+    if (globalThis.__pickDebug.length > 20) globalThis.__pickDebug.shift();
+  } catch { /* diagnostics must never break a pick */ }
+}
+
 api.runtime.onMessage.addListener((msg) => {
-  if (msg?.type === 'element-picked' && state.pickTarget) {
+  /**
+   * A PICK MUST NEVER BE DISCARDED IN SILENCE.
+   *
+   * MEASURED (user's export, 1.21.0): `automations stored: 0`, `events: 0`, while `lastPickPages` held the page - so a pick
+   * had landed and been recorded, and no automation was ever saved because the steps still had no selector. The panel's
+   * Save refuses before sending anything when no step has a selector, which is why the export showed no save ATTEMPT.
+   *
+   * The cause is this listener: it read `element-picked` only when `state.pickTarget` was set. That is null in two
+   * perfectly ordinary situations - the header's "Pick & record" button never sets it, and any render after a pick clears
+   * it - so the pick's selector was thrown away and nothing said so.
+   */
+  if (msg?.type === 'element-picked') {
     const find = (list) => {
       for (const s of list) {
         if (s.id === state.pickTarget) return s;
@@ -2304,9 +2434,28 @@ api.runtime.onMessage.addListener((msg) => {
     // the pick may belong to the full editor or to the simple view; whichever holds that step gets it
     const inEditing = state.editing ? find(state.editing.steps) : null;
     const inBasic = state.basic ? (state.basic.steps ?? []).find((s) => s.id === state.pickTarget) : null;
+    /**
+     * LEFT IN PLACE ON PURPOSE: this is the diagnostic that found the lost id.
+     *
+     * A pick arriving for a step that no longer exists is a silent failure the user experiences as "nothing happened", and
+     * the only way to see it is to record what the listener actually received. It costs one line per pick.
+     */
+    recordPickDebug({
+      pickTarget: state.pickTarget,
+      tab: state.tab,
+      hasEditing: Boolean(state.editing),
+      basicSteps: (state.basic?.steps ?? []).map((s) => s.id),
+      editingSteps: (state.editing?.steps ?? []).map((s) => s.id),
+      found: Boolean(inEditing ?? inBasic),
+    });
     const step = inEditing ?? inBasic ?? null;
     if (step) {
       step.finder = msg.finder;
+      /**
+       * OUTSIDE THE DRAFT AS WELL. The draft is rebuilt from storage on renders that do not keep it, and then the finder
+       * is gone while the button still claims "✓ Picked" - measured, with the selector input empty underneath.
+       */
+      rememberFinder(step.id, msg.finder);
       /**
        * REMEMBER WHICH PAGE THIS CAME FROM.
        *
@@ -2348,6 +2497,22 @@ api.runtime.onMessage.addListener((msg) => {
       state.pickSavedFor = step.id;
       // a pick landing in the simple view is form work: keep the draft so the point it was picked for survives
       if (state.tab === 'basic') state.basicKeepDraft = true;
+      render();
+    } else {
+      /**
+       * NO STEP CLAIMED IT: say so, and say what the user can do.
+       *
+       * Silence here is what made this show up as "nothing is saved" three versions in a row. The selector is known, so
+       * the message can name it, and the two honest next steps are the ones in the message.
+       */
+      const where = msg.finder?.selector ?? msg.finder?.xpath ?? msg.finder?.id ?? '(a picked element)';
+      const message = String(where).startsWith('(a')
+        ? t('pick.needsStep')
+        : t('pick.needsStepWith').replace('{sel}', String(where).slice(0, 60));
+      // BOTH placements: `basicError` when the form is what the user is looking at, and a panel-level notice otherwise.
+      // The second one is the fix - the first was invisible from every other tab, measured.
+      if (state.tab === 'basic') state.basicError = message;
+      state.panelNotice = message;
       render();
     }
     return;

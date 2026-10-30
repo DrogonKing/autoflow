@@ -62,7 +62,8 @@ export const en = {
   'basic.needPoint': 'At least one point is needed. Press Pick on a point and click the element on the page.',
   'tab.settings': 'Settings',
   'nav.newAutomation': '+ New automation',
-  'nav.pickAndRecord': '⌖ Pick & record',
+  // it records nothing: renaming it is the honest half of the fix (the other half is that a pick is no longer dropped)
+  'nav.pickAndRecord': '⌖ Inspect element',
   'nav.options': 'Options',
 
   // ---- list / empty states
@@ -304,7 +305,13 @@ export const en = {
   'hint.loopVars': 'current: loop index, iteration, total, first, last',
   'hint.otherwise': 'otherwise',
   'hint.addStep': '+ Add step',
-  'hint.pickTitleLong': 'Pick elements on the page to build steps automatically',
+  /**
+   * THE TOOLTIP WAS A LIE. "Pick elements on the page to build steps automatically" - it does not build steps: it reports
+   * what the element IS, and no point takes the selector. Measured: a user pressed it, the pick landed, `lastPickPages`
+   * was filled, and nothing was ever saved because no step ever got a selector. A control that promises more than it does
+   * is worse than a missing one.
+   */
+  'hint.pickTitleLong': 'Inspect an element: shows what it is, without attaching it to a point. To record a selector, use Pick next to the point.',
   'hint.picking': 'Click an element on the page...',
   'data.csvFile': 'CSV file',
   'data.usage': 'Use ${row.column} or ${column} in any step. A loop of type "for each item in a list" over "rows" walks the file.',
@@ -322,6 +329,9 @@ export const en = {
   'sched.once': 'once',
   'sched.dayOfMonth': 'day of month',
   'sched.weekday': 'weekday',
+  'pick.needsStep': 'That pick was recorded, but no point was waiting for it, so nothing took the selector. Press Pick next to the point you want it on, then click the element.',
+  'pick.needsStepWith': 'That pick found {sel}, but no point was waiting for it. Press Pick next to the point you want it on, then click the element.',
+
 };
 
 /**
@@ -381,7 +391,7 @@ export const fa = {
   'basic.needPoint': 'حداقل یک نقطه لازم است. روی Pick همان نقطه بزن و عنصر را در صفحه کلیک کن.',
   'tab.settings': 'تنظیمات',
   'nav.newAutomation': '+ اتوماسیون جدید',
-  'nav.pickAndRecord': '⌖ انتخاب و ضبط',
+  'nav.pickAndRecord': '⌖ بررسی عنصر',
   'nav.options': 'تنظیمات',
 
   'empty.automations': 'هنوز اتوماسیونی نداری.',
@@ -611,7 +621,7 @@ export const fa = {
   'hint.loopVars': 'مقادیر موجود: loop.index و loop.iteration و loop.total و loop.first و loop.last',
   'hint.otherwise': 'وگرنه',
   'hint.addStep': '+ افزودن گام',
-  'hint.pickTitleLong': 'عنصرهای روی صفحه را انتخاب کن تا گام‌ها خودکار ساخته شوند',
+  'hint.pickTitleLong': 'فقط عنصر را بررسی می‌کند: نشان می‌دهد چیست، ولی به هیچ نقطه‌ای نمی‌چسباند. برای ثبت سلکتور، Pick کنار همان نقطه را بزن.',
   'hint.picking': 'روی یک عنصر در صفحه کلیک کن...',
   'data.csvFile': 'فایل CSV',
   'data.usage': 'در هر گام از ${row.column} یا ${column} استفاده کن. یک حلقهٔ «روی هر آیتم لیست» روی «rows» فایل را می‌گردد.',
@@ -629,6 +639,9 @@ export const fa = {
   'sched.once': 'یک‌بار',
   'sched.dayOfMonth': 'روز ماه',
   'sched.weekday': 'روز هفته',
+  'pick.needsStep': 'آن انتخاب ثبت شد، اما هیچ نقطه‌ای منتظرش نبود، پس سلکتور جایی نرفت. اول Pick کنار همان نقطه را بزن، بعد عنصر را در صفحه کلیک کن.',
+  'pick.needsStepWith': 'آن انتخاب {sel} را پیدا کرد، اما هیچ نقطه‌ای منتظرش نبود. اول Pick کنار همان نقطه را بزن، بعد عنصر را در صفحه کلیک کن.',
+
 };
 
 export const CATALOGUES = { en, fa };

@@ -771,6 +771,17 @@ api.alarms.onAlarm.addListener(async (alarm) => {
          * A MANUAL run is different, and the difference is handled below: the user is looking at the page and pressed
          * Run, so "this tab" is what they mean.
          */
+        /**
+         * NO `throw` HERE. THIS WAS THE REGRESSION.
+         *
+         * MEASURED against v1.18.0, where the user's automation worked: the old path ended with a fallback to the active
+         * tab. That fallback had to go (B5: it delivered clicks to an unrelated page), but the replacement threw from
+         * inside this `else` - so execution never reached the remembered-page block below, which is where a Basic
+         * automation is supposed to find its page. A Basic automation has no URL pattern, so it landed here EVERY time.
+         *
+         * The fix is ordering, not a new rule: try every source of a page first, and refuse only when none of them
+         * produces one.
+         */
         const concrete = patterns.map((p) => String(p)).find((p) => !p.includes('*')
           && !p.startsWith('<all_urls>') && /^[a-z][a-z0-9+.-]*:\/\//i.test(p));
         if (concrete) {
@@ -779,7 +790,6 @@ api.alarms.onAlarm.addListener(async (alarm) => {
           await new Promise((r) => setTimeout(r, 1500));
         } else {
           recordEvent({ kind: 'no-matching-tab', automationId: id, patterns });
-          throw new Error(`no open tab matches ${patterns.filter((p) => String(p).trim()).join(', ') || '(no pattern)'} - open the site, or give the automation a concrete URL`);
         }
       }
     }
