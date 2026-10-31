@@ -76,6 +76,7 @@ export function validateSchedule(s) {
       intInRange(s.hour, 0, 23, 'hour');
       intInRange(s.minute, 0, 59, 'minute');
       if (s.second !== undefined) intInRange(s.second, 0, 59, 'second');
+      if (s.ms !== undefined) intInRange(s.ms, 0, 999, 'millisecond');
       return s;
 
     case 'weekly':
@@ -86,6 +87,7 @@ export function validateSchedule(s) {
       intInRange(s.hour, 0, 23, 'hour');
       intInRange(s.minute, 0, 59, 'minute');
       if (s.second !== undefined) intInRange(s.second, 0, 59, 'second');
+      if (s.ms !== undefined) intInRange(s.ms, 0, 999, 'millisecond');
       return s;
 
     case 'monthly':
@@ -95,6 +97,7 @@ export function validateSchedule(s) {
       intInRange(s.hour, 0, 23, 'hour');
       intInRange(s.minute, 0, 59, 'minute');
       if (s.second !== undefined) intInRange(s.second, 0, 59, 'second');
+      if (s.ms !== undefined) intInRange(s.ms, 0, 999, 'millisecond');
       return s;
 
     case 'cron':
@@ -157,15 +160,29 @@ export const PRECISE_WAKE_MS = 1500;
 /** Should this schedule be fired precisely, i.e. is a second specified? */
 export function wantsPreciseTiming(schedule) {
   if (!schedule) return false;
+  // A millisecond target is the strongest case for precise timing: the caller asked for a sub-second instant, so
+  // firing on the alarm's own jitter would ignore the request entirely.
+  if (typeof schedule.ms === 'number') return true;
   if (typeof schedule.second === 'number') return true;
   if (schedule.kind === 'cron') return String(schedule.expression ?? schedule.cron ?? '').trim().split(/\s+/).length >= 6;
   return false;
 }
 
-export function makeLocal(year, month, day, hour, minute = 0, second = 0) {
-  const d = new Date(year, month, day, hour, minute, second, 0);
+export function makeLocal(year, month, day, hour, minute = 0, second = 0, ms = 0) {
+  const d = new Date(year, month, day, hour, minute, second, ms);
   const exists = d.getHours() === hour && d.getMinutes() === minute && d.getDate() === day;
   return { at: d.getTime(), wallTimeExists: exists };
+}
+
+/**
+ * The millisecond part of a schedule, or 0.
+ *
+ * Kept as a helper so the three nextRun branches cannot disagree about it, which is exactly how `second` was handled -
+ * one `?? 0` per branch, and a branch that forgot it would silently fire a second early or late.
+ */
+function msOf(schedule) {
+  const ms = schedule.ms;
+  return typeof ms === 'number' && Number.isFinite(ms) ? ms : 0;
 }
 
 /**
@@ -217,24 +234,26 @@ export function nextRun(schedule, fromMs) {
     case 'daily': {
       const p = localParts(fromMs);
       const second = schedule.second ?? 0;
+      const ms = msOf(schedule);
       // today at the requested time, if still ahead
-      const today = makeLocal(p.year, p.month, p.day, schedule.hour, schedule.minute, second);
+      const today = makeLocal(p.year, p.month, p.day, schedule.hour, schedule.minute, second, ms);
       if (today.at > fromMs) return today.at;
       // `sameDayOnly` means "today, or nothing". Without it, a schedule armed just after its own time
       // silently moves to tomorrow - which for a market open is a full day late.
       if (schedule.sameDayOnly) return null;
-      const t = new Date(p.year, p.month, p.day + 1, schedule.hour, schedule.minute, second, 0);
+      const t = new Date(p.year, p.month, p.day + 1, schedule.hour, schedule.minute, second, ms);
       return t.getTime();
     }
 
     case 'weekly': {
       const p = localParts(fromMs);
       const second = schedule.second ?? 0;
+      const ms = msOf(schedule);
       const days = [...new Set(schedule.days)].sort((a, b) => a - b);
       // today first, then the following days; `sameDayOnly` stops after today
       const lastOffset = schedule.sameDayOnly ? 0 : 7;
       for (let offset = 0; offset <= lastOffset; offset++) {
-        const t = new Date(p.year, p.month, p.day + offset, schedule.hour, schedule.minute, second, 0);
+        const t = new Date(p.year, p.month, p.day + offset, schedule.hour, schedule.minute, second, ms);
         if (!days.includes(t.getDay())) continue;
         if (t.getTime() > fromMs) return t.getTime();
       }
@@ -244,10 +263,11 @@ export function nextRun(schedule, fromMs) {
     case 'monthly': {
       const p = localParts(fromMs);
       const second = schedule.second ?? 0;
+      const ms = msOf(schedule);
       // this month, then the next 12 (a schedule must fire within a year)
       const lastMonth = schedule.sameDayOnly ? 0 : 12;
       for (let i = 0; i <= lastMonth; i++) {
-        const t = new Date(p.year, p.month + i, schedule.day, schedule.hour, schedule.minute, second, 0);
+        const t = new Date(p.year, p.month + i, schedule.day, schedule.hour, schedule.minute, second, ms);
         if (t.getDate() !== schedule.day) continue; // day does not exist in that month
         if (t.getTime() > fromMs) return t.getTime();
       }

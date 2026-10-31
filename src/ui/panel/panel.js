@@ -412,14 +412,21 @@ function scheduleEditor(onChange) {
         const next = { ...(state.editing.schedule ?? s), hour: parsed.hour, minute: parsed.minute };
         if (parsed.precise) next.second = parsed.second;
         else delete next.second;
+        /**
+         * THE MILLISECONDS ARE DELETED WHEN THERE ARE NONE, for the same reason `second` is: an undefined field and a
+         * zero field mean different things to `wantsPreciseTiming`, and leaving a stale `ms: 0` behind would keep a
+         * schedule in precise mode after the user removed the fraction - waking the worker 1.5s early for nothing.
+         */
+        if (parsed.ms > 0) next.ms = parsed.ms;
+        else delete next.ms;
         state.editing.schedule = next;
       }
       // refreshed EITHER WAY: a rejection has to be visible next to the field, not only absent from the model
-      refreshTimeHint(parsed.ok && parsed.precise);
+      refreshTimeHint(parsed.ok && (parsed.precise || parsed.ms > 0));
       if (rerender) onChange();
     };
 
-    refreshTimeHint(typeof s.second === 'number');
+    refreshTimeHint(typeof s.second === 'number' || Number(s.ms) > 0);
     wrap.append(el('div', { class: 'row' },
       el('label', { text: t('field.time') }),
       timeField({
@@ -1373,6 +1380,7 @@ function basicDraft() {
         hour: existing.schedule?.hour ?? 9,
         minute: existing.schedule?.minute ?? 0,
         second: existing.schedule?.second ?? 0,
+        ...(existing.schedule?.ms ? { ms: existing.schedule.ms } : {}),
       },
       steps: applyPickedFinders((existing.steps ?? []).map((s) => ({ ...s }))),
     };
@@ -1396,7 +1404,7 @@ function basicDraft() {
     name: t(BASIC_NAME_KEY),
     enabled: true,
     urls: [],
-    schedule: { kind: 'daily', hour: 9, minute: 0, second: 0 },
+    schedule: { kind: 'daily', hour: 9, minute: 0, second: 0, ms: 0 },
     steps: applyPickedFinders([{ id: `${BASIC_ID}-point-1`, kind: 'click', finder: { strategy: 'css', selector: '' } }]),
     options: { stepDelayMs: 0, stepRetries: 2, maxRunMs: 30 * 60_000 },
     createdAt: Date.now(),
@@ -1481,7 +1489,7 @@ function basicView(rerender) {
     state.basicKeepDraft = true;
     rerender();
   };
-  const sched = draft.schedule ?? { kind: 'daily', hour: 9, minute: 0, second: 0 };
+  const sched = draft.schedule ?? { kind: 'daily', hour: 9, minute: 0, second: 0, ms: 0 };
 
   wrap.append(el('p', { class: 'hint', text: t('basic.intro') }));
 
@@ -1503,13 +1511,13 @@ function basicView(rerender) {
     hint.textContent = parsed.ok ? '' : t(`time.error.${parsed.error}`);
     hint.className = parsed.ok ? 'hint time-hint' : 'hint time-hint warn time-error';
     if (!parsed.ok) return;
-    draft.schedule = { kind: 'daily', hour: parsed.hour, minute: parsed.minute, second: parsed.second };
+    draft.schedule = { kind: 'daily', hour: parsed.hour, minute: parsed.minute, second: parsed.second, ms: parsed.ms };
     state.basic = draft;
   };
   wrap.append(el('div', { class: 'row' },
     el('label', { text: t('basic.time') }),
     timeField({
-      value: `${String(sched.hour ?? 9).padStart(2, '0')}:${String(sched.minute ?? 0).padStart(2, '0')}:${String(sched.second ?? 0).padStart(2, '0')}`,
+      value: timeFieldValue(sched),
       // every keystroke updates the model; leaving the field re-renders once, and the draft is kept so the typed
       // value survives that re-render
       onCommit: (v, opts) => { commit(v); if (opts.rerender) keepDraftThen(() => {}); },
@@ -1812,7 +1820,9 @@ const TIME_SEPARATORS = /[\u066B\u066C\u061B\uFF1A\uFE55\u05C3\u2236\u002E\u06D4
 
 /** Just the digits, translated from any script and capped at the six a time can hold. */
 export function timeDigits(text) {
-  return normaliseDigits(text).replace(TIME_SEPARATORS, '').replace(/[^0-9]/g, '').slice(0, 6);
+  // NINE digits, not six: HHMMSSmmm. The last three are milliseconds, which is what lets a schedule name an instant
+  // inside the second - the case that matters for a market open, where the whole request is "act BEFORE the bell".
+  return normaliseDigits(text).replace(TIME_SEPARATORS, '').replace(/[^0-9]/g, '').slice(0, 9);
 }
 
 /**
@@ -1826,7 +1836,11 @@ export function formatTimeDigits(text) {
   const digits = timeDigits(text);
   const parts = [];
   for (let i = 0; i < digits.length; i += 2) parts.push(digits.slice(i, i + 2));
-  return parts.join(':');
+  if (parts.length <= 3) return parts.join(':');
+  // past six digits we are into milliseconds: keep the first three pairs colon-separated and show the rest as a
+  // decimal fraction, so "135001500" reads as 13:50:01.500 rather than 13:50:01:50:0
+  const [h, m, s, ...rest] = parts;
+  return `${h}:${m}:${s}.${rest.join('')}`;
 }
 
 /** Kept for the existing callers: the number of parts a value has, which decides minute vs precise. */
@@ -1882,6 +1896,25 @@ export function caretDigitIndex(raw, caret) {
  *   - `9:00` means MINUTE precision. Seconds are never invented, because inventing them turns a minute-precision
  *     schedule into a precise one, and precise schedules are the ones where whole seconds matter.
  */
+/**
+ * The text a time field should show for a schedule.
+ *
+ * Exists as a function because there are two callers and they must agree: the Basic form and the automation editor. The
+ * thing they have to agree about is the FRACTION - a schedule at 13:50:01.500 rendered as "13:50:01" hides the very
+ * number the user came here to set, and a hidden value is one that gets silently dropped on the next edit.
+ *
+ * The fraction is only shown when it is non-zero, so the ordinary case stays as short as it was: "09:00:00" rather than
+ * "09:00:00.000".
+ */
+export function timeFieldValue(sched) {
+  const h = String(sched?.hour ?? 9).padStart(2, '0');
+  const m = String(sched?.minute ?? 0).padStart(2, '0');
+  const sec = String(sched?.second ?? 0).padStart(2, '0');
+  const ms = Number(sched?.ms ?? 0);
+  if (!ms) return `${h}:${m}:${sec}`;
+  return `${h}:${m}:${sec}.${String(ms).padStart(3, '0')}`;
+}
+
 export function parseTypedTime(text) {
   /**
    * PARSED FROM THE DIGITS, because the grouping is the field's job now.
@@ -1898,7 +1931,7 @@ export function parseTypedTime(text) {
    */
   const digits = timeDigits(text);
   if (digits === '') return { ok: false, error: 'empty' };
-  if (digits.length > 6) return { ok: false, error: 'tooManyDigits' };
+  if (digits.length > 9) return { ok: false, error: 'tooManyDigits' };
 
   /**
    * A PARTIAL GROUP IS PADDED ON THE LEFT, and the direction matters.
@@ -1913,11 +1946,21 @@ export function parseTypedTime(text) {
   const precise = digits.length > 4;
   const s = precise ? Number(digits.slice(4, 6).padStart(2, '0')) : 0;
 
+  /**
+   * THE MILLISECONDS. Seven-or-more digits means the user typed a fraction of a second, which is the whole reason this
+   * control accepts nine: a market opens at a fixed instant and the request is to act BEFORE it, so the target has to be
+   * expressible as 13:50:01.500 rather than snapped to 13:50:01.000.
+   *
+   * A partial fraction is padded on the RIGHT, unlike the hour, because it is a decimal fraction: '.5' is 500 ms and
+   * '.05' is 50 ms. Padding it on the left would read '500' as '005' and turn a half-second lead into five milliseconds.
+   */
+  const ms = digits.length > 6 ? Number(digits.slice(6, 9).padEnd(3, '0')) : 0;
+
   if (h > 23) return { ok: false, error: 'hourRange' };
   if (m > 59) return { ok: false, error: 'minuteRange' };
   if (precise && s > 59) return { ok: false, error: 'secondRange' };
 
-  return { ok: true, hour: h, minute: m, second: s, precise };
+  return { ok: true, hour: h, minute: m, second: s, ms, precise: precise || ms > 0 };
 }
 
 /**
