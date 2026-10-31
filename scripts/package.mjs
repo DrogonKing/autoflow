@@ -20,6 +20,7 @@
  */
 import { createWriteStream } from 'node:fs';
 import { readdir, readFile, stat, mkdir, rm } from 'node:fs/promises';
+import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -28,8 +29,27 @@ import os from 'node:os';
 import { writeFile } from 'node:fs/promises';
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
-const dist = path.join(root, 'dist');
 const releaseDir = path.join(root, 'release');
+
+/**
+ * WHICH BUILD TO PACKAGE, as a flag.
+ *
+ *   (no flag)   dist/                 -> autoflow-chrome.zip
+ *   --lite      dist-lite/            -> autoflow-chrome-lite.zip
+ *   --firefox   dist-firefox/         -> autoflow-firefox.zip
+ *   both        dist-firefox-lite/    -> autoflow-firefox-lite.zip
+ *
+ * `--all` packages every variant that has been built, which is what the release script uses: naming the four
+ * archives in four places is how one of them ends up missing from a release nobody notices is incomplete.
+ */
+const LITE = process.argv.includes('--lite');
+const FIREFOX = process.argv.includes('--firefox');
+const ALL = process.argv.includes('--all');
+
+const dist = path.join(root, FIREFOX ? (LITE ? 'dist-firefox-lite' : 'dist-firefox') : (LITE ? 'dist-lite' : 'dist'));
+const suffix = (LITE ? 'lite' : '') && '-lite';
+const zipName = (firefox, lite) => `autoflow-${firefox ? 'firefox' : 'chrome'}${lite ? '-lite' : ''}.zip`;
+const currentZip = zipName(FIREFOX, LITE);
 
 // ---------------------------------------------------------------------------------------------
 // a minimal zip writer (stored + deflate), so packaging needs no dependency
@@ -155,12 +175,70 @@ async function writeZip(files, outPath) {
 
 // ---------------------------------------------------------------------------------------------
 
-async function main() {
-  if (!existsSync(path.join(dist, 'manifest.json'))) {
-    console.error('dist/manifest.json is missing - run npm run build first');
+/**
+ * THE FOUR VARIANTS, packaged together.
+ *
+ * Each is an independent run of this script with different flags. Doing it here rather than from the release
+ * script keeps the knowledge of which directories and names belong together in one file, next to the naming.
+ *
+ * A variant whose build directory is absent is SKIPPED rather than failed: a release that only built the two
+ * chromium archives should still produce those, not abort because the firefox ones were not asked for.
+ */
+async function mainAll() {
+  await rm(releaseDir, { recursive: true, force: true });
+  await mkdir(releaseDir, { recursive: true });
+
+  const combos = [
+    { firefox: false, lite: false, dir: 'dist' },
+    { firefox: false, lite: true, dir: 'dist-lite' },
+    { firefox: true, lite: false, dir: 'dist-firefox' },
+    { firefox: true, lite: true, dir: 'dist-firefox-lite' },
+  ];
+
+  const built = combos.filter((c) => existsSync(path.join(root, c.dir, 'manifest.json')));
+  if (!built.length) {
+    console.error('no build directory has a manifest.json - run a build first');
     process.exit(1);
   }
-  await rm(releaseDir, { recursive: true, force: true });
+
+  const sourcesRun = combos.length; // informational only
+  console.log('packaging variants:');
+  const seenZip = new Set();
+  for (const c of built) {
+    const zip = zipName(c.firefox, c.lite);
+    if (seenZip.has(zip)) continue;
+    seenZip.add(zip);
+    const r = spawnSync(process.execPath, [
+      fileURLToPath(import.meta.url),
+      ...(c.firefox ? ['--firefox'] : []),
+      ...(c.lite ? ['--lite'] : []),
+      '--no-wipe',
+    ], { stdio: 'inherit' });
+    if (r.status !== 0) {
+      console.error(`packaging ${zip} failed`);
+      process.exit(1);
+    }
+  }
+
+  // the source zip and the test field are produced by the primary run above; report the directory
+  console.log(`\nrelease/ now holds:`);
+  for (const f of (await readdir(releaseDir)).sort()) {
+    const st = await stat(path.join(releaseDir, f));
+    console.log(`  ${f}  ${(st.size / 1024).toFixed(0)} KB`);
+  }
+}
+
+async function main() {
+  if (ALL) return mainAll();
+
+  if (!existsSync(path.join(dist, 'manifest.json'))) {
+    console.error(`${dist}/manifest.json is missing - run a build first`);
+    process.exit(1);
+  }
+  // `--no-wipe` lets a variant run append to release/ instead of clearing it, which is what makes --all work
+  if (!process.argv.includes('--no-wipe')) {
+    await rm(releaseDir, { recursive: true, force: true });
+  }
   await mkdir(releaseDir, { recursive: true });
 
   // ---- the extension
@@ -172,7 +250,30 @@ async function main() {
     process.exit(1);
   }
 
-  const CHROME_README = `AutoFlow - CHROME / EDGE / BRAVE / OPERA BUILD
+  // The build stamps which variant it produced. Reading it instead of trusting the flags means the archive's
+  // readme cannot describe a build other than the one inside it.
+  let variant = { variant: 'full', target: 'chrome', lite: false };
+  try {
+    variant = JSON.parse(await readFile(path.join(dist, 'build-variant.json'), 'utf8'));
+  } catch {
+    // an older dist without the stamp: the flags below are then the only source, which is acceptable and is why
+    // this is not an error
+  }
+
+  const LITE_NOTE = variant.lite
+    ? `
+  THIS IS THE LITE BUILD
+  ----------------------
+  Basic tab only. The Automations, Scheduled, Data, History and Log tabs are not present - the code for
+  them was removed at build time, not hidden, which is where the smaller size comes from.
+
+  Everything the Basic tab needs is here and unchanged: the time field (including millisecond targets),
+  element picking, saving, and the schedule that fires the click. If you later need the editors or the run
+  log, install the normal build alongside this one; they use separate storage keys and do not conflict.
+`
+    : '';
+
+  const CHROME_README = `AutoFlow - CHROME / EDGE / BRAVE / OPERA BUILD${variant.lite ? ' (LITE)' : ''}
 
   THIS IS THE CHROMIUM BUILD. Do not load it into Firefox.
 
@@ -194,9 +295,9 @@ async function main() {
 
   Verified before packaging: the unit suite, every file the manifest references, and Mozilla's own linter
   reporting zero errors and zero warnings.
-`;
+${LITE_NOTE}`;
   const extFiles = await withExtraFile(files, 'HOW-TO-INSTALL.txt', CHROME_README);
-  const extPath = path.join(releaseDir, 'autoflow-chrome.zip');
+  const extPath = path.join(releaseDir, currentZip);
   const extInfo = await writeZip(extFiles, extPath);
 
   // ---- the source
@@ -267,11 +368,14 @@ async function main() {
   // Say which browser each file is for at the point of creation, so the name in a downloads folder is not
   // the only signal a user gets.
   console.log('packaged:');
-  console.log(`  release/autoflow-chrome.zip    ${(extInfo.bytes / 1024).toFixed(0)} KB, ${extInfo.files} files  -> CHROME, EDGE, BRAVE, OPERA`);
+  // The names come from `currentZip` and the Firefox one from its own variable, not from literals: a literal made a
+  // lite run report the full build's name AND the full build's byte count, which is a report contradicting the file
+  // it had just written.
+  console.log(`  release/${currentZip.padEnd(26)} ${(extInfo.bytes / 1024).toFixed(0)} KB, ${extInfo.files} files  -> ${FIREFOX ? 'FIREFOX' : 'CHROME, EDGE, BRAVE, OPERA'}`);
   if (ffInfo) {
-    console.log(`  release/autoflow-firefox.zip   ${(ffInfo.bytes / 1024).toFixed(0)} KB, ${ffInfo.files} files  -> FIREFOX`);
+    console.log(`  release/${zipName(true, false).padEnd(26)} ${(ffInfo.bytes / 1024).toFixed(0)} KB, ${ffInfo.files} files  -> FIREFOX`);
   }
-  console.log(`  release/autoflow-source.zip    ${(srcInfo.bytes / 1024).toFixed(0)} KB, ${srcInfo.files} files  -> source, both browsers`);
+  console.log(`  release/${'autoflow-source.zip'.padEnd(26)} ${(srcInfo.bytes / 1024).toFixed(0)} KB, ${srcInfo.files} files  -> source, both browsers`);
 
   // ---- the test field, as a single deliverable file
   //

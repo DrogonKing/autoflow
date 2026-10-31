@@ -81,6 +81,20 @@ const send = (msg) => api.runtime.sendMessage(msg)
  */
 let t = translator('en');
 
+/**
+ * WHICH TABS EXIST.
+ *
+ * In a lite build only `basic` remains, and the flag is a build-time constant on purpose: writing
+ * `__LITE__ ? [...] : [...]` lets esbuild evaluate it, drop the other branch, and then drop the view
+ * functions that nothing references any more. A runtime check would keep every line in the bundle.
+ *
+ * It sits above `state` because the panels it removes are defined further down and the constant has to be
+ * visible to the bundler from one place.
+ */
+const TAB_LIST = __LITE__
+  ? [['basic', 'tab.basic']]
+  : [['basic', 'tab.basic'], ['automations', 'tab.automations'], ['scheduled', 'tab.scheduled'], ['data', 'tab.data'], ['history', 'tab.history'], ['log', 'tab.log']];
+
 const state = {
   automations: [],
   settings: {},
@@ -90,7 +104,8 @@ const state = {
   schedulePreview: null,
   csv: null,              // { columns, rows }
   dataKey: null,
-  tab: 'automations',
+  // 'basic' exists in BOTH builds; 'automations' does not exist in lite, so opening there would render nothing
+  tab: __LITE__ ? 'basic' : 'automations',
   pickTarget: null,       // the step id awaiting an element pick
   clockSkew: null,        // { offsetMs, rttMs, trustworthy, warn, applied } - measured, never applied silently
   clockSkewError: null,   // why the measurement could not be taken, shown next to the button that tried
@@ -2677,13 +2692,19 @@ function renderTree() {
   const nav = el('nav', { class: 'tabs' });
   // 'basic' sits beside 'automations' and is the same data with the fields a timed click actually needs, so a
   // simple job never has to meet the full step editor
-  for (const [id, key] of [['basic', 'tab.basic'], ['automations', 'tab.automations'], ['scheduled', 'tab.scheduled'], ['data', 'tab.data'], ['history', 'tab.history'], ['log', 'tab.log']]) {
+  for (const [id, key] of TAB_LIST) {
     nav.append(el('button', {
       class: state.tab === id ? 'active' : '',
       text: t(key),
       onclick: () => {
         // moving to another tab discards the form's working copy, so coming back shows what is actually saved
         if (id !== 'basic') state.basicStale = true;
+        /**
+         * A REMOVED TAB MUST NOT BE ENTERABLE. The nav only offers the tabs in TAB_LIST, but a stale `state.tab`
+         * survives in the panel's own memory and a saved reference could still name one - and in lite that would
+         * render an empty body with no explanation. Refusing the switch is the honest outcome.
+         */
+        if (__LITE__ && id !== 'basic') return;
         state.tab = id;
         render();
       },
@@ -2709,11 +2730,21 @@ function renderTree() {
 
   const body = el('main');
   if (state.tab === 'basic') body.append(basicView(rerender));
-  else if (state.tab === 'automations') body.append(automationsView(rerender));
-  else if (state.tab === 'scheduled') body.append(scheduledView());
-  else if (state.tab === 'data') body.append(dataView(rerender));
-  else if (state.tab === 'log') body.append(logView(rerender));
-  else body.append(historyView());
+  /**
+   * THE FULL-TREE BRANCH IS UNREACHABLE IN A LITE BUILD, which is what makes the removal real rather than
+   * cosmetic: esbuild folds `!__LITE__` to `false` and then has no reference to these five functions from
+   * anywhere, so it drops them and their private helpers.
+   *
+   * `body.empty()`-style fallbacks are deliberately NOT used: a lite build cannot have a second tab to fall
+   * back to, and adding one would keep a reference alive and defeat the elimination.
+   */
+  else if (!__LITE__) {
+    if (state.tab === 'automations') body.append(automationsView(rerender));
+    else if (state.tab === 'scheduled') body.append(scheduledView());
+    else if (state.tab === 'data') body.append(dataView(rerender));
+    else if (state.tab === 'log') body.append(logView(rerender));
+    else body.append(historyView());
+  }
   root.append(body);
 
   // A pick that lands anywhere gets applied to the step waiting for it.
