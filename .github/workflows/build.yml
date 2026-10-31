@@ -154,12 +154,24 @@ jobs:
           # three assets. The artifact-upload step above already fails if the zips are absent, so this is the
           # second line of defence rather than the first.
           fail_on_unmatched_files: true
+          # A TAG THAT SAYS BETA IS PUBLISHED AS A PRERELEASE, and this is a rule rather than a one-off edit so the
+          # next beta does not need remembering. GitHub's `prerelease` flag is what makes a build visibly not-final:
+          # it is excluded from "latest release", and the release page carries a badge. Naming a tag `v1.30.0-beta`
+          # does not do that by itself - the flag is the mechanism, the name is only the convention.
+          prerelease: ${{ contains(github.ref_name, '-beta') || contains(github.ref_name, '-rc') || contains(github.ref_name, '-alpha') }}
           files: |
             release/autoflow-chrome.zip
             release/autoflow-firefox.zip
             release/autoflow-source.zip
           generate_release_notes: true
+          # THE BETA WARNING LIVES HERE, not in the release body, because this step REWRITES the body on every tag
+          # push. An edit made through the API is therefore wiped the next time the tag is pushed - which is how the
+          # first attempt at this lost its warning. Putting it in the template is what makes it survive.
+          #
+          # The manifest version stays a plain number: Chrome requires 1-4 integers and rejects a semver suffix
+          # ("Invalid version format"), so the tag and this flag carry the beta signal, not the version string.
           body: |
+            ${{ (contains(github.ref_name, '-beta') || contains(github.ref_name, '-rc') || contains(github.ref_name, '-alpha')) && '> ## ⚠️ BETA — not fully tested\n>\n> This build carries changes that have not been exercised against a real trading site yet. The millisecond scheduler is verified in a controlled browser run (a target of 21:21:15.384 was clicked at 21:21:15.409), but the end-to-end path against an exchange — ping, the site''s own latency, a real order button — is still unproven. Test with a target you do not mind missing.\n>\n> The manifest version is a plain number because Chrome requires 1-4 integers and rejects a suffix.\n' || '' }}
             ## Install
 
             **Chrome / Edge / Brave / Opera** — download `autoflow-chrome.zip`, unpack it, then
