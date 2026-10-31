@@ -170,19 +170,7 @@ jobs:
           #
           # The manifest version stays a plain number: Chrome requires 1-4 integers and rejects a semver suffix
           # ("Invalid version format"), so the tag and this flag carry the beta signal, not the version string.
-          body: |
-            ${{ (contains(github.ref_name, '-beta') || contains(github.ref_name, '-rc') || contains(github.ref_name, '-alpha')) && '> ## ⚠️ BETA — not fully tested\n>\n> This build carries changes that have not been exercised against a real trading site yet. The millisecond scheduler is verified in a controlled browser run (a target of 21:21:15.384 was clicked at 21:21:15.409), but the end-to-end path against an exchange — ping, the site''s own latency, a real order button — is still unproven. Test with a target you do not mind missing.\n>\n> The manifest version is a plain number because Chrome requires 1-4 integers and rejects a suffix.\n' || '' }}
-            ## Install
-
-            **Chrome / Edge / Brave / Opera** — download `autoflow-chrome.zip`, unpack it, then
-            `chrome://extensions` → enable Developer mode → **Load unpacked** → pick the unpacked folder.
-
-            **Firefox** — download `autoflow-firefox.zip`. A permanent install requires Mozilla's signature,
-            which this archive does not have, so for now use
-            `about:debugging#/runtime/this-firefox` → **Load Temporary Add-on** → pick `manifest.json`
-            inside the unpacked folder. Temporary add-ons are removed when Firefox closes.
-
-            **Source** — `autoflow-source.zip` is the full tree, including the tests and the security scripts.
-
-            Verified before this archive was produced: the unit suite, both manifests' referenced files, and
-            Mozilla's own linter reporting zero errors and zero warnings.
+          # body_path, not body: a multi-line string built inside an expression keeps its literal backslash-n, and
+          # GitHub renders the body as markdown - so the warning showed up as one long line of "\n". Two files and a
+          # tag-name selection is the clean way to have conditional content, and it keeps the install text in one place.
+          body_path: ${{ (contains(github.ref_name, '-beta') || contains(github.ref_name, '-rc') || contains(github.ref_name, '-alpha')) && '.github/release-body-beta.md' || '.github/release-body.md' }}
