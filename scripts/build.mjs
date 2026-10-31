@@ -15,21 +15,17 @@
  * used to exist separately now both call `buildExtension`.
  *
  * WHY `__LITE__` IS A BUILD-TIME CONSTANT. esbuild substitutes it, folds the guard, and then drops the
- * functions nothing references any more - measured at 64.5 KB off panel.js, 35% of it. A runtime setting
- * (a stored preference, a query parameter) CANNOT do that: the code still ships, and the parser still has
- * to walk it. That is the entire difference between a lite BUILD and a lite SETTING, and it is why the
- * flag is a define rather than a checkbox.
+ * functions nothing references any more - measured at 64.5 KB off panel.js. A runtime setting (a stored
+ * preference, a query parameter) CANNOT do that: the code still ships, and the parser still has to walk it.
+ * That is the entire difference between a lite BUILD and a lite SETTING.
  *
- * FOUR SEPARATE BUNDLES, because each entry point runs in a different world and MV3 is strict about it:
- *
- *   background.js  an ES module service worker (the manifest declares type: module)
- *   content.js     a CLASSIC script - a content script cannot be a module, so everything it imports must
- *                  be bundled into one file
- *   panel.js       a module, loaded by panel.html
- *   options.js     a module, loaded by options.html
- *
- * The content script is the one that would break silently: an `import` statement in a classic script is a
- * syntax error, and the extension would simply never inject.
+ * THE MANIFEST IS TRANSFORMED, NOT REBUILT. An earlier version of this file constructed the Firefox
+ * manifest from scratch by listing the keys it wanted, and that silently dropped five of them -
+ * `default_locale`, `commands`, `content_scripts`, `web_accessible_resources`, and `side_panel`. The
+ * `default_locale` loss was caught by CI (the add-on linter: NO_DEFAULT_LOCALE, which is an ERROR when
+ * `_locales` exists); the other four would have shipped as a Firefox build with no content script and no
+ * keyboard commands, which is to say a build that does nothing. Copying the shared manifest and editing the
+ * keys that genuinely differ is the version that cannot lose a key by omission.
  */
 import { build } from 'esbuild';
 import { cp, mkdir, rm, readFile, writeFile, access } from 'node:fs/promises';
@@ -79,35 +75,52 @@ async function iconExists(p) {
 }
 
 /**
- * The Firefox manifest is derived from the shared one rather than stored as a second file, so a change to a
- * permission or a content-script pattern cannot land in one manifest and not the other.
+ * Firefox from the shared manifest, by SUBTRACTION AND SUBSTITUTION rather than by listing keys.
+ *
+ * Everything the two browsers agree on stays as-is, and only what actually differs is touched:
+ *
+ *   sidePanel permission    Firefox has no such permission; the sidebar is declared as `sidebar_action`
+ *   side_panel              the Chromium key; replaced by sidebar_action
+ *   minimum_chrome_version  meaningless in Firefox
+ *   background              Firefox ignores `service_worker` and runs `scripts` (type module)
+ *   options_page            Firefox prefers `options_ui`
+ *   action.default_popup    must NOT be set, or the toolbar button opens a popup instead of the sidebar
  */
-function firefoxManifest(shared) {
-  return {
-    manifest_version: 3,
-    name: shared.name,
-    short_name: shared.short_name,
-    version: shared.version,
-    description: shared.description,
-    // `permissions` and `host_permissions` are separate keys in Firefox and Chrome alike; the shared manifest
-    // already splits them, so only the Firefox-specific blocks are added here.
-    permissions: shared.permissions,
-    host_permissions: shared.host_permissions,
-    background: {
-      scripts: ['background.js'],
-      type: 'module',
-    },
-    action: shared.action,
-    options_ui: { page: 'options.html', open_in_tab: true },
-    icons: shared.icons,
-    browser_specific_settings: {
-      gecko: {
-        id: ADDON_ID,
-        strict_min_version: MIN_FIREFOX,
-        data_collection_permissions: { required: ['none'] },
-      },
+function firefoxManifest(base) {
+  const manifest = structuredClone(base);
+
+  // a permission Firefox does not have
+  manifest.permissions = (manifest.permissions ?? []).filter((p) => p !== 'sidePanel');
+
+  // the sidebar: Chromium's side_panel becomes Firefox's sidebar_action
+  const panelPath = manifest.side_panel?.default_path ?? 'panel.html';
+  delete manifest.side_panel;
+  manifest.sidebar_action = { default_panel: panelPath, default_title: manifest.action?.default_title ?? manifest.name };
+
+  // meaningless outside Chromium
+  delete manifest.minimum_chrome_version;
+
+  // the toolbar button opens the sidebar, so it must not carry a popup
+  if (manifest.action) delete manifest.action.default_popup;
+
+  // Firefox runs background.scripts; it does not implement background.service_worker
+  manifest.background = { scripts: ['background.js'], type: 'module' };
+
+  // options_ui is the Firefox-preferred spelling of the same thing
+  if (manifest.options_page) {
+    manifest.options_ui = { page: manifest.options_page, open_in_tab: true };
+    delete manifest.options_page;
+  }
+
+  manifest.browser_specific_settings = {
+    gecko: {
+      id: ADDON_ID,
+      strict_min_version: MIN_FIREFOX,
+      data_collection_permissions: { required: ['none'] },
     },
   };
+
+  return manifest;
 }
 
 /**
@@ -169,8 +182,7 @@ async function buildExtension() {
      * running - which is exactly the confusion a second build is meant to avoid.
      *
      * The VERSION stays identical to the normal build on purpose: lite is the same release with fewer tabs,
-     * not a separate product on its own release cadence. Bumping it apart would imply the two can be updated
-     * independently, and they cannot - they are cut from one commit.
+     * not a separate product on its own release cadence, and both are cut from one commit.
      */
     manifest.name = `${base.name} Lite`;
     manifest.short_name = `${base.short_name || base.name} Lite`;
@@ -209,11 +221,30 @@ async function buildExtension() {
     ...(manifest.background?.scripts ?? []),
     ...(manifest.content_scripts ?? []).flatMap((cs) => cs.js ?? []),
     manifest.side_panel?.default_path,
+    manifest.sidebar_action?.default_panel,
     manifest.options_page,
     manifest.options_ui?.page,
     ...Object.values(manifest.icons ?? {}),
   ].filter(Boolean));
   const missing = [...referenced].filter((f) => !existsSync(path.join(out, f)));
+
+  /**
+   * A GUARD FOR THE CLASS OF MISTAKE THAT GOT HERE. The from-scratch manifest dropped five keys and only one
+   * was caught by the add-on linter. Comparing against the shared manifest after the transform catches the rest
+   * at build time, where it costs a rebuild rather than a release.
+   */
+  if (FIREFOX) {
+    const expectedAbsent = new Set(['side_panel', 'minimum_chrome_version', 'options_page']);
+    const lost = Object.keys(base).filter((k) => !(k in manifest) && !expectedAbsent.has(k));
+    if (lost.length) {
+      console.error(`the Firefox manifest dropped keys the shared one declares: ${lost.join(', ')}`);
+      process.exit(1);
+    }
+    if (!manifest.default_locale) {
+      console.error('the Firefox manifest has no default_locale, but _locales exists - the linter rejects that');
+      process.exit(1);
+    }
+  }
 
   console.log(`build results (${VARIANT}${FIREFOX ? ', firefox' : ''} -> ${path.relative(root, out)}/):`);
   for (const r of results) {
