@@ -15,6 +15,9 @@ import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
+import { autoCleanup, installProfileSweep } from './lib/profile.mjs';
+
+installProfileSweep();
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const DIST = path.join(ROOT, 'dist');
@@ -27,7 +30,7 @@ const check = (name, ok, detail) => {
   console.log(`  ${ok === true ? 'ok  ' : ok === false ? 'FAIL' : '??  '} ${name}${detail ? `\n        ${String(detail).slice(0, 200)}` : ''}`);
 };
 
-const profile = mkdtempSync(path.join(os.tmpdir(), 'af-log-'));
+const profile = autoCleanup(mkdtempSync(path.join(os.tmpdir(), 'af-log-')));
 const ctx = await chromium.launchPersistentContext(profile, {
   headless: true, executablePath: existsSync(CHROME) ? CHROME : undefined,
   acceptDownloads: true,

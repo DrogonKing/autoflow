@@ -17,6 +17,9 @@ import os from 'node:os';
 import http from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
+import { autoCleanup, installProfileSweep } from './lib/profile.mjs';
+
+installProfileSweep();
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const DIST = path.join(ROOT, 'dist');
@@ -43,7 +46,7 @@ function serve(fixturePath) {
   return server;
 }
 
-const profile = mkdtempSync(path.join(os.tmpdir(), 'af-anchor-'));
+const profile = autoCleanup(mkdtempSync(path.join(os.tmpdir(), 'af-anchor-')));
 const ctx = await chromium.launchPersistentContext(profile, {
   headless: true, executablePath: existsSync(CHROME) ? CHROME : undefined,
   args: [`--disable-extensions-except=${DIST}`, `--load-extension=${DIST}`, '--no-sandbox',

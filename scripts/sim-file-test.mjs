@@ -19,6 +19,9 @@ import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { chromium } from 'playwright';
+import { autoCleanup, installProfileSweep } from './lib/profile.mjs';
+
+installProfileSweep();
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const DIST = path.join(ROOT, 'dist');
@@ -26,7 +29,7 @@ const SIM = path.join(ROOT, 'tools', 'sim', 'index.html');
 const CHROME = process.env.AUTOFLOW_CHROMIUM || '/root/.cache/ms-playwright/chromium-1208/chrome-linux64/chrome';
 
 // copy the file somewhere with no spaces, which is what a user's Downloads folder looks like
-const tmp = mkdtempSync(path.join(os.tmpdir(), 'af-file-'));
+const tmp = autoCleanup(mkdtempSync(path.join(os.tmpdir(), 'af-file-')));
 const local = path.join(tmp, 'autofook-test-field.html');
 copyFileSync(SIM, local);
 const fileUrl = pathToFileURL(local).href;
@@ -38,7 +41,7 @@ const check = (name, ok, detail) => {
 };
 
 async function open({ allowFileUrls }) {
-  const profile = mkdtempSync(path.join(os.tmpdir(), 'af-prof-'));
+  const profile = autoCleanup(mkdtempSync(path.join(os.tmpdir(), 'af-prof-')));
   const args = [
     `--disable-extensions-except=${DIST}`, `--load-extension=${DIST}`,
     '--no-sandbox', '--disable-dev-shm-usage',

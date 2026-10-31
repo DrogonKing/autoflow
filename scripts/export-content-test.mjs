@@ -13,6 +13,9 @@ import os from 'node:os';
 import http from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
+import { autoCleanup, installProfileSweep } from './lib/profile.mjs';
+
+installProfileSweep();
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const DIST = path.join(ROOT, 'dist');
@@ -32,7 +35,7 @@ const server = http.createServer((req, res) => {
 await new Promise((r) => server.listen(0, '127.0.0.1', r));
 const url = `http://127.0.0.1:${server.address().port}/`;
 
-const profile = mkdtempSync(path.join(os.tmpdir(), 'af-export-'));
+const profile = autoCleanup(mkdtempSync(path.join(os.tmpdir(), 'af-export-')));
 const ctx = await chromium.launchPersistentContext(profile, {
   headless: true, executablePath: existsSync(CHROME) ? CHROME : undefined,
   args: [`--disable-extensions-except=${DIST}`, `--load-extension=${DIST}`, '--no-sandbox',

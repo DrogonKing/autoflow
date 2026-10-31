@@ -18,6 +18,9 @@ import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
+import { autoCleanup, installProfileSweep } from './lib/profile.mjs';
+
+installProfileSweep();
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const CHROME = process.env.AUTOFLOW_CHROMIUM ||
@@ -25,7 +28,7 @@ const CHROME = process.env.AUTOFLOW_CHROMIUM ||
 const RELEASE = path.join(ROOT, 'release');
 
 function unpack(zipName) {
-  const dest = mkdtempSync(path.join(os.tmpdir(), 'probe-'));
+  const dest = autoCleanup(mkdtempSync(path.join(os.tmpdir(), 'probe-')));
   execFileSync('python3', ['-c',
     `import zipfile;zipfile.ZipFile(${JSON.stringify(path.join(RELEASE, zipName))}).extractall(${JSON.stringify(dest)})`]);
   return dest;

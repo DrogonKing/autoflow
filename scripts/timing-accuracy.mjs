@@ -22,13 +22,16 @@ import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
+import { autoCleanup, installProfileSweep } from './lib/profile.mjs';
+
+installProfileSweep();
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const DIST = path.join(ROOT, 'dist');
 const CHROME = process.env.AUTOFLOW_CHROMIUM ||
   '/root/.cache/ms-playwright/chromium-1208/chrome-linux64/chrome';
 
-const profile = mkdtempSync(path.join(os.tmpdir(), 'autoflow-timing-'));
+const profile = autoCleanup(mkdtempSync(path.join(os.tmpdir(), 'autoflow-timing-')));
 const ctx = await chromium.launchPersistentContext(profile, {
   headless: true,
   executablePath: existsSync(CHROME) ? CHROME : undefined,

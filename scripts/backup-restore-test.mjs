@@ -22,6 +22,9 @@ import os from 'node:os';
 import http from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
+import { autoCleanup, installProfileSweep } from './lib/profile.mjs';
+
+installProfileSweep();
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const DIST = path.join(ROOT, 'dist');
@@ -64,7 +67,7 @@ async function launch(profileDir) {
 console.log('\n--- 1. the panel can take a backup, and it refuses to be silent about it ---');
 let backup = null;
 {
-  const profileA = mkdtempSync(path.join(os.tmpdir(), 'af-backup-a-'));
+  const profileA = autoCleanup(mkdtempSync(path.join(os.tmpdir(), 'af-backup-a-')));
   const { ctx, bridge } = await launch(profileA);
 
   const first = await bridge.evaluate(async () => {
@@ -109,7 +112,7 @@ let backup = null;
 
 console.log('\n--- 2. a FRESH profile restores them, and they are scheduled again ---');
 {
-  const profileB = mkdtempSync(path.join(os.tmpdir(), 'af-backup-b-'));
+  const profileB = autoCleanup(mkdtempSync(path.join(os.tmpdir(), 'af-backup-b-')));
   const { ctx, bridge } = await launch(profileB);
 
   const before = await bridge.evaluate(async () => {
@@ -172,7 +175,7 @@ console.log('\n--- 2. a FRESH profile restores them, and they are scheduled agai
 
 console.log('\n--- 3. the toolbar button warns while automations exist ---');
 {
-  const profileC = mkdtempSync(path.join(os.tmpdir(), 'af-backup-c-'));
+  const profileC = autoCleanup(mkdtempSync(path.join(os.tmpdir(), 'af-backup-c-')));
   const { ctx, bridge } = await launch(profileC);
   const badge = await bridge.evaluate(async ({ doc }) => {
     await chrome.runtime.sendMessage({ type: 'import-all', document: doc, replace: true, allowScripts: false });

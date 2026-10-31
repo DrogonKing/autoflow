@@ -18,11 +18,14 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
+import { autoCleanup, installProfileSweep } from './lib/profile.mjs';
+
+installProfileSweep();
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const SIM = path.join(ROOT, 'tools', 'sim', 'index.html');
 const CHROME = process.env.AUTOFLOW_CHROMIUM || '/root/.cache/ms-playwright/chromium-1208/chrome-linux64/chrome';
-const profile = mkdtempSync(path.join(tmpdir(), 'af-editor-pick-'));
+const profile = autoCleanup(mkdtempSync(path.join(tmpdir(), 'af-editor-pick-')));
 
 const results = [];
 const check = (name, ok, detail) => {

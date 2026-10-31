@@ -9,15 +9,18 @@ import { mkdtempSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { chromium } from 'playwright';
+import { autoCleanup, installProfileSweep } from './lib/profile.mjs';
+
+installProfileSweep();
 
 const DIST = '/root/autoflow/dist';
 const CHROME = '/root/.cache/ms-playwright/chromium-1208/chrome-linux64/chrome';
 
-const ctx = await chromium.launchPersistentContext(mkdtempSync(path.join(os.tmpdir(), 'af-probe-')), {
+const ctx = await chromium.launchPersistentContext(autoCleanup(mkdtempSync(path.join(os.tmpdir(), 'af-probe-')), {
   headless: true, executablePath: CHROME,
   args: [`--disable-extensions-except=${DIST}`, `--load-extension=${DIST}`, '--no-sandbox',
     '--disable-dev-shm-usage', '--disable-features=DisableLoadExtensionCommandLineSwitch'],
-});
+}));
 
 let w = null;
 for (let i = 0; i < 60 && !w; i++) {

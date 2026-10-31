@@ -22,6 +22,7 @@ import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
 import { waitForUnpackedExtensionId } from './lib/extension-id.mjs';
+import { autoCleanup, installProfileSweep } from './lib/profile.mjs';
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const RELEASE = path.join(ROOT, 'release');
@@ -36,9 +37,11 @@ const check = (name, ok, detail) => {
 
 /** Unpack an archive into a temp dir - what a user does by hand, done the same way. */
 function unpack(zipName) {
-  const dest = mkdtempSync(path.join(os.tmpdir(), 'autoflow-unpack-'));
+  const dest = autoCleanup(mkdtempSync(path.join(os.tmpdir(), 'autoflow-unpack-')));
   execFileSync('python3', ['-c', `
 import zipfile, sys
+
+installProfileSweep();
 zipfile.ZipFile(${JSON.stringify(path.join(RELEASE, zipName))}).extractall(${JSON.stringify(dest)})
 `]);
   return dest;
@@ -52,7 +55,7 @@ zipfile.ZipFile(${JSON.stringify(path.join(RELEASE, zipName))}).extractall(${JSO
  * Being inside the workspace also means a CI runner can always write it.
  */
 async function loadIn(buildDir, { headless = true } = {}) {
-  const profile = mkdtempSync(path.join(os.tmpdir(), 'autoflow-profile-'));
+  const profile = autoCleanup(mkdtempSync(path.join(os.tmpdir(), 'autoflow-profile-')));
   const ctx = await chromium.launchPersistentContext(profile, {
     headless,
     executablePath: existsSync(CHROME) ? CHROME : undefined,

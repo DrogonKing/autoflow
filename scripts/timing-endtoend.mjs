@@ -17,6 +17,9 @@ import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { chromium } from 'playwright';
+import { autoCleanup, installProfileSweep } from './lib/profile.mjs';
+
+installProfileSweep();
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const DIST = path.join(ROOT, 'dist');
@@ -35,7 +38,7 @@ writeFileSync(PAGE, `<!doctype html><meta charset="utf-8"><title>t</title>
   });
 </script>`);
 
-const profile = mkdtempSync(path.join(os.tmpdir(), 'autoflow-e2e-timing-'));
+const profile = autoCleanup(mkdtempSync(path.join(os.tmpdir(), 'autoflow-e2e-timing-')));
 const ctx = await chromium.launchPersistentContext(profile, {
   headless: true,
   executablePath: existsSync(CHROME) ? CHROME : undefined,

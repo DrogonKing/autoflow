@@ -11,6 +11,9 @@ import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { chromium } from 'playwright';
+import { autoCleanup, installProfileSweep } from './lib/profile.mjs';
+
+installProfileSweep();
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const DIST = path.join(ROOT, 'dist');
@@ -20,7 +23,7 @@ const PAGE = path.join(os.tmpdir(), `af-probe-${process.pid}.html`);
 writeFileSync(PAGE, `<!doctype html><meta charset="utf-8"><button id="b" style="width:200px;height:60px">خرید</button>
 <script>window.__pressedAt=null;document.getElementById('b').addEventListener('click',()=>{window.__pressedAt=Date.now();document.title='pressed';});</script>`);
 
-const profile = mkdtempSync(path.join(os.tmpdir(), 'af-probe-'));
+const profile = autoCleanup(mkdtempSync(path.join(os.tmpdir(), 'af-probe-')));
 const ctx = await chromium.launchPersistentContext(profile, {
   headless: true, executablePath: existsSync(CHROME) ? CHROME : undefined,
   args: [`--disable-extensions-except=${DIST}`, `--load-extension=${DIST}`, '--no-sandbox',
