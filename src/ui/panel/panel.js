@@ -17,7 +17,7 @@ import { api } from '../../platform/api.js';
 import { applyToDocument, translator } from '../../core/i18n/i18n.js';
 import { ALL_DEFAULTS, normaliseAll } from '../../core/dom/clickAll.js';
 import { describeSkew, shouldWarn } from '../../core/clock/skew.js';
-import { ensureEvents, addEvent, eventsToStore, orderByNextRun, describeEvent, filledPoints } from './events-view.js';
+import { ensureEvents, addEvent, removeEvent, eventsToStore, orderByNextRun, describeEvent, filledPoints } from './events-view.js';
 
 /**
  * The visible name of a step kind.
@@ -1585,8 +1585,9 @@ function basicView(rerender) {
     }, AUTO_SAVE_DELAY_MS);
   };
 
-  // the pick listener lives outside this closure, so it needs a handle to the same auto-save
+  // the pick and delete handlers live outside this closure, so they need handles to the same auto-save
   state.basicAutoSave = autoSave;
+  state.basicCancelAutoSave = () => { if (autoSaveTimer) { clearTimeout(autoSaveTimer); autoSaveTimer = null; } };
 
   /** Mutate the draft and re-render without discarding it. */
   const keepDraftThen = (fn) => {
@@ -1621,17 +1622,85 @@ function basicView(rerender) {
     list.append(el('label', { text: t('basic.times') }));
     const picker = el('div', { class: 'grow event-picker' });
     ordered.forEach((e, index) => {
-      picker.append(el('button', {
-        class: e.id === openId ? 'event-chip active' : 'event-chip',
-        title: `${describeEvent(e.schedule)}`,
-        text: `${describeEvent(e.schedule)} · ${filledPoints(e)}`,
-        onclick: () => {
-          state.basicOpen = e.id;
-          // the draft is kept so a time typed but not saved is not thrown away by switching rows
-          state.basicKeepDraft = true;
-          rerender();
-        },
-      }));
+      /**
+       * EACH TIME HAS ITS OWN DELETE CONTROL, because "I added a third time and changed my mind" had no way out.
+       *
+       * The delete lives ON the chip rather than in a menu: the chip is the time, so removing it is where a person looks.
+       * A chip is not a button any more - a button inside a button is invalid HTML and gives the inner control an
+       * unpredictable hit area - so the wrapper is a plain div holding two buttons.
+       *
+       * The last remaining time cannot be deleted: a form with no time has nothing to show and no way back. The button is
+       * hidden rather than shown-and-refusing, so the rule is visible instead of learned by pressing.
+       */
+      const chip = el('div', { class: e.id === openId ? 'event-chip active' : 'event-chip' },
+        el('button', {
+          class: 'event-chip-open',
+          title: `${describeEvent(e.schedule)}`,
+          text: `${describeEvent(e.schedule)} · ${filledPoints(e)}`,
+          onclick: () => {
+            state.basicOpen = e.id;
+            // the draft is kept so a time typed but not saved is not thrown away by switching rows
+            state.basicKeepDraft = true;
+            rerender();
+          },
+        }),
+        ordered.length > 1
+          ? el('button', {
+            class: 'event-chip-remove',
+            // the accessible name carries the time, so a screen reader does not announce "✕" six times
+            title: t('basic.removeTimeTitle').replace('{time}', describeEvent(e.schedule)),
+            text: '\u2715',
+            onclick: () => {
+              const { events: next, removed } = removeEvent(state.basicEvents ?? [], e.id);
+              if (!removed) {
+                state.basicNotice = t('basic.lastEvent');
+                rerender();
+                return;
+              }
+              state.basicEvents = next;
+              // if the open time is the one going away, open the first that is left
+              if (state.basicOpen === e.id) state.basicOpen = next[0]?.id ?? null;
+              /**
+               * ONE PLACE DECIDES WHAT IS STORED, AND THE SAVE IS THAT PLACE.
+               *
+               * MEASURED (`remove-time-test`), two attempts:
+               *   1. doing nothing here left the deleted time's record and alarm in storage;
+               *   2. sending `delete-automation` from here RACED with the auto-save that the same action armed - the
+               *      save wrote records for the remaining times while the delete removed one of them, and the deleted
+               *      time came back on the next reload.
+               *
+               * `save()` already computes what to delete (`eventsToStore().remove`) and already writes the rest, in one
+               * sequential step. So a deletion does not need its own channel: it needs a save to run, and that save must
+               * know the record existed. `knownIds` comes from `state.automations`, so the mirror is what has to be kept
+               * intact until then - not pruned early, which is what made the removal set incomplete.
+               */
+              state.basicKeepDraft = true;
+              /**
+               * CANCEL THE PENDING SAVE, then arm a fresh one.
+               *
+               * MEASURED (`remove-time-test`): a save armed before the deletion fired afterwards carrying the list the
+               * deletion had just changed, and the removed time came back on the next reload. `autoSave()` debounces, so
+               * "arm another" alone would leave the earlier timer to fire first.
+               */
+              if (typeof state.basicCancelAutoSave === 'function') state.basicCancelAutoSave();
+              rerender();
+              /**
+               * SAVE NOW, NOT ON THE DEBOUNCE.
+               *
+               * MEASURED (`remove-time-test`): a deletion followed by a reload within the 1.2s debounce left the removed
+               * time's record in storage, so it came back - "I deleted it and it reappeared". A debounce exists to
+               * collapse a burst of keystrokes; a deletion is one deliberate act with nothing to collapse, and the user
+               * may well close the panel or reload straight after it.
+               *
+               * `save()` is in scope here because this handler runs at click time, after the view has been built.
+               */
+              save({ silent: true });
+            },
+          })
+          : null,
+      );
+      chip.dataset.eventId = e.id;
+      picker.append(chip);
     });
     list.append(picker);
     wrap.append(list);
@@ -1814,7 +1883,17 @@ function basicView(rerender) {
      * An event with NO usable point is skipped rather than saved with none, because an automation with no steps fails
      * at run time and reads as a broken clicker rather than an unfinished form.
      */
-    const { save: all, remove: gone } = eventsToStore(state, state.basicEvents ?? [], { baseId: draft.id ?? BASIC_ID });
+    /**
+     * ASK THE WORKER WHAT IS STORED, rather than trusting the panel's mirror. One extra round-trip per save, and it is
+     * the difference between a deleted time being gone and it still having an alarm of its own.
+     */
+    let storedIds = null;
+    try {
+      // the reply is an envelope: { ok, automations }
+      const listing = await send({ type: 'list-automations' });
+      if (listing?.ok && Array.isArray(listing.automations)) storedIds = listing.automations.map((a) => a.id);
+    } catch { /* fall back to the mirror; a save must not fail because a listing did */ }
+    const { save: all, remove: gone } = eventsToStore(state, state.basicEvents ?? [], { baseId: draft.id ?? BASIC_ID, storedIds });
     const usable = all.filter((a) => a.steps.length > 0);
 
     if (usable.length === 0) {
@@ -1827,15 +1906,25 @@ function basicView(rerender) {
 
     state.basicError = null;
     state.basicNotice = null;
-    // a time the user removed must not keep firing on its own
-    for (const id of gone) {
-      await send({ type: 'delete-automation', id });
-    }
-    // the FIRST time is saved first, so the alarm it already had stays attached to the record that keeps the base id
+    /**
+     * SAVE FIRST, THEN DELETE - the reverse of what this did, and the order matters.
+     *
+     * MEASURED (`probe-delete-trace`): the user removed the 09:00 time and kept 09:01. Deleting before saving meant the
+     * removal ran against ids the save was about to reuse, and the outcome was `delete-automation:basic-new1` - the time
+     * that was KEPT - while `basic@9:00`, the one removed, stayed in storage with its alarm.
+     *
+     * Saving first makes every surviving time's record exist under its own id, and the deletion afterwards can only touch
+     * ids that no event claims.
+     */
     let res = null;
     for (const a of usable) {
       res = await send({ type: 'save-automation', automation: a });
       if (!res?.ok) { state.basicError = res?.error ?? 'save failed'; rerender(); return false; }
+    }
+    // and then a time the user removed must not keep firing on its own
+    for (const id of gone) {
+      if (usable.some((a) => a.id === id)) continue;   // never delete a record that was just written
+      await send({ type: 'delete-automation', id });
     }
     if (res && usable.length > 1) {
       // report the LAST alarm, but say how many times were armed, so a multi-time save is not silent about it

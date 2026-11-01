@@ -33,14 +33,27 @@ import { merge, split, makeEvent, emptyPoint, filledPoints, describeEvent, order
  */
 export function ensureEvents(state, savedBasic, { nextRun } = {}) {
   const savedId = savedBasic?.id ?? 'basic';
-  if (state.basicEvents && !state.basicEventsStale && state.basicEvents.some((e) => e.id === savedId)) {
+  /**
+   * A WORKING COPY IS KEPT WHETHER OR NOT IT STILL CONTAINS THE BASE ID.
+   *
+   * The condition here was `state.basicEvents.some((e) => e.id === savedId)` - "keep the copy only if it still holds a row
+   * whose id is the stored record's". MEASURED (`probe-delete-trace`): the user deleted the 09:00 time, which IS the base
+   * record, and the surviving row carried `basic-new1`. No row had the base id, so the copy was discarded, the rows were
+   * rebuilt from storage, and the time the user had just deleted came back - the delete looked like it did nothing.
+   *
+   * The question worth asking is not "does the base id still exist" but "is the user working on this form". An unsaved or
+   * newly-changed list is the user's work; only a deliberate invalidation (`basicEventsStale`) or an empty copy means
+   * storage should win.
+   */
+  if (state.basicEvents && !state.basicEventsStale && state.basicEvents.length > 0) {
     return state.basicEvents;
   }
   // the records this form owns, in id order, so a saved multi-event setup comes back as the rows it was
   const owned = (state.automations ?? [])
-    .filter((a) => a.id === savedId || new RegExp(`^${savedId}-t\\d+$`).test(a.id))
+    .filter((a) => a.id === savedId || new RegExp(`^${savedId}-(t|new)\\d+$`).test(a.id))
     .sort((a, b) => {
-      const rank = (x) => (x.id === savedId ? 0 : Number(x.id.slice(`${savedId}-t`.length)));
+      // base first, then by the numeric tail of `-t<n>` or `-new<n>`
+      const rank = (x) => (x.id === savedId ? 0 : Number((x.id.match(/-(?:t|new)(\d+)$/) ?? [0, 0])[1]));
       return rank(a) - rank(b);
     });
 
@@ -110,16 +123,26 @@ export function removeEvent(events, id) {
  * `knownIds` is what storage currently holds for this form, so a row the user deleted is removed rather than left
  * behind firing on its own.
  */
-export function eventsToStore(state, events, { baseId = 'basic' } = {}) {
+export function eventsToStore(state, events, { baseId = 'basic', storedIds = null } = {}) {
   const saved = (state.automations ?? []).find((a) => a.id === baseId) ?? {};
   const template = {
     name: saved.name ?? 'Basic',
     options: saved.options,
     urls: saved.urls,
-    // every id this form owns, which is what makes the removal set computable
-    knownIds: (state.automations ?? [])
-      .map((a) => a.id)
-      .filter((id) => id === baseId || new RegExp(`^${baseId}-t\\d+$`).test(id)),
+    /**
+     * Every id this form owns, which is what makes the removal set computable.
+     *
+     * The pattern accepts `-new<n>` as well as `-t<n>`: `nextEventId()` mints `-new1` for a time the user added, so a
+     * newly added time that was then removed did not appear in this list and its record could never be deleted. The
+     * pattern is anchored and base-id-scoped, so an automation from the full editor is never claimed.
+     */
+    /**
+     * `storedIds` lets the caller pass what STORAGE actually holds, which is what a deletion needs: the panel's mirror is
+     * refreshed by a save, and a deletion is precisely the case that cannot wait for one. Without it, deleting the middle
+     * time left its record (and its alarm) behind - measured twice, the form on one time and storage on two.
+     */
+    knownIds: (storedIds ?? (state.automations ?? []).map((a) => a.id))
+      .filter((id) => id === baseId || new RegExp(`^${baseId}-(t|new)\\d+$`).test(id)),
   };
   return merge(baseId, events, { template });
 }

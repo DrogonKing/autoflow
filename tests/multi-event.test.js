@@ -77,13 +77,32 @@ describe('merge: events into records', () => {
     expect(save.map((a) => a.steps.length)).toEqual([4, 3, 5]);
   });
 
-  it('gives later events STABLE derived ids, not random ones', () => {
-    const events = [ev(10, 0, 0, 0, 1), ev(11, 0, 0, 0, 1), ev(12, 0, 0, 0, 1)];
+  it('keeps each event\'s OWN id, so a deletion cannot renumber the others', () => {
+    // NOTE: `ev()` builds an event with a synthetic id (`x-<hour>`), so the FIRST event keeps `x-10` rather than being
+    // relabelled `basic`. That relabelling was the bug: it made the removal set point at the wrong record.
+    /**
+     * This test used to assert `['basic','basic-t1','basic-t2']` - ids derived from the POSITION in the list - and that
+     * was describing a bug rather than a decision. MEASURED (`remove-time-test`): deleting the middle time renumbered
+     * the one after it, from `basic-t2` to `basic-t1`, and an alarm registered as `autoflow:run:basic-t1` silently began
+     * pointing at a different time.
+     */
+    const events = [ev(10, 0, 0, 0, 1), { ...ev(11, 0, 0, 0, 1), id: 'basic-t7' }, { ...ev(12, 0, 0, 0, 1), id: 'basic-t9' }];
+    const { save } = merge('basic', events, { template: { name: 'Basic' } });
+    expect(save.map((x) => x.id)).toEqual(['x-10', 'basic-t7', 'basic-t9']);
+  });
+
+  it('gives the same ids on a second merge, so an armed alarm is not orphaned', () => {
+    const events = [ev(10, 0, 0, 0, 1), { ...ev(11, 0, 0, 0, 1), id: 'basic-t4' }, { ...ev(12, 0, 0, 0, 1), id: 'basic-t8' }];
     const a = merge('basic', events, { template: { name: 'Basic' } });
     const b = merge('basic', events, { template: { name: 'Basic' } });
-    expect(a.save.map((x) => x.id)).toEqual(['basic', 'basic-t1', 'basic-t2']);
-    // identical on a second merge, so an alarm armed for event 2 is not orphaned by an unrelated edit
     expect(b.save.map((x) => x.id)).toEqual(a.save.map((x) => x.id));
+  });
+
+  it('an event with NO id falls back to its index, so merge cannot emit undefined', () => {
+    const events = [{ schedule: { kind: 'daily', hour: 9, minute: 0, second: 0 }, steps: [{ id: 'p', kind: 'click', finder: { strategy: 'id', id: 'a' } }] },
+      { schedule: { kind: 'daily', hour: 10, minute: 0, second: 0 }, steps: [{ id: 'p', kind: 'click', finder: { strategy: 'id', id: 'b' } }] }];
+    const { save } = merge('basic', events, { template: {} });
+    expect(save.map((x) => x.id)).toEqual(['basic', 'basic-t1']);
   });
 
   it('gives every point an id, so the pick machinery has something to target', () => {
@@ -103,7 +122,9 @@ describe('merge: events into records', () => {
   });
 
   it('REPORTS the ids to remove, so deleting the last event is expressible', () => {
-    const { save, remove } = merge('basic', [ev(9, 0, 0, 0, 1)], {
+    // an event with no id of its own takes `baseId` at position 0 - the fallback for a form never rendered before
+    const bare = { schedule: { kind: 'daily', hour: 9, minute: 0, second: 0 }, steps: [{ id: 'p', kind: 'click', finder: { strategy: 'id', id: 'a' } }] };
+    const { save, remove } = merge('basic', [bare], {
       template: { name: 'Basic', knownIds: ['basic', 'basic-t1', 'basic-t2'] },
     });
     expect(save.map((a) => a.id)).toEqual(['basic']);
@@ -111,7 +132,8 @@ describe('merge: events into records', () => {
   });
 
   it('never removes an automation this form does not own', () => {
-    const { remove } = merge('basic', [ev(9, 0, 0, 0, 1)], {
+    const bare = { schedule: { kind: 'daily', hour: 9, minute: 0, second: 0 }, steps: [{ id: 'p', kind: 'click', finder: { strategy: 'id', id: 'a' } }] };
+    const { remove } = merge('basic', [bare], {
       template: { name: 'Basic', knownIds: ['basic', 'basic-t1', 'a-later-automation', 'basicness-other'] },
     });
     // 'a-later-automation' belongs to the full editor; 'basicness-other' merely starts with the same letters

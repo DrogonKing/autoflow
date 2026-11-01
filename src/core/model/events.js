@@ -60,6 +60,9 @@ export function eventIsReady(event) {
 export function split(automation, { extraTimes = [] } = {}) {
   const base = automation ?? {};
   const id = base.id ?? 'basic';
+  // NOTE: `id` here is the RECORD's own id, and the first event takes it because that record is the one being edited.
+  // `merge()` no longer forces `baseId` onto position zero - it uses each event's own id - so a deletion cannot
+  // relabel the survivors. What `split()` must guarantee is that every event it hands out HAS an id.
   const schedule = base.schedule ?? { kind: 'daily', hour: 9, minute: 0, second: 0, ms: 0 };
   const steps = (base.steps ?? []).map((s, i) => ({ ...s, id: s.id ?? `${id}-point-${i + 1}` }));
 
@@ -100,8 +103,43 @@ export function merge(baseId, events, { template = {} } = {}) {
   const remove = [];
   const seen = new Set();
 
+  /**
+   * AN ID IS THE EVENT'S, NOT ITS POSITION'S.
+   *
+   * MEASURED (`remove-time-test`): ids were derived as `${baseId}-t${index}`, so deleting the middle time renumbered the
+   * ones after it - the 09:02 event had been `basic-t2` and became `basic-t1`. An alarm is registered against an id
+   * (`autoflow:run:<id>`), so the renumbering silently repointed a pending alarm at a DIFFERENT time: `basic-t1` was
+   * armed for 09:01, the 09:01 event was deleted, and `basic-t1` now belongs to 09:02.
+   *
+   * The event carries its own id, which `split()` and `addEvent()` both set and which survives reordering. It is used
+   * when present; the index is only a fallback for an event that somehow has none, and the first event still keeps the
+   * base id so an automation created before this feature keeps its identity.
+   */
   events.forEach((ev, i) => {
-    const id = i === 0 ? baseId : `${baseId}-t${i}`;
+    /**
+     * AN ID BELONGS TO ITS EVENT, INCLUDING AT POSITION ZERO.
+     *
+     * MEASURED (`probe-delete-trace`): the user deleted the 09:00 time and kept 09:01. The panel then sent
+     * `delete-automation:basic-new1` - it deleted 09:01 - and storage kept `basic@9:00`, the time the user had asked to
+     * remove. The cause was this line forcing `baseId` onto whichever event happened to be FIRST:
+     *
+     *     const id = i === 0 ? baseId : ...
+     *
+     * So the surviving 09:01 event was relabelled `basic`, and the removal set (computed by id) then pointed at the wrong
+     * record. An id derived from position is not an identity at all.
+     *
+     * The event's own id is used whenever it has one; `baseId` is only the fallback for an event with none - a form that
+     * has never been rendered, where position IS the only thing known.
+     */
+    /**
+     * THE ID COMES FROM THE EVENT, ALWAYS WHEN IT HAS ONE.
+     *
+     * MEASURED (`probe-delete-trace`): the user removed the 09:00 time and kept 09:01, and the panel sent
+     * `delete-automation:basic-new1` - deleting the time that was kept - while storage retained `basic@9:00`, the one that
+     * was removed. The cause was `i === 0 ? baseId`, which relabelled the surviving event and made the removal set point
+     * at the wrong record.
+     */
+    const id = ev.id ?? (i === 0 ? baseId : `${baseId}-t${i}`);
     seen.add(id);
     save.push({
       // the template carries fields this form does not edit (options, the pick-page memory); spreading it first means
@@ -131,7 +169,7 @@ export function merge(baseId, events, { template = {} } = {}) {
   });
 
   // ids this form owns: the base and its derived times. Anything else in storage belongs to the full editor.
-  const ownPattern = new RegExp(`^${baseId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(-t\\d+)?$`);
+  const ownPattern = new RegExp(`^${baseId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(-(t|new)\\d+)?$`);
   for (const id of template.knownIds ?? []) {
     if (ownPattern.test(id) && !seen.has(id)) remove.push(id);
   }

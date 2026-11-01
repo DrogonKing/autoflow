@@ -1,55 +1,57 @@
-> ## ⚠️ BETA — the second pick no longer disappears
+> ## ⚠️ BETA — a time can now be deleted
 >
-> **This one is my fault, and it took three attempts.** The auto-save I added in 1.32.0 introduced a re-seed that
-> deleted work you had not saved yet. All three of its shapes are described below so you know what to watch for.
+> The delete control you asked for, and the four bugs behind its absence. Verified in a controlled browser, **not against
+> a real trading site yet**.
 
-## What you reported
+## Your report
 
-> «چرا وقتی pick دوم رو میزنم و تارگت رو انتخاب میکنم کلا pick دوم حذف میشه و مینویسه saved»
+> «چرا دکمه حذف زمان وجود نداره؟ مثلا من یه زمان سومی اضافه کردم بعد پشیمون شدم و میخوام حذفش کنم ولی دکمش نیست»
 
-Reproduced exactly, and the cause was the save path I added last release — not the Pick machinery.
+`removeEvent()` existed in the code from the day the feature shipped and **was never called from the panel**. Nothing
+failed, because every test asked the questions I had thought to ask — that a time can be *added*, that its points survive,
+that the times come back after a reopen. Nobody asked whether one can be taken away.
 
-## Why it happened
+**Now:** a small ✕ sits on each time chip, next to the time. The last remaining time has no ✕ at all, rather than one
+that refuses — a form with no time has nothing to show and no way back.
 
-The form keeps the times and points you are editing in a **working copy**, and after a save I re-seeded that copy from
-storage. Three versions of that re-seed, three faults:
+## Why a delete turned out to be four bugs, not one control
 
-| the re-seed ran… | what it did |
-|---|---|
-| always | times with no point yet vanished while you were still working on them |
-| when the number of times matched | one time with two points looked equal to one time with one point — so the second point was deleted right after you picked it. **This is the bug you reported.** |
-| when the number of points matched | a pick armed the save, the save re-seeded, and the next render committed a half-typed buffer: `10:32:40` was stored as `1:00:00` |
+Adding the button exposed faults that would have bitten you later, in this order:
 
-Every one is the same mistake: the form held **two representations of the same work**, and the re-seed could only ever
-destroy the one you had not saved yet.
+**۱. Deleting a time left its record and its alarm behind.**
+The removal set was computed from a list the panel refreshes lazily. A deleted time kept firing on its own. The save now
+asks the worker what is actually stored before deciding what to remove.
 
-**The re-seed is gone.** The save already writes the working copy, so it had nothing to correct. One rule now holds
-everywhere in that form: *storage is the truth only when nothing is unsaved* — and a save is not such a moment, it is
-the moment part of the work just became saved.
+**۲. Deleting the FIRST time renumbered the others.**
+Ids were derived from position in the list (`-t2`, `-t1`), so removing the first time renamed the second one — and an
+alarm is registered against an id (`autoflow:run:<id>`), so a pending alarm silently began pointing at a **different**
+time. Ids now belong to the time itself. Measured: the survivors kept `basic-new1` instead of being relabelled.
 
-## Also fixed in this build
+**۳. Then the *wrong* time was deleted.**
+Because position decided the id, `merge()` forced the base id onto whichever time happened to be first. So deleting the
+09:00 time sent `delete-automation:basic-new1` — it deleted the time you KEPT, and left the one you removed. The trace
+showed it plainly:
 
-**Persian and Arabic digits could be lost on `Tab`.** You type ۰۸:۴۵:۵۲, the field shows 08:45:52, and pressing Tab
-brought back 09:00 — because a stale flag from an earlier save let the render rebuild the form from storage and
-discard the typed value. Typing now clears that flag, since typing is the clearest statement that the form is current.
+```
+you removed  basic       (09:00)
+panel sent   delete basic-new1   ← the one you kept
+storage kept basic@9:00          ← the one you removed
+```
 
-**The schedule preview follows the typed time again.** It only updated during a full render, and the auto-save
-deliberately does not re-render, so the preview lagged one edit behind.
-
-**A pick now arms the auto-save.** The Pick path set its own flag and called `render()` directly instead of going
-through the helper the auto-save was attached to, so a form built entirely out of picks was never saved automatically.
+**۴. A deleted time came back after a reload.**
+The deletion waited on the 1.2-second auto-save, so reloading sooner restored it. A deletion is one deliberate act with
+nothing to collapse, so it saves immediately; and it cancels any save that was already queued, because that queued save
+still carried the old list.
 
 ## Verified
 
 ```
-three-times-test      11/11   milliseconds by real typing, three times each with a
-                              point, auto-save with no Save press, survival across a reopen
-second-pick-test       5/5    the reported bug: two points, two picks, both kept, distinct
-                              targets, both in storage
-pick-digits-test      21/21   Persian and Arabic numerals, typed as keystrokes
-ui-basic-test         25/25   ·  pick-confirm 10/10  ·  time-survives-pick 6/6
-774 unit tests, 39 files
-34 browser suites green, 0 red; 2 known load flakes, both green on rerun
+remove-time-test     15/15   the report: a third time added, then removed.
+                             The right time goes, the others stay, the record is gone from
+                             storage, the removal survives a reload, and the last time has
+                             no delete control
+776 unit tests, 39 files
+34 browser suites green, 0 red
 ```
 
 ## Install
