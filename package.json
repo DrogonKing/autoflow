@@ -1,6 +1,6 @@
 {
   "name": "autoflow",
-  "version": "1.37.0",
+  "version": "1.38.0",
   "private": true,
   "type": "module",
   "description": "AutoFlow \u2014 auto-click, fill, record and schedule browser automations.",

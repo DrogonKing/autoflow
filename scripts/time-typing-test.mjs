@@ -84,6 +84,15 @@ console.log('\n=== now touch something else in the form (this is what used to ki
 await press('^\\+\\s*Add a point');
 const afterAdd = await state();
 console.log('  after Add a point:', JSON.stringify(afterAdd));
+/**
+ * A PRESS ON A CONTROL IS NOT A DEPARTURE.
+ *
+ * MEASURED as a regression: making every press outside the field mean "the user has finished" took the caret out of the
+ * field when a button was pressed, so the rest of a half-typed time could not be entered. This is the assertion that
+ * catches it, and it belongs in this suite because this suite is the one that types a partial time and then touches the
+ * form.
+ */
+console.log('  pressing a control must NOT count as leaving the field');
 check('the typed time survives the form rebuilding', afterAdd.value === '10:32:33.250', String(afterAdd.value));
 check('and the point was actually added', await panel.evaluate(() =>
   document.querySelectorAll('.step, [data-step-id]').length >= 0), 'form rebuilt');

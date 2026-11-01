@@ -1,67 +1,50 @@
-> ## ⚠️ BETA — typing a new time works, and one save per settled edit
+> ## ⚠️ BETA — click anywhere to leave the time, and a ✓ to save it by hand
 >
 > Verified in a controlled browser, **not against a real trading site yet**.
 
-## Your report
+## What you asked for
 
-> «عددم تغییر میدم صفر میشه بعد دوباره درست میشه همش هم پشت هم سیو میشه»
-> «نمیزاره تایم جدید وارد کنم»
+> «وقتی من عادت دارم وقتی ساعت رو مشخص کردم روی یه جای دیگه داخل صفحه کلیک کنم که از نوشتار ساعت بیام بیرون ولی تو این
+> نسخه تو نوشتار میموند»
+> «انتهای هر ساعت هم یه علامت تیک بذار برای سیو دستی ساعت»
 
-## What was wrong, and what is now true
+Both are in this build.
 
-**Typing a time.** With `09:00:00` in the field, clicking it and typing nine digits gave `09:00:00.103` — every
-keystroke **appended** to the old value and `maxlength` then refused the rest. A new time could not be entered at all.
-Clicking into the field now **selects the whole time**, so what you type replaces it:
+**Clicking elsewhere now leaves the field, and saves the time.** The panel used to treat a press on a button, a label or
+the background as "still in the time field" and put the caret back — so the only way out was Tab or Enter. A press
+anywhere outside the field is now read for what it is: the edit is finished. The value is committed and saved once.
+
+**Each time has a ✓ at its end.** It commits what is in the field, leaves it, and saves immediately rather than waiting
+for the debounce — so it is a second, visible way out that also saves. It also works for anyone who would rather click a
+button than the background.
+
+## What was measured, and one thing that cannot be
 
 ```
-09:00:00  →  "1" → "10" → "10:3" → "10:32" → … → 10:32:33.250
+click the panel background  → focus left the field ✅ · the new time was stored ✅ · one save ✅
+press ✓                     → time stored ✅ · field left ✅ · saved at once, not on the debounce ✅
 ```
 
-**Saves back to back.** Counting the worker's own save requests, nine digits at an unhurried pace armed **19** saves,
-and an idle panel made **147 in five seconds**. Now:
+**A press on the trading page itself (rather than the panel)** is handled by the same code, through the panel's
+`window` blur and `visibilitychange`. That path could not be driven end to end in this harness — Playwright's
+`bringToFront` does not move real OS focus between pages, measured as `panel saw window blur: 0`. The handler's own
+contract is asserted instead, and the test says so rather than claiming more than it checked. It is worth a look when
+you next use it for real.
 
-```
-one save when the time is settled (blur / Enter)   ·   0 saves while you are doing nothing
-one save when a target is picked                   ·   one immediate save when a time or pick is removed
-```
+## One subtlety worth knowing
 
-Nothing is saved while you are still typing — the save waits until you have left the field.
-
-## Four faults found on the way
-
-1. **A save per keystroke.** The typed-time path armed the auto-save on every input event. It now arms on commit.
-2. **A render loop.** `render()` removes the focused input, the browser fires `blur` on the detached node, and the blur
-   handler committed *and* rendered — one render causing the next. **147 saves in five idle seconds.** A blur caused by
-   our own rebuild is no longer treated as an edit.
-3. **Typed digits overwritten mid-typing.** A render from a `element-picked` message — for a pick made *before* the
-   typing — rebuilt the field from the model. Typing `10:32:33.250` produced `10:02:33.300`. The half-typed text is now
-   preserved across a rebuild, like the caret already was.
-4. **No selection on arrival.** The field is now selected by a **real pointer press**; two other triggers were measured
-   and rejected (`onfocus` also fires when the panel re-focuses after a render, wiping digits).
-
-## One thing I removed instead of shipping it
-
-I had added **Escape to undo a time edit**. It is not in this build. It could not be made reliable: by the time Escape
-is pressed the auto-save may already have stored the typed time, so "restore the previous value" either restores what
-you are abandoning or fights a save that just succeeded. A half-working undo is worse than none, so it was taken out and
-the reason recorded in the code.
-
-## Also fixed
-
-`three-times-test` used literal targets (`10:35:00`). Run near 10:35 the third target is in the past, the alarm is
-clamped to "now", and Chrome fires a sub-30-second alarm immediately — so the alarm was consumed and the record looked
-unarmed. That was the intermittent "2 of 3 alarms" seen earlier. Targets are now built relative to the clock.
+Leaving the field is now **sticky**: after you click away, a later re-render will not pull the caret back into the time
+box. It is cleared only when you next click into a time field. That was the actual cause of being trapped — a press
+commits the value, the save produces a re-render, and the restore put the caret straight back.
 
 ## Verified
 
 ```
-new-time-test      8/8    typing replaces, one save, no idle saves, a second time from scratch
-seven-time chunk   11/11  three times, each with its own point and its own alarm
+leave-field-test  10/10   ✓ present and to the right of the field · clicking away leaves and saves ·
+                          ✓ saves at once and leaves · the hidden-window handler leaves the field
+new-time-test      8/8    a typed time replaces the old one, one save, no idle saves
 time-typing        8/8    focus and caret survive a re-render
 ui-basic          25/25   add, delete, reorder points
-776 unit tests · 39 files
-import check: clean, and proven to fail on a planted fault
-40 browser suites green · 0 red
+three-times       11/11   three times, each with its own point and alarm
+776 unit tests · 39 files · import check clean
 ```
-
-`click-icon-test` needs a window manager (bare Xvfb has none) — an environment limit, not this code.

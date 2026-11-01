@@ -1755,6 +1755,7 @@ function basicView(rerender) {
     timeField({
       // one key per time: a key derived from position would move when a row is added or deleted
       focusKey: `basic-time:${ev.id ?? 'basic'}`,
+      saveConfirm: true,
       value: timeFieldValue(ev.schedule),
       onCommit: (v, opts) => { commit(v); if (opts.rerender) keepDraftThen(() => {}); },
       /**
@@ -1773,6 +1774,18 @@ function basicView(rerender) {
         if (typeof state.basicRefreshPreview === 'function') state.basicRefreshPreview();
       },
       onSettled: () => { autoSave(); },
+      /**
+       * PRESSING ✓ SAVES NOW.
+       *
+       * The button is the second way out of the field: it blurs (so the value commits and the user is out of the text) and
+       * then saves immediately rather than on the debounce, because a deliberate press has nothing to collapse - the same
+       * reasoning that already makes removing a time save at once.
+       */
+      onSaveNow: () => {
+        state.basicKeepDraft = true;
+        if (typeof state.basicCancelAutoSave === 'function') state.basicCancelAutoSave();
+        save({ silent: true });
+      },
       /**
        * WHAT ESCAPE RESTORES: the time as it stands in the model NOW.
        *
@@ -2424,7 +2437,14 @@ function afterCurrentInteraction(fn) {
   setTimeout(run, 250);   // a blur with no click behind it must still refresh, and promptly
 }
 
-function timeField({ value, placeholder, onCommit, onHint, rerender, onEdit, onSettled, focusKey = null }) {
+/**
+ * `saveConfirm` adds a small ✓ at the end of the field, which saves the time and leaves the field.
+ *
+ * Requested directly: "انتهای هر ساعت هم یه علامت تیک بذار برای سیو دستی ساعت اینجوری یه راه کوچیک دیگه برای بیرون اومدن از
+ * ساعت و سیو کردنش اضافه میشه" - and it doubles as the visible way out of the text for anyone who does not think to click
+ * the background.
+ */
+function timeField({ value, placeholder, onCommit, onHint, rerender, onEdit, onSettled, onSaveNow = null, saveConfirm = false, focusKey = null }) {
   /**
    * A MASKED FIELD. It holds a run of DIGITS; the colons are drawn.
    *
@@ -2517,7 +2537,11 @@ function timeField({ value, placeholder, onCommit, onHint, rerender, onEdit, onS
      * A second click inside an already-focused field leaves the caret where it was clicked, which is what someone editing
      * one digit expects.
      */
-    onpointerdown: (e) => { pointerArrivedInTimeField = e.pointerType !== ''; },
+    onpointerdown: (e) => {
+      pointerArrivedInTimeField = e.pointerType !== '';
+      // arriving back in a time field cancels the "I have left" state, so the caret may be restored again
+      if (pointerArrivedInTimeField) pointerLeftField = false;
+    },
     onclick: (e) => {
       if (!pointerArrivedInTimeField) return;
       pointerArrivedInTimeField = false;
@@ -2630,7 +2654,49 @@ function timeField({ value, placeholder, onCommit, onHint, rerender, onEdit, onS
     onpaste: () => { /* handled by `input` */ },
   });
   void placeholder; void rerender;
-  return input;
+  /**
+   * THE ✓ IS PART OF THE FIELD'S OWN CONTROL, so it sits beside it and reads as "save THIS time".
+   *
+   * Pressing it: settles the value (blur, which commits it), then saves at once. `pointerdown` is preventDefault'd so the
+   * field keeps focus until the handler has read it - otherwise the blur fires first and the value would be committed by
+   * the blur path while this handler is still deciding what to save.
+   */
+  if (!saveConfirm) return input;
+  const confirm = el('button', {
+    class: 'icon time-save',
+    type: 'button',
+    title: t('basic.saveTimeTitle'),
+    text: '✓',
+    /**
+     * THE WORK HAPPENS ON `pointerdown`, WHICH IS THE EVENT THAT RELIABLY ARRIVES.
+     *
+     * MEASURED: a `click` handler on this button never ran - instrumenting it produced nothing at all, while the time was
+     * still stored, because the press blurred the field and the blur path saved it. The handler was effectively decorative.
+     * `pointerdown` is the event this button was already proven to receive, since an earlier `preventDefault` on it
+     * successfully suppressed the click that followed.
+     *
+     * `preventDefault` is NOT called: it is what suppressed the click in the first place, and there is no longer a reason
+     * to hold focus in the field - the value is read here, before the browser moves focus away.
+     */
+    onpointerdown: () => {
+      /**
+       * THE LIVE FIELD IS THE ONE TO READ AND BLUR, NOT THIS CLOSURE'S NODE.
+       *
+       * MEASURED: the press left the caret in the field even though the handler ran, because a render can happen between
+       * the click and the handler and `input` then refers to a detached element - `blur()` on a detached node does nothing.
+       * Reading and blurring `document.activeElement` addresses whatever is actually there.
+       */
+      const live = document.activeElement?.matches?.('input.time-input') ? document.activeElement : input;
+      const text = formatTimeDigits(live.value);
+      live.value = text;
+      onCommit(text, { rerender: false });
+      // the ✓ means "done with this field": marked before blurring so the follow-up render cannot put the caret back
+      markLeftField();
+      live.blur();
+      if (onSaveNow) onSaveNow();
+    },
+  });
+  return el('span', { class: 'time-with-save' }, input, confirm);
 }
 
 /** A short description of what a finder points at, for the collapsed row. */
@@ -3211,7 +3277,72 @@ document.addEventListener('input', () => { lastUserInputAt = Date.now(); }, true
  * `10:02:33.300`.
  */
 let pointerIsDown = false;
-document.addEventListener('pointerdown', () => { pointerIsDown = true; }, true);
+/**
+ * THE USER PRESSED SOMEWHERE OTHER THAN THE FIELD THEY WERE TYPING IN.
+ *
+ * MEASURED and reported: after setting a time, clicking anywhere else in the panel did NOT leave the field - the panel put
+ * the caret back, so the user stayed trapped in the text they had finished with («تو نوشتار میموند»). The cause was
+ * `captureFocus`: it treats a press on a button, a div or the page body as "the user is still in the remembered field" and
+ * restores it.
+ *
+ * A press outside the field is the clearest possible statement that the edit is finished, so it is recorded here and
+ * `captureFocus` returns nothing for it - which lets the blur happen, which commits the value and arms the save.
+ */
+let pointerLeftField = false;
+/** A control that deliberately ends the edit (the ✓ beside a time) says so, since a press on a control is otherwise read as "acting on the form". */
+function markLeftField() { pointerLeftField = true; }
+/**
+ * WHERE THE USER PRESSED DECIDES WHETHER THEY LEFT.
+ *
+ * MEASURED (`time-typing-test`, twice, as a real regression): treating EVERY press outside the field as a departure meant
+ * pressing "+ Add a point" while a time was half-typed took the caret out of the field for good, so the rest of the time
+ * could not be typed. A press on a CONTROL is the user acting on the form - the caret belongs back in the field they were
+ * editing. A press on INERT SPACE is the user leaving, which is what was reported.
+ */
+const CONTROL_SELECTOR = 'button, a, select, input:not(.time-input), textarea, [role="button"], .event-chip, label';
+document.addEventListener('pointerdown', (e) => {
+  pointerIsDown = true;
+  if (e.target?.matches?.('input.time-input')) { pointerLeftField = false; return; }   // arriving in the field
+  const onControl = Boolean(e.target?.closest?.(CONTROL_SELECTOR));
+  pointerLeftField = !onControl;
+}, true);
+
+/**
+ * THE WINDOW LOSING FOCUS MEANS THE SAME THING AS A PRESS ON THE BACKGROUND.
+ *
+ * MEASURED (`leave-field-test`): typing a time and then clicking on the PAGE - not the panel - did not save it, because a
+ * click in the page is a different document and the panel sees no pointer event for it. What the panel does get is
+ * `blur` on its own `window`, which says the user has moved on: the field is left and its value is stored.
+ */
+const leaveFieldIfEditing = () => {
+  if (!document.activeElement?.matches?.('input.time-input')) return;
+  /**
+   * THE LEAVE IS MARKED, NOT JUST THE BLUR.
+   *
+   * MEASURED: calling `blur()` alone did not get the user out. The blur commits the value and arms a save, the save
+   * produces a render, and `captureFocus` then sees the body as the active element and hands back the remembered field -
+   * so the caret was put straight back in the field the user had just left. Setting the same flag that a press outside the
+   * field sets is what makes the departure stick, and it is cleared only when the user next arrives in a time field.
+   */
+  pointerLeftField = true;
+  document.activeElement.blur();
+};
+/**
+ * `blur` DOES NOT BUBBLE, so it must be listened for on `window` in the BUBBLE phase.
+ *
+ * MEASURED: with `capture: true` the handler never ran at all (`leaveFieldIfEditing calls: null`) - a capture-phase
+ * listener on `window` is above the target for an event that does not propagate, so nothing reached it and the time typed
+ * just before switching windows was never saved.
+ */
+window.addEventListener('blur', leaveFieldIfEditing);
+/**
+ * HIDING THE PANEL IS ALSO LEAVING THE FIELD.
+ *
+ * A side panel or popup that is no longer visible has certainly been left, and `visibilitychange` fires for every way that
+ * happens - switching tab, closing the panel, moving to another window. `blur` alone is not enough: whether the panel sees
+ * it depends on how the window lost focus, which is not something the panel can rely on.
+ */
+document.addEventListener('visibilitychange', () => { if (document.hidden) leaveFieldIfEditing(); });
 document.addEventListener('pointerup', () => {
   // cleared on the next frame, because the click event is delivered after pointerup and handlers run before it settles
   setTimeout(() => { pointerIsDown = false; }, 0);
@@ -3276,6 +3407,18 @@ document.addEventListener('input', rememberCaret, true);
  * field, an input elsewhere in the panel) that choice is left alone.
  */
 function captureFocus() {
+  /**
+   * A PRESS OUTSIDE THE FIELD ENDS THE EDIT OF IT, AND THE FLAG IS NOT CONSUMED.
+   *
+   * Returning nothing is what lets the user leave: the blur happens, the value commits, and the auto-save is armed - the
+   * behaviour reported as missing («بعد از اینکه ساعت تغییر کرد و جای دیگه کلیک شد اون ساعت سیو بشه»).
+   *
+   * MEASURED (`leave-field-test`): clearing the flag here was not enough, because a single press can be followed by more
+   * than one render - the press itself commits the value and arms a save, and each of those can rebuild the view. The
+   * first render respected the flag and the second put the caret back. It is cleared when the user next arrives in a time
+   * field, which is the only event that should cancel it.
+   */
+  if (pointerLeftField) return null;
   const live = fieldSignature(document.activeElement);
   if (live) return live;
   /**
@@ -3302,6 +3445,8 @@ function restoreFocus(memory) {
   if (!memory) return;
   // a pointer that is down means the user is pressing something; see `pointerIsDown`
   if (pointerIsDown) return;
+  // and a press OUTSIDE the field means they have finished with it - never pull them back in
+  if (pointerLeftField) return;
   const target = document.querySelector(`[data-focus-key="${String(memory.key).replace(/"/g, '\\"')}"]`);
   if (!target) return;
   try { target.focus({ preventScroll: true }); } catch { return; }

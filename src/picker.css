@@ -440,3 +440,19 @@ body.options-page textarea { width: 100%; font-family: var(--mono); font-size: 1
   color: var(--bad);
 }
 .event-chip-remove:hover { background: color-mix(in srgb, var(--bad) 16%, transparent); }
+
+/* The ✓ at the end of a time: a manual save that also gets the user out of the field. */
+.time-with-save {
+  display: inline-flex;
+  align-items: center;
+  gap: 0;
+  flex: 1;
+  min-width: 0;
+}
+.time-with-save > input.time-input { flex: 1; min-width: 0; }
+.time-save {
+  flex: none;
+  color: var(--good, var(--ok, #2e7d32));
+  font-weight: 600;
+}
+.time-save:hover { background: color-mix(in srgb, var(--good, var(--ok, #2e7d32)) 16%, transparent); }
