@@ -1499,10 +1499,52 @@ function basicView(rerender) {
   state.basicKeepDraft = false;
   const draft = state.basic;
 
+  /**
+   * AUTO-SAVE: A CHANGE TO THE FORM SAVES ITSELF, SHORTLY AFTER THE EDITING STOPS.
+   *
+   * Asked for: "بهش اتوسیو هم اضافه کن بعد هر تغییر یا اضافه یا حذف کردن خودش خودکار سیو بشه چون ممکنه بعضی اوقات
+   * گزینه سیو زده بشه" - add auto-save so that after any change, addition or deletion it saves itself, because
+   * sometimes the Save button is missed.
+   *
+   * WHY A DEBOUNCE AND NOT A SAVE PER KEYSTROKE. Typing "10:32:33.250" is nine keystrokes; nine saves would be nine
+   * storage writes, nine alarm registrations and nine entries in the run history for one intended change. So the save
+   * waits for a pause in the editing.
+   *
+   * WHY NOT ON blur EITHER. A blur fires when the user reaches for Pick, so saving then would re-render the form under
+   * the pointer - the exact fault that made the time field "reset" in 1.24.0.
+   *
+   * THE SAVE IS THE SAME `save()` THE BUTTON CALLS. Not a second path: a lighter version would be free to disagree with
+   * the real one, and the disagreement would be about which points were stored.
+   */
+  const AUTO_SAVE_DELAY_MS = 1200;
+  let autoSaveTimer = null;
+  const autoSave = () => {
+    if (state.tab !== 'basic') return;              // the user has moved on; the stale flag handles that case
+    if (autoSaveTimer) clearTimeout(autoSaveTimer);
+    autoSaveTimer = setTimeout(async () => {
+      autoSaveTimer = null;
+      if (state.tab !== 'basic') return;
+      /**
+       * NOTHING USABLE YET IS NOT A FAILURE. A form with no point that names an element cannot be stored, and
+       * `save()` refuses it with a message the user has not asked for by merely typing a time. So the attempt is
+       * silent when there is nothing to store, and only reports when it tried and was refused.
+       */
+      const usable = (state.basicEvents ?? []).some((e) => (e.steps ?? []).some((s) => s?.finder
+        && Object.keys(s.finder).some((k) => k !== 'strategy' && s.finder[k])));
+      if (!usable) return;
+      await save({ silent: true });
+    }, AUTO_SAVE_DELAY_MS);
+  };
+
   /** Mutate the draft and re-render without discarding it. */
   const keepDraftThen = (fn) => {
     fn();
     state.basicKeepDraft = true;
+    /**
+     * EVERY FORM EDIT GOES THROUGH HERE - add, delete, reorder, re-time, pick - so arming the auto-save in this one
+     * place covers all of them without each control having to remember to ask for it.
+     */
+    autoSave();
     rerender();
   };
   const sched = draft.schedule ?? { kind: 'daily', hour: 9, minute: 0, second: 0, ms: 0 };
@@ -1559,6 +1601,8 @@ function basicView(rerender) {
     timeField({
       value: timeFieldValue(ev.schedule),
       onCommit: (v, opts) => { commit(v); if (opts.rerender) keepDraftThen(() => {}); },
+      // a typed time is a change to the form like any other, so it arms the same auto-save
+      onEdit: () => autoSave(),
     }),
     evHint,
   ));
@@ -1677,7 +1721,12 @@ function basicView(rerender) {
   draft.schedule = ev.schedule;
 
   // ---- save, and run now
-  const save = async () => {
+  /**
+   * @param {{ silent?: boolean }} [opts] `silent` is used by the auto-save: a refusal that the user did not ask for is
+   *   not reported, because merely typing a time would otherwise raise "at least one point is needed" before there is
+   *   any point to give it.
+   */
+  const save = async (opts = {}) => {
     /**
      * EVERY TIME IS SAVED, and each becomes its own automation.
      *
@@ -1692,8 +1741,10 @@ function basicView(rerender) {
     const usable = all.filter((a) => a.steps.length > 0);
 
     if (usable.length === 0) {
-      state.basicError = t('basic.needPoint');
-      rerender();
+      if (!opts.silent) {
+        state.basicError = t('basic.needPoint');
+        rerender();
+      }
       return false;
     }
 
@@ -1729,6 +1780,34 @@ function basicView(rerender) {
     await refresh();
     state.basic = { ...clean };
     state.basicStale = false;
+    /**
+     * THE EVENTS WORKING COPY IS RE-SEEDED FROM STORAGE, and this is a real fault that was reported as
+     * "باگ دوم فقط زمان اولی رو شلیک کرد و pickهای زمان دوم و سوم شلیک نشدن" - only the first time fired.
+     *
+     * `clean` is ONE record - the first event - because that is what `res` and the notice are about. Leaving
+     * `basicEvents` untouched meant the panel held two different pictures after a three-time save: three rows in the
+     * working copy and one record in `state.basic`. Any later render that rebuilds the rows from the draft could then
+     * produce a single row and drop the other two, which loses the points that were picked into them.
+     *
+     * Marking the copy stale makes `ensureEvents` rebuild all three from the records that were just written, so the one
+     * the save produced. MEASURED before the fix: three records and three alarms in storage, while the panel could come
+     * back to one row.
+     */
+    /**
+     * RE-SEED ONLY WHEN EVERY TIME WAS ACTUALLY STORED.
+     *
+     * The first version of this set `basicEventsStale = true` unconditionally, and that was worse than the fault it
+     * fixed: MEASURED (`three-times-test`), a user adds three times and gives only the first one a point yet - the save
+     * stores one record, the stale flag rebuilds the rows FROM STORAGE, and times two and three disappear from the form
+     * while the user is still working on them. Three times became one.
+     *
+     * The rule is the same one this form already learned: storage is the truth only when storage holds everything. If
+     * any time is still missing a point, the working copy is the truth and stays.
+     */
+    if (usable.length === (state.basicEvents ?? []).length) {
+      state.basicEventsStale = true;
+      state.basicOpen = null;
+    }
     state.basicSavedAt = Date.now();      // the button shows a tick for a moment, which is the only confirmation the user asked for
 
     /**
@@ -1766,7 +1845,24 @@ function basicView(rerender) {
       state.basicNotice = t('basic.armFailed').replace('{reason}', String(sched.reason ?? 'unknown'));
     }
 
-    rerender();
+    /**
+     * A SILENT SAVE DOES NOT REBUILD THE VIEW AT ALL.
+     *
+     * MEASURED (1.31.0 dev, `three-times-test`), two attempts and two failures:
+     *   1. `rerender()` straight away rebuilt the form while the pointer was on its way to the next control -
+     *      "Element is not attached to the DOM", "<html> intercepts pointer events".
+     *   2. deferring it to `afterCurrentInteraction` only moved the problem: the render then landed on the NEXT
+     *      control's mouseup and detached the element that click was aimed at.
+     *
+     * Both are the fault this project already documented in 1.24.0 - a rebuild under the pointer swallows the click -
+     * and the conclusion is that an AUTOMATIC save must not touch the DOM. There is nothing for it to draw: the form
+     * already shows exactly what the user typed, and the tick and the armed-time notice belong to the Save button, which
+     * the user pressed deliberately.
+     *
+     * So the silent save writes storage and arms the alarm, and leaves the view alone. The explicit save still
+     * re-renders immediately, because pressing it IS the end of the interaction.
+     */
+    if (!opts.silent) rerender();
     return true;
   };
 
@@ -2074,7 +2170,7 @@ function afterCurrentInteraction(fn) {
   setTimeout(run, 250);   // a blur with no click behind it must still refresh, and promptly
 }
 
-function timeField({ value, placeholder, onCommit, onHint, rerender }) {
+function timeField({ value, placeholder, onCommit, onHint, rerender, onEdit }) {
   /**
    * A MASKED FIELD. It holds a run of DIGITS; the colons are drawn.
    *
@@ -2097,7 +2193,22 @@ function timeField({ value, placeholder, onCommit, onHint, rerender }) {
     placeholder: placeholder ?? 'HH:MM:SS',
     autocomplete: 'off',
     spellcheck: 'false',
-    maxlength: '8',
+    /**
+     * TWELVE, NOT EIGHT.
+     *
+     * MEASURED (user report, on 1.21.0 but still present in 1.31.0): "باگ اول کمتر از ثانیه نمیذاره انتخاب کنم و
+     * نمیتونم میلی ثانیه اضافه کنم" - they could not enter a fraction of a second.
+     *
+     * `HH:MM:SS` is eight characters and `HH:MM:SS.mmm` is twelve, so with `maxlength: 8` the browser REFUSED the
+     * seventh character and the fraction was unreachable by typing. The mask accepts nine DIGITS, which is three more
+     * than this attribute allowed.
+     *
+     * The panel's own tests missed it because they used `keyboard.insertText()`, which sets the value through the
+     * `input` event and is not subject to `maxlength` - the same class of blind spot as `element.click()` skipping
+     * hit-testing. `probe-maxlength.mjs` types one keystroke at a time, which is what a person does, and it reproduced
+     * the refusal immediately.
+     */
+    maxlength: '12',
     /**
      * Only digits are let through, and the caret is placed in DIGIT space.
      *
@@ -2111,6 +2222,9 @@ function timeField({ value, placeholder, onCommit, onHint, rerender }) {
       try { e.target.setSelectionRange(caret, caret); } catch { /* not focusable */ }
       onCommit(formatted, { rerender: false });
       if (onHint) onHint(countTimeParts(formatted) > 2);
+      // a keystroke IS a change to the form: without this the auto-save was never armed by a typed time, which is the
+      // most common edit there is
+      if (onEdit) onEdit();
     },
     /**
      * BACKSPACE IS HANDLED IN DIGIT SPACE, and this is the part that has to be explicit.
@@ -2168,6 +2282,7 @@ function timeField({ value, placeholder, onCommit, onHint, rerender }) {
        * to nothing - "I type a time, click Add a point, and nothing happens". Nothing is lost by waiting, because the
        * model was already written above.
        */
+      if (onEdit) onEdit();
       afterCurrentInteraction(() => onCommit(formatted, { rerender: true }));
     },
     onchange: (e) => onCommit(formatTimeDigits(e.target.value), { rerender: false }),

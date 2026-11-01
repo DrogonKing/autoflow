@@ -1,64 +1,57 @@
-> ## ⚠️ BETA — several times, each with its own points
+> ## ⚠️ BETA — three fixes you reported
 >
-> This build adds a feature that changes the shape of the Basic tab. Everything below is verified in a controlled
-> browser, **not against a real trading site yet**.
+> All three reports in your log are addressed. Verified in a controlled browser with **real keystrokes**, not against a
+> real trading site yet. Please test with a target you do not mind missing.
 >
-> - the Basic tab still shows ONE time and its points, as before
-> - under "+ Add a point" there is now "+ New time"
-> - each time keeps its own points, and each is a separate automation with its own alarm
->
-> Please test with a target you do not mind missing. If anything misbehaves, the previous stable release is still
-> available.
+> **Your log was from 1.21.0**, so two of the three needed reproducing on the current build first — one of them did not
+> exist in the form you saw it in, and the other was worse than reported.
 
-## What is new in 1.31.0
+## Your three reports
 
-**Several times, each with its own points.** The Basic tab used to hold one time and all the points. It now holds a list
-of times, each with the points that belong to it:
+**۱. «کمتر از ثانیه نمیذاره انتخاب کنم و نمیتونم میلی ثانیه اضافه کنم»**
+
+Real, and present in the current build too. The field had `maxlength="8"`, which is exactly `HH:MM:SS` — while
+`HH:MM:SS.mmm` needs **twelve** characters. The browser refused the seventh character, so the fraction was unreachable
+by typing.
+
+My own millisecond test passed because it used `keyboard.insertText()`, which sets the value through the `input` event
+and is not subject to `maxlength`. That is the same blind spot as `element.click()` skipping hit-testing, which this
+project has been bitten by before. The new test types one keystroke at a time.
 
 ```
-09:00:00.000   ← open, with its own points
-09:01:00.000   ← one press of "+ New time", starts with one empty point
+before: maxlength="8"   typing 9 digits → "09:00:00.135"
+after:  maxlength="12"  typing 9 digits → "13:50:01.500"
 ```
 
-Each time is **one automation behind the scenes**, because a schedule is one alarm and one alarm is one automation. The
-run engine, the history, the run lock and the "did it arm?" diagnostics are all untouched.
+**۲. «فقط زمان اولی رو شلیک کرد و pickهای زمان دوم و سوم شلیک نشدن»**
 
-The list is ordered by **when each time next fires**, not by the clock face, so 23:50 appears before 00:10.
+Reproduced as a real fault, and worse than the report: after a save the panel held **two different pictures of your
+work** — three rows in the working copy and one record in the draft. Any later render could rebuild the rows from the
+draft, produce a single row, and drop the points you had picked into the others.
 
-## Fixed in this build
+Now the rows are re-seeded from storage after a save — but only when **every** time was actually stored. The first
+version of that fix re-seeded unconditionally and was worse: with three times where only the first had a point, the
+other two vanished from the form while you were still working on them.
 
-Two genuine faults that the existing suites caught, both of which would have broken the panel for everyone:
+**۳. Auto-save**
 
-- **A pick landed but the selector stayed empty.** The points moved into the per-time lists, and the pick listener was
-  still searching the old one. `__pickDebug` reported `found: true` while writing to an orphaned object — the pick was
-  applied, to the wrong copy. Found by `time-survives-pick-test`.
-- **A save with no usable point reported success.** The single-time path filtered empty points before saving; the new
-  path did not, so `steps.length` was 1 instead of 0 and the "at least one point" refusal never fired. Found by
-  `save-button-test`.
+Added, as asked. A change to the form saves itself **1.2 seconds after you stop editing** — add, delete, reorder,
+retype, pick.
 
-## The import check was repaired
-
-`tests/worker-imports.test.js` had four separate holes, and between them two real `ReferenceError`s reached the browser
-and blanked the panel:
-
-| hole | effect |
-|---|---|
-| `Map.has()` instead of `.get()` | the "declared here" guard was never true |
-| `relative()` called, never defined | the test threw the first time it found anything |
-| every word inside a string counted as declared | a missing import was invisible if the name appeared in UI text |
-| the object-key rule matched `${` | a call inside a template interpolation was never seen |
-| the assertion named three historical identifiers | everything else was printed and **passed** |
-
-It is now `scripts/check-imports.mjs`, run directly in CI as well as through the suite, and proven by four cases: clean,
-and each fault reintroduced.
+- It is the **same save the button runs**, not a lighter second path that could disagree about which points were stored.
+- It **never rebuilds the view**. Two attempts at re-rendering both detached the element the pointer was moving toward —
+  "Element is not attached to the DOM" — which is the fault you reported in 1.24.0. An automatic save has nothing to
+  draw: the form already shows what you typed.
+- A time with no point yet is **not** an error, so merely typing a time does not raise "at least one point is needed".
+- The Save button still works, and still shows you the armed time.
 
 ## Verified
 
 ```
-772 unit tests · 39 files
-33 browser suites green · 0 red · 1 known load flake · 1 needs a window manager
-ui-basic 25/25 · events-ui 9/9 · time-survives-pick 6/6 · pick-confirm 10/10
-save-button 12/12 · e2e 28/28 · firefox 31/31 · lite-build 4/4
+11/11  three-times: milliseconds by real typing, three times each with a point,
+       auto-save with no Save press, survival across a reopen, independent targets
+774    unit tests, 39 files
+31+    browser suites green, 0 red; 3 known load flakes, all green on rerun
 ```
 
 ## Install
