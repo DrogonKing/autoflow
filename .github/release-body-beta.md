@@ -1,57 +1,73 @@
-> ## ⚠️ BETA — a time can now be deleted
+> ## ⚠️ BETA — each time now finds its own page
 >
-> The delete control you asked for, and the four bugs behind its absence. Verified in a controlled browser, **not against
-> a real trading site yet**.
+> Your log showed the two faults precisely. Both are fixed. Verified in a controlled browser, **not against a real
+> trading site yet**.
 
 ## Your report
 
-> «چرا دکمه حذف زمان وجود نداره؟ مثلا من یه زمان سومی اضافه کردم بعد پشیمون شدم و میخوام حذفش کنم ولی دکمش نیست»
+> «سه تا زمان هرکدوم سه تا pick فقط زمان اولیه pickهاش فعال شد»
 
-`removeEvent()` existed in the code from the day the feature shipped and **was never called from the panel**. Nothing
-failed, because every test asked the questions I had thought to ask — that a time can be *added*, that its points survive,
-that the times come back after a reopen. Nobody asked whether one can be taken away.
-
-**Now:** a small ✕ sits on each time chip, next to the time. The last remaining time has no ✕ at all, rather than one
-that refuses — a form with no time has nothing to show and no way back.
-
-## Why a delete turned out to be four bugs, not one control
-
-Adding the button exposed faults that would have bitten you later, in this order:
-
-**۱. Deleting a time left its record and its alarm behind.**
-The removal set was computed from a list the panel refreshes lazily. A deleted time kept firing on its own. The save now
-asks the worker what is actually stored before deciding what to remove.
-
-**۲. Deleting the FIRST time renumbered the others.**
-Ids were derived from position in the list (`-t2`, `-t1`), so removing the first time renamed the second one — and an
-alarm is registered against an id (`autoflow:run:<id>`), so a pending alarm silently began pointing at a **different**
-time. Ids now belong to the time itself. Measured: the survivors kept `basic-new1` instead of being relabelled.
-
-**۳. Then the *wrong* time was deleted.**
-Because position decided the id, `merge()` forced the base id onto whichever time happened to be first. So deleting the
-09:00 time sent `delete-automation:basic-new1` — it deleted the time you KEPT, and left the one you removed. The trace
-showed it plainly:
+Your own export said why, exactly:
 
 ```
-you removed  basic       (09:00)
-panel sent   delete basic-new1   ← the one you kept
-storage kept basic@9:00          ← the one you removed
+basic       FIRED   tab-from-memory  …/autoflow-test-field (4).html     ← ran
+basic-new1  step-error   "this automation has never had an element picked in it, so a scheduled run has no page"
+basic-new2  step-error   (same)
 ```
 
-**۴. A deleted time came back after a reload.**
-The deletion waited on the 1.2-second auto-save, so reloading sooner restored it. A deletion is one deliberate act with
-nothing to collapse, so it saves immediately; and it cancels any save that was already queued, because that queued save
-still carried the old list.
+and `lastPickPages` held **one** entry, `basic`.
+
+## ۱. Every pick filed its page under the first time
+
+The pick handler attached the page to `state.basic.id`, and that is **always** `basic` — so a pick made in time two or
+three recorded its page against time one. Each time becomes its own automation, so each needs its own remembered page.
+The page now belongs to the time whose point was picked:
+
+```
+before:  lastPickPages: {"basic": "http://…/"}
+after:   lastPickPages: {"basic": "http://…/", "basic-new1": "http://…/", "basic-new2": "http://…/"}
+```
+
+## ۲. A failing time fired three times in two seconds
+
+From your log:
+
+```
+18:45:05.517  FIRED       basic-new1
+18:45:05.528  RE-ARMED    basic-new1  for 18:45:07.000
+18:45:06.534  FIRED       basic-new1      ← again
+18:45:07.551  FIRED       basic-new1      ← and again
+```
+
+The alarm is armed **1500 ms before** its target (that is what makes the sub-second timing work), so re-arming from
+"the target + 1 ms" produced an alarm whose moment was already in the past — and Chrome fires a past alarm immediately.
+Three firings, and the very second the target was aiming at got consumed.
+
+It now asks from a point that leaves room for that margin, so the re-arm lands in the future. Measured after the fix:
+**one firing** where there were three.
+
+## New tests, because the old ones could not see either fault
+
+```
+per-time-pick-page-test   8/8    three times, each picked with a MOUSE, each with its own page
+alarm-storm-live-test     2/2    a failing run fires once, not three times in two seconds
+```
+
+`three-times-test` passed throughout this — because it typed selectors by hand, and the page is only recorded by a real
+**Pick**. That is why the fault survived a release: the test covered the feature without covering the path.
+
+## Also worth knowing
+
+An alarm set for less than ~30 seconds ahead fires **immediately** in Chrome — a platform behaviour, not a bug. If you
+set a time a few seconds away for testing, expect it to go at once; a real target is minutes away.
 
 ## Verified
 
 ```
-remove-time-test     15/15   the report: a third time added, then removed.
-                             The right time goes, the others stay, the record is gone from
-                             storage, the removal survives a reload, and the last time has
-                             no delete control
+per-time-pick-page 8/8 · alarm-storm-live 2/2
+previous suites still green: three-times 11/11, pick-digits 21/21, remove-time 15/15
 776 unit tests, 39 files
-34 browser suites green, 0 red
+36 browser suites green, 0 red, 1 known load flake, 1 needing a window manager
 ```
 
 ## Install

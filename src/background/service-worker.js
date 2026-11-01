@@ -1051,9 +1051,26 @@ api.alarms.onAlarm.addListener(async (alarm) => {
          * guard refuses to re-arm at all if that computation lands back in the past, so no arithmetic mistake here can
          * ever produce a storm again.
          */
+        /**
+         * ASK FROM THE FAILED TARGET, AND NEVER RE-ARM A MOMENT THAT IS ALREADY IN THE PAST.
+         *
+         * MEASURED (your log, 1.34.0): `basic-new1` fired at 18:45:05.517, re-armed for its 18:45:07.000 target, and fired
+         * again at 18:45:06.534 - then again at 18:45:07.551. Three firings inside two seconds, and the reason is that
+         * `scheduleOne` arms PRECISE_WAKE_MS (1500ms) EARLY:
+         *
+         *     18:45:07.000 target, armed at 18:45:05.500  <- already in the past when the re-arm ran at 18:45:05.528
+         *
+         * so the alarm was created with a time behind `now` and Chrome fired it immediately. `attemptedTarget + 1` is not
+         * enough, because the wake happens a whole margin before the target it is aiming at.
+         *
+         * `Math.max(after, Date.now())` did not help either: `after` is the target, which is still ahead, and
+         * `scheduleOne` then subtracts the margin again. The fix is to ask from a point that leaves room for the margin,
+         * so the arm lands in the future.
+         */
+        const margin = Math.min(await startLatencyMs() + PRECISE_WAKE_MS, 20_000);
         const after = Number.isFinite(attemptedTarget) ? attemptedTarget + 1 : Date.now();
-        // the same rule as the post-run path: the occurrence that just failed is behind us, so ask for the NEXT one
-        const armed = await scheduleOne(again, { now: Math.max(after, Date.now()), preferNext: true });
+        const askedFrom = Math.max(after, Date.now() + margin);
+        const armed = await scheduleOne(again, { now: askedFrom, preferNext: true });
         if (!armed?.scheduled || (armed.target ?? armed.at) <= Date.now()) {
           recordEvent({ kind: 'arm-skipped', automationId: id, note: 'the next occurrence did not resolve to the future' });
         } else {

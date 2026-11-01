@@ -3268,7 +3268,29 @@ api.runtime.onMessage.addListener((msg) => {
        * `msg.url` is supplied by the content script; when it is absent the panel asks the worker for the tab it picked
        * in, so an older content script cannot silently drop the record.
        */
-      const target = inBasic ? state.basic : state.editing;
+      /**
+       * THE PAGE IS REMEMBERED FOR THE TIME THE POINT BELONGS TO, NOT FOR THE FIRST ONE.
+       *
+       * MEASURED (your log, 1.34.0): "سه تا زمان هرکدوم سه تا pick فقط زمان اولیه pickهاش فعال شد". One time ran; the other
+       * two refused with
+       *
+       *     "this automation has never had an element picked in it, so a scheduled run has no page"
+       *
+       * and `lastPickPages` held a single entry, `basic`. The cause was here: the page was attached to
+       * `inBasic ? state.basic : state.editing`, and `state.basic.id` is ALWAYS `basic` - so every pick, whichever time
+       * it was made in, filed the page under the first record. Times two and three were stored with their points but with
+       * no page of their own, so a scheduled run had nowhere to go.
+       *
+       * `eventsToStore` turns each time into its own automation, so each needs its own remembered page. The owner is the
+       * event whose step list contains the step that was picked.
+       */
+      let target = null;
+      if (inBasic) {
+        const owner = (state.basicEvents ?? []).find((ev) => (ev.steps ?? []).some((s) => s === step || s.id === step.id));
+        target = { id: owner?.id ?? state.basic?.id ?? BASIC_ID };
+      } else {
+        target = state.editing;
+      }
       if (target?.id) {
         const pageUrl = msg.url ?? state.pickPageUrl ?? null;
         if (typeof pageUrl === 'string') {
@@ -3339,7 +3361,17 @@ api.runtime.onMessage.addListener((msg) => {
          * it is recorded against the automation that owns the step, exactly as it is for a pick that found its own
          * step (bug C8).
          */
-        const ownerId = state.tab === 'basic' ? (state.basic?.id ?? BASIC_ID) : state.editing?.id;
+        /**
+         * SAME RULE AS ABOVE: the page belongs to the TIME the adopted point sits in.
+         *
+         * This path had the same fault - `state.basic.id` for every time - so an adopted pick in time two or three also
+         * filed its page under the first record. `single` is the point, and the event that holds it is the owner.
+         */
+        let ownerId = state.editing?.id;
+        if (state.tab === 'basic') {
+          const owner = (state.basicEvents ?? []).find((ev) => (ev.steps ?? []).some((s) => s === single || s.id === single.id));
+          ownerId = owner?.id ?? state.basic?.id ?? BASIC_ID;
+        }
         if (ownerId && typeof msg.url === 'string') {
           send({ type: 'remember-pick-page', automationId: ownerId, url: msg.url }).catch(() => {});
         }
