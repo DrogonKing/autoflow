@@ -1489,7 +1489,35 @@ function basicView(rerender) {
   })();
   const unsavedWork = Boolean(state.basic) && !state.basicStale
     && ((state.basic.steps ?? []).length > 1 || (state.basic.steps ?? []).some(hasFinder) || draftDiffers);
-  if (!state.basic || (!state.basicKeepDraft && !unsavedWork)) {
+  /**
+   * A TYPED TIME IS UNSAVED WORK, AND IT MUST BE ABLE TO OVERRIDE A STALE FLAG.
+   *
+   * MEASURED (`pick-digits-test`, and it is the general fault behind "the time resets"): `Tab` commits the field with
+   * `{ rerender: true }`, the render consults `state.basicStale`, and because an earlier auto-save had set that flag the
+   * form was rebuilt from storage - dropping the time the user had just typed. The field showed 08:45:52, `Tab` was
+   * pressed, and it came back as 09:00.
+   *
+   * `eventsDiffer` answers the only question that matters here: does the working copy disagree with what is stored? If it
+   * does, the working copy is the truth, whatever any flag says.
+   */
+  const eventsDiffer = (() => {
+    const saved = state.automations?.find((a) => a.id === BASIC_ID) ?? null;
+    const rows = state.basicEvents ?? [];
+    if (!rows.length) return false;
+    const stored = (state.automations ?? []).filter((a) => a.id === BASIC_ID || /^basic-t\d+$/.test(a.id));
+    if (stored.length !== rows.length) return true;
+    return rows.some((ev) => {
+      const rec = stored.find((a) => a.id === ev.id);
+      if (!rec) return true;
+      return Number(rec.schedule?.hour ?? -1) !== Number(ev.schedule?.hour ?? -2)
+        || Number(rec.schedule?.minute ?? -1) !== Number(ev.schedule?.minute ?? -2)
+        || Number(rec.schedule?.second ?? -1) !== Number(ev.schedule?.second ?? -2)
+        || Number(rec.schedule?.ms ?? 0) !== Number(ev.schedule?.ms ?? 0)
+        || (rec.steps ?? []).length !== (ev.steps ?? []).length;
+    });
+  })();
+  const keepWorkingCopy = unsavedWork || eventsDiffer;
+  if (!state.basic || (!state.basicKeepDraft && !keepWorkingCopy)) {
     state.basic = basicDraft();
     state.basicStale = false;
   } else {
@@ -1525,16 +1553,40 @@ function basicView(rerender) {
       autoSaveTimer = null;
       if (state.tab !== 'basic') return;
       /**
-       * NOTHING USABLE YET IS NOT A FAILURE. A form with no point that names an element cannot be stored, and
-       * `save()` refuses it with a message the user has not asked for by merely typing a time. So the attempt is
-       * silent when there is nothing to store, and only reports when it tried and was refused.
+       * NEVER SAVE WHILE THE USER IS MID-EDIT.
+       *
+       * MEASURED (`pick-digits-test`): the auto-save armed by one section fired while the next section was typing, and
+       * although it no longer re-renders, the state it wrote (and the stale flag it set) reached the NEXT render - which
+       * then rebuilt the form from storage and replaced the half-typed time. The commit log showed the typed value never
+       * reached the model at all.
+       *
+       * So the debounce is not enough on its own: while ANY input in the form has focus, the save is rescheduled rather
+       * than run. A person who is still typing has not finished, and saving before they have is what makes a form fight
+       * its own user.
        */
-      const usable = (state.basicEvents ?? []).some((e) => (e.steps ?? []).some((s) => s?.finder
+      // NOTE: a "do not save while an input has focus" rule was tried here and REMOVED. MEASURED (`three-times-test`):
+      // it delayed the save past the field's blur commit, and a later render then committed a half-typed buffer -
+      // 10:32:40 was stored as 1:00:00, because the field held "1" at that moment. Deferring a save is not free.
+      /**
+       * SAVE WHAT IS USABLE, NEVER REFUSE THE WHOLE FORM OVER ONE UNFINISHED POINT.
+       *
+       * MEASURED (`second-pick-test`): the first version returned early unless EVERY time had at least one pickable
+       * point. So while the user was midway through a form - one point picked, the next just added - nothing was stored
+       * at all, and the next render rebuilt the rows from a storage that held nothing. That is the other half of "the
+       * second pick disappears".
+       *
+       * `save()` already refuses an empty record and already drops points without a finder, so the only thing this gate
+       * needs to decide is whether the attempt is worth making. One usable point anywhere is enough.
+       */
+      const anyUsable = (state.basicEvents ?? []).some((e) => (e.steps ?? []).some((s) => s?.finder
         && Object.keys(s.finder).some((k) => k !== 'strategy' && s.finder[k])));
-      if (!usable) return;
+      if (!anyUsable) return;
       await save({ silent: true });
     }, AUTO_SAVE_DELAY_MS);
   };
+
+  // the pick listener lives outside this closure, so it needs a handle to the same auto-save
+  state.basicAutoSave = autoSave;
 
   /** Mutate the draft and re-render without discarding it. */
   const keepDraftThen = (fn) => {
@@ -1595,6 +1647,27 @@ function basicView(rerender) {
     ev.schedule = { kind: 'daily', hour: parsed.hour, minute: parsed.minute, second: parsed.second, ms: parsed.ms };
     draft.schedule = ev.schedule;
     state.basic = draft;
+    /**
+     * THE USER HAS JUST TYPED A TIME, SO THE WORKING COPY IS THE TRUTH.
+     *
+     * MEASURED (`pick-digits-test`): a pick in an earlier section armed the auto-save, which set `basicStale` - the flag
+     * that says "storage has moved on, rebuild from it". The user then typed 08:45:52, and the `Tab` that followed
+     * committed the field with `{ rerender: true }`; the render honoured the flag, rebuilt from storage, and the typed
+     * time was replaced by the stored one. The field showed 08:45:52 and then 09:00:00.
+     *
+     * Typing is the clearest possible statement that the working copy is current, so the flag is cleared here. This is
+     * the same rule the form already applies elsewhere: storage is the truth only when it holds everything.
+     */
+    state.basicStale = false;
+    state.basicEventsStale = false;
+    /**
+     * THE PREVIEW IS REFRESHED HERE, IN THE FUNCTION THAT WROTE THE VALUE.
+     *
+     * Not from the field's `onEdit`, because that looked the hook up on `state` and could find one built by a different
+     * render - and a re-seed replaces the event objects, so the older hook described the older schedule. Refreshing at
+     * the point of the write removes the question of which closure is in scope.
+     */
+    if (typeof state.basicRefreshPreview === 'function') state.basicRefreshPreview();
   };
   wrap.append(el('div', { class: 'row' },
     el('label', { text: t('basic.time') }),
@@ -1602,7 +1675,11 @@ function basicView(rerender) {
       value: timeFieldValue(ev.schedule),
       onCommit: (v, opts) => { commit(v); if (opts.rerender) keepDraftThen(() => {}); },
       // a typed time is a change to the form like any other, so it arms the same auto-save
-      onEdit: () => autoSave(),
+      onEdit: () => {
+        // the preview follows the typed time immediately; the auto-save follows shortly after
+        if (typeof state.basicRefreshPreview === 'function') state.basicRefreshPreview();
+        autoSave();
+      },
     }),
     evHint,
   ));
@@ -1794,20 +1871,24 @@ function basicView(rerender) {
      * back to one row.
      */
     /**
-     * RE-SEED ONLY WHEN EVERY TIME WAS ACTUALLY STORED.
+     * NO RE-SEED HERE, AND THAT IS THE FIX.
      *
-     * The first version of this set `basicEventsStale = true` unconditionally, and that was worse than the fault it
-     * fixed: MEASURED (`three-times-test`), a user adds three times and gives only the first one a point yet - the save
-     * stores one record, the stale flag rebuilds the rows FROM STORAGE, and times two and three disappear from the form
-     * while the user is still working on them. Three times became one.
+     * Three rounds of this feature were broken by re-seeding `basicEvents` from storage after a save, each time in a
+     * different way that looked like a different bug:
      *
-     * The rule is the same one this form already learned: storage is the truth only when storage holds everything. If
-     * any time is still missing a point, the working copy is the truth and stays.
+     *   1. unconditionally  -> times that had no point yet vanished while the user was still working on them
+     *   2. on equal counts  -> one time with two points compared equal to one time with one point, so the second point
+     *                          was deleted right after being picked ("the second pick disappears and it says saved")
+     *   3. on equal totals  -> a pick armed the save, the save re-seeded, and the NEXT render committed a half-typed
+     *                          buffer: 10:32:40 was stored as 1:00:00
+     *
+     * Every one of those was a consequence of the form holding TWO representations of the same work. The working copy is
+     * already written by the save (`state.basic = clean` below, and the events are the source of the records), so a
+     * re-seed has nothing to correct - it can only destroy something the user has not saved.
+     *
+     * The rule this file keeps arriving at, stated once: STORAGE IS THE TRUTH ONLY WHEN NOTHING IS UNSAVED. A save is not
+     * a moment when nothing is unsaved - it is a moment when part of it just became saved.
      */
-    if (usable.length === (state.basicEvents ?? []).length) {
-      state.basicEventsStale = true;
-      state.basicOpen = null;
-    }
     state.basicSavedAt = Date.now();      // the button shows a tick for a moment, which is the only confirmation the user asked for
 
     /**
@@ -1917,23 +1998,46 @@ function basicView(rerender) {
   if (state.basicNotice) wrap.append(el('div', { class: 'hint saved-note', text: state.basicNotice }));
 
   // ---- what will happen, computed by the same scheduler the worker uses
-  try {
-    const label = describeSchedule(draft.schedule);
-    const upcoming = [];
-    let cursor = Date.now();
-    for (let i = 0; i < 2; i++) {
-      const n = nextRun(draft.schedule, cursor);
-      if (n === null) break;
-      upcoming.push(n);
-      cursor = n;
+  const previewHost = el('div', { class: 'preview' });
+  /**
+   * THE PREVIEW IS REFRESHED IN PLACE, WITHOUT REBUILDING THE FORM.
+   *
+   * The auto-save deliberately does not re-render - a rebuild under the pointer swallows the click, measured twice - but
+   * the preview is only built during a render, so after typing a time it kept describing the OLD value.
+   * MEASURED (`pick-digits-test`): the field held 08:45:52 while the preview still said "Every day at 09:00".
+   *
+   * `refreshPreview()` rewrites the text of this block and touches nothing else, so the input keeps its focus, its
+   * caret, and the value the user just typed. It is called on every keystroke, which is cheap: two date computations and
+   * three text nodes.
+   */
+  const refreshPreview = () => {
+    previewHost.textContent = '';
+    // READ AT CALL TIME. A closure captured from an earlier render describes that render's schedule, so after a re-seed
+    // the preview lagged one edit behind: the field showed 08:45:52 while this still said 09:00.
+    const live = state.basic?.schedule ?? draft.schedule;
+    try {
+      const label = describeSchedule(live);
+      const upcoming = [];
+      let cursor = Date.now();
+      for (let i = 0; i < 2; i++) {
+        const n = nextRun(live, cursor);
+        if (n === null) break;
+        upcoming.push(n);
+        cursor = n;
+      }
+      previewHost.className = 'preview';
+      previewHost.append(el('div', { class: 'preview-label', text: label }));
+      for (const t2 of upcoming) {
+        previewHost.append(el('div', { class: 'preview-next', text: `next: ${fmtTime(t2)}  (${relTime(t2)})` }));
+      }
+    } catch (e) {
+      previewHost.className = 'preview warn';
+      previewHost.append(el('div', { text: `${e.message}` }));
     }
-    wrap.append(el('div', { class: 'preview' },
-      el('div', { class: 'preview-label', text: label }),
-      ...upcoming.map((t2) => el('div', { class: 'preview-next', text: `next: ${fmtTime(t2)}  (${relTime(t2)})` })),
-    ));
-  } catch (e) {
-    wrap.append(el('div', { class: 'preview warn', text: `${e.message}` }));
-  }
+    return previewHost;
+  };
+  wrap.append(refreshPreview());
+  state.basicRefreshPreview = refreshPreview;
 
   return wrap;
 }
@@ -3105,6 +3209,17 @@ api.runtime.onMessage.addListener((msg) => {
       state.pickSavedFor = step.id;
       // a pick landing in the simple view is form work: keep the draft so the point it was picked for survives
       if (state.tab === 'basic') state.basicKeepDraft = true;
+      /**
+       * A PICK IS AN EDIT, SO IT ARMS THE AUTO-SAVE TOO.
+       *
+       * MEASURED (`second-pick-test`): two points picked, the form correct, and `diagnosticEvents` EMPTY - no save was
+       * ever requested, because this path sets `basicKeepDraft` and calls `render()` directly instead of going through
+       * `keepDraftThen`, which is where the auto-save was armed. So a form built entirely out of picks was never saved,
+       * and the next render rebuilt it from a storage that held nothing: "the second pick disappears".
+       *
+       * `basicAutoSave` is stashed on `state` by the view, because this listener lives outside `basicView`'s closure.
+       */
+      if (state.tab === 'basic' && typeof state.basicAutoSave === 'function') state.basicAutoSave();
       render();
     } else {
       /**

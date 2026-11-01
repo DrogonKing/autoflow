@@ -1,71 +1,68 @@
-> ## ⚠️ BETA — three fixes you reported
+> ## ⚠️ BETA — the second pick no longer disappears
 >
-> All three reports in your log are addressed. Verified in a controlled browser with **real keystrokes**, not against a
-> real trading site yet. Please test with a target you do not mind missing.
->
-> **Your log was from 1.21.0**, so two of the three needed reproducing on the current build first — one of them did not
-> exist in the form you saw it in, and the other was worse than reported.
+> **This one is my fault, and it took three attempts.** The auto-save I added in 1.32.0 introduced a re-seed that
+> deleted work you had not saved yet. All three of its shapes are described below so you know what to watch for.
 
-## Your three reports
+## What you reported
 
-**۱. «کمتر از ثانیه نمیذاره انتخاب کنم و نمیتونم میلی ثانیه اضافه کنم»**
+> «چرا وقتی pick دوم رو میزنم و تارگت رو انتخاب میکنم کلا pick دوم حذف میشه و مینویسه saved»
 
-Real, and present in the current build too. The field had `maxlength="8"`, which is exactly `HH:MM:SS` — while
-`HH:MM:SS.mmm` needs **twelve** characters. The browser refused the seventh character, so the fraction was unreachable
-by typing.
+Reproduced exactly, and the cause was the save path I added last release — not the Pick machinery.
 
-My own millisecond test passed because it used `keyboard.insertText()`, which sets the value through the `input` event
-and is not subject to `maxlength`. That is the same blind spot as `element.click()` skipping hit-testing, which this
-project has been bitten by before. The new test types one keystroke at a time.
+## Why it happened
 
-```
-before: maxlength="8"   typing 9 digits → "09:00:00.135"
-after:  maxlength="12"  typing 9 digits → "13:50:01.500"
-```
+The form keeps the times and points you are editing in a **working copy**, and after a save I re-seeded that copy from
+storage. Three versions of that re-seed, three faults:
 
-**۲. «فقط زمان اولی رو شلیک کرد و pickهای زمان دوم و سوم شلیک نشدن»**
+| the re-seed ran… | what it did |
+|---|---|
+| always | times with no point yet vanished while you were still working on them |
+| when the number of times matched | one time with two points looked equal to one time with one point — so the second point was deleted right after you picked it. **This is the bug you reported.** |
+| when the number of points matched | a pick armed the save, the save re-seeded, and the next render committed a half-typed buffer: `10:32:40` was stored as `1:00:00` |
 
-Reproduced as a real fault, and worse than the report: after a save the panel held **two different pictures of your
-work** — three rows in the working copy and one record in the draft. Any later render could rebuild the rows from the
-draft, produce a single row, and drop the points you had picked into the others.
+Every one is the same mistake: the form held **two representations of the same work**, and the re-seed could only ever
+destroy the one you had not saved yet.
 
-Now the rows are re-seeded from storage after a save — but only when **every** time was actually stored. The first
-version of that fix re-seeded unconditionally and was worse: with three times where only the first had a point, the
-other two vanished from the form while you were still working on them.
+**The re-seed is gone.** The save already writes the working copy, so it had nothing to correct. One rule now holds
+everywhere in that form: *storage is the truth only when nothing is unsaved* — and a save is not such a moment, it is
+the moment part of the work just became saved.
 
-**۳. Auto-save**
+## Also fixed in this build
 
-Added, as asked. A change to the form saves itself **1.2 seconds after you stop editing** — add, delete, reorder,
-retype, pick.
+**Persian and Arabic digits could be lost on `Tab`.** You type ۰۸:۴۵:۵۲, the field shows 08:45:52, and pressing Tab
+brought back 09:00 — because a stale flag from an earlier save let the render rebuild the form from storage and
+discard the typed value. Typing now clears that flag, since typing is the clearest statement that the form is current.
 
-- It is the **same save the button runs**, not a lighter second path that could disagree about which points were stored.
-- It **never rebuilds the view**. Two attempts at re-rendering both detached the element the pointer was moving toward —
-  "Element is not attached to the DOM" — which is the fault you reported in 1.24.0. An automatic save has nothing to
-  draw: the form already shows what you typed.
-- A time with no point yet is **not** an error, so merely typing a time does not raise "at least one point is needed".
-- The Save button still works, and still shows you the armed time.
+**The schedule preview follows the typed time again.** It only updated during a full render, and the auto-save
+deliberately does not re-render, so the preview lagged one edit behind.
+
+**A pick now arms the auto-save.** The Pick path set its own flag and called `render()` directly instead of going
+through the helper the auto-save was attached to, so a form built entirely out of picks was never saved automatically.
 
 ## Verified
 
 ```
-11/11  three-times: milliseconds by real typing, three times each with a point,
-       auto-save with no Save press, survival across a reopen, independent targets
-774    unit tests, 39 files
-31+    browser suites green, 0 red; 3 known load flakes, all green on rerun
+three-times-test      11/11   milliseconds by real typing, three times each with a
+                              point, auto-save with no Save press, survival across a reopen
+second-pick-test       5/5    the reported bug: two points, two picks, both kept, distinct
+                              targets, both in storage
+pick-digits-test      21/21   Persian and Arabic numerals, typed as keystrokes
+ui-basic-test         25/25   ·  pick-confirm 10/10  ·  time-survives-pick 6/6
+774 unit tests, 39 files
+34 browser suites green, 0 red; 2 known load flakes, both green on rerun
 ```
 
 ## Install
 
-**Chrome / Edge / Brave / Opera** — download `autoflow-chrome.zip`, unpack it, then `chrome://extensions` → enable
-Developer mode → **Load unpacked** → pick the unpacked folder.
+**Chrome / Edge / Brave / Opera** — download `autoflow-chrome.zip`, unpack it, then
+`chrome://extensions` → enable Developer mode → **Load unpacked** → pick the unpacked folder.
 
 **Firefox** — download `autoflow-firefox.zip`, unpack it, then `about:debugging#/runtime/this-firefox` → **Load
 Temporary Add-on** → pick `manifest.json` inside the folder.
 
 **Lite builds** (`autoflow-chrome-lite.zip`, `autoflow-firefox-lite.zip`) — the same release with the Basic tab only.
-They install BESIDE the full build and are named "… Lite" so the two are distinguishable in `chrome://extensions`.
+They install BESIDE the full build and are named "… Lite" so the two are distinguishable.
 
 ## If you are upgrading
 
-Take a backup first, on the Data tab. Automations restored from a backup arrive **disabled** on purpose, so a restore
-cannot start clicking before you have looked at it.
+Take a backup first, on the Data tab. Automations restored from a backup arrive **disabled** on purpose.

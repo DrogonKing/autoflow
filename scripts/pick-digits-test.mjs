@@ -299,6 +299,9 @@ console.log('\n--- 4. PERSIAN DIGITS in the time field reach the model ---');
     return t.slice(0, 3);
   });
   console.log(`  preview after typing Persian digits: ${JSON.stringify(model)}`);
+  console.log('  commit log :', JSON.stringify(await panel.evaluate(() => window.__commitLog ?? null)));
+  console.log('  preview log:', JSON.stringify(await panel.evaluate(() => window.__previewLog ?? null)));
+  console.log('  field now  :', JSON.stringify(await panel.evaluate(() => document.querySelector('input.time-input')?.value ?? null)));
   check('the model accepted a time typed in Persian digits',
     model.some((m) => /08:45/.test(m)), JSON.stringify(model));
 
