@@ -1,85 +1,67 @@
-> ## ⚠️ BETA — the time field no longer throws you out
+> ## ⚠️ BETA — typing a new time works, and one save per settled edit
 >
 > Verified in a controlled browser, **not against a real trading site yet**.
 
 ## Your report
 
-> «وقتی دارم ساعت تنظیم میکنم بخاطر اوتسیو هی منو از تنظیم ساعت میندازه بیرون و باید به سختی و سریع ساعت رو تنظیم کنم»
+> «عددم تغییر میدم صفر میشه بعد دوباره درست میشه همش هم پشت هم سیو میشه»
+> «نمیزاره تایم جدید وارد کنم»
 
-You were right that the auto-save was involved — but not the way it looked. The save itself was innocent; what took you
-out of the field was the **re-render** that any change to the form causes.
+## What was wrong, and what is now true
 
-## What was happening
-
-`render()` begins with `root.replaceChildren()` — it throws every node away and rebuilds the form. The element you were
-typing into therefore no longer existed, and the browser moved focus to the page body. Measured:
-
-```
-typing, touching nothing          → focused: true,  value kept
-after "+ Add a point"             → focused: false, activeElement = BODY
-```
-
-So the time you had just typed looked lost, and you had to re-enter the field and retype before the next change took it
-away again. Exactly the "I have to do it quickly" you described.
-
-## What it does now
-
-The form remembers **which field you were in and where the caret was**, and puts you back after the rebuild:
+**Typing a time.** With `09:00:00` in the field, clicking it and typing nine digits gave `09:00:00.103` — every
+keystroke **appended** to the old value and `maxlength` then refused the rest. A new time could not be entered at all.
+Clicking into the field now **selects the whole time**, so what you type replaces it:
 
 ```
-after any change to the form  → focused: true, caret at the end, value untouched
-a half-typed "10:32"          → still "10:32" after another change, caret where you left it
-and you can carry on typing    → the rest of the digits land in the field
+09:00:00  →  "1" → "10" → "10:3" → "10:32" → … → 10:32:33.250
 ```
 
-Three details made this more than a one-line change, all measured:
+**Saves back to back.** Counting the worker's own save requests, nine digits at an unhurried pace armed **19** saves,
+and an idle panel made **147 in five seconds**. Now:
 
-- **The browser moves focus on `mousedown`, before any handler runs.** So by the time the click handler ran, the field was
-  already forgotten by the DOM. It is now remembered on `focusin`, `selectionchange` and `input`.
-- **The caret has to be set one frame later**, because `setSelectionRange` clamps to `0` on an element the layout has not
-  placed yet — which put the caret at the start of the value.
-- **A re-render can happen after our restore**, because the clicked button is removed and the browser then moves focus off
-  a node that no longer exists. So the restore is re-asserted on the next frame, but only while nothing has changed.
+```
+one save when the time is settled (blur / Enter)   ·   0 saves while you are doing nothing
+one save when a target is picked                   ·   one immediate save when a time or pick is removed
+```
 
-**Two deliberate exceptions**, both about not fighting the user: a pointer that is down means you are pressing something,
-so the restore stands aside; and arriving at a *different* editable field is your choice and is left alone.
+Nothing is saved while you are still typing — the save waits until you have left the field.
 
-## The bug this uncovered
+## Four faults found on the way
 
-Restoring focus while a click was in flight made "+ Add a point" stop working — the button was under the pointer at
-`mousedown`, the form re-rendered, and the click was delivered to a node that had been replaced. The deferral in
-`afterCurrentInteraction` waited for `mouseup` — but **`click` is dispatched after `mouseup`**, so it was always one event
-too early. It now defers by one task, which lets the click land first. That is a real fault the focus work exposed, and it
-would have bitten you as "sometimes a button does nothing".
+1. **A save per keystroke.** The typed-time path armed the auto-save on every input event. It now arms on commit.
+2. **A render loop.** `render()` removes the focused input, the browser fires `blur` on the detached node, and the blur
+   handler committed *and* rendered — one render causing the next. **147 saves in five idle seconds.** A blur caused by
+   our own rebuild is no longer treated as an edit.
+3. **Typed digits overwritten mid-typing.** A render from a `element-picked` message — for a pick made *before* the
+   typing — rebuilt the field from the model. Typing `10:32:33.250` produced `10:02:33.300`. The half-typed text is now
+   preserved across a rebuild, like the caret already was.
+4. **No selection on arrival.** The field is now selected by a **real pointer press**; two other triggers were measured
+   and rejected (`onfocus` also fires when the panel re-focuses after a render, wiping digits).
 
-## A note on the test harness
+## One thing I removed instead of shipping it
 
-While fixing this I found the import net — the check that catches a name used without being imported — had gone blind
-again, in a **fifth** way: its "object key" rule treated *a call in any second argument* as a key, so a name like
-`describeEvent` looked declared when it was not. Proven now in both directions: clean tree exits 0, and removing one
-import makes it exit 1 naming that import.
+I had added **Escape to undo a time edit**. It is not in this build. It could not be made reliable: by the time Escape
+is pressed the auto-save may already have stored the typed time, so "restore the previous value" either restores what
+you are abandoning or fights a save that just succeeded. A half-working undo is worse than none, so it was taken out and
+the reason recorded in the code.
+
+## Also fixed
+
+`three-times-test` used literal targets (`10:35:00`). Run near 10:35 the third target is in the past, the alarm is
+clamped to "now", and Chrome fires a sub-30-second alarm immediately — so the alarm was consumed and the record looked
+unarmed. That was the intermittent "2 of 3 alarms" seen earlier. Targets are now built relative to the clock.
 
 ## Verified
 
 ```
-time-typing-test   8/8    caret stays, a half-typed time survives, typing continues
-ui-basic-test     25/25   including the add-a-point and delete-a-point flows the fix had broken
-three-times 11/11 · time-survives-pick 6/6 · ms-target 5/5 · events-ui 9/9
-776 unit tests, 39 files
+new-time-test      8/8    typing replaces, one save, no idle saves, a second time from scratch
+seven-time chunk   11/11  three times, each with its own point and its own alarm
+time-typing        8/8    focus and caret survive a re-render
+ui-basic          25/25   add, delete, reorder points
+776 unit tests · 39 files
 import check: clean, and proven to fail on a planted fault
+40 browser suites green · 0 red
 ```
 
-## Install
-
-**Chrome / Edge / Brave / Opera** — download `autoflow-chrome.zip`, unpack it, then
-`chrome://extensions` → enable Developer mode → **Load unpacked** → pick the unpacked folder.
-
-**Firefox** — download `autoflow-firefox.zip`, unpack it, then `about:debugging#/runtime/this-firefox` → **Load
-Temporary Add-on** → pick `manifest.json` inside the folder.
-
-**Lite builds** (`autoflow-chrome-lite.zip`, `autoflow-firefox-lite.zip`) — the same release with the Basic tab only.
-They install BESIDE the full build and are named "… Lite" so the two are distinguishable.
-
-## If you are upgrading
-
-Take a backup first, on the Data tab. Automations restored from a backup arrive **disabled** on purpose.
+`click-icon-test` needs a window manager (bare Xvfb has none) — an environment limit, not this code.

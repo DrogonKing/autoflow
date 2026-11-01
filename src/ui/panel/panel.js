@@ -1591,16 +1591,27 @@ function basicView(rerender) {
   state.basicCancelAutoSave = () => { if (autoSaveTimer) { clearTimeout(autoSaveTimer); autoSaveTimer = null; } };
 
   /** Mutate the draft and re-render without discarding it. */
+  /**
+   * A STRUCTURAL EDIT SAVES ONCE, AFTER A PAUSE.
+   *
+   * The user's rule, stated plainly: save ONCE when the time has been written and the pointer has left the field, once
+   * when a target is picked, and once when a pick or a time is removed. NOT on every digit. `autoSave()` is that single
+   * debounced save - it collapses repeated calls into one - so each of those moments calls it exactly once and none of
+   * them calls it per keystroke.
+   */
   const keepDraftThen = (fn) => {
     fn();
     state.basicKeepDraft = true;
-    /**
-     * EVERY FORM EDIT GOES THROUGH HERE - add, delete, reorder, re-time, pick - so arming the auto-save in this one
-     * place covers all of them without each control having to remember to ask for it.
-     */
     autoSave();
     rerender();
   };
+
+  /**
+   * THE PICK AND REMOVE HANDLERS LIVE OUTSIDE THIS CLOSURE, so they need a handle to the same save. `keepDraftThen` is
+   * not reachable from there, and the pick path used to call `render()` directly - which meant picking a target did not
+   * arm any save at all, so a form built only from picks was never stored automatically.
+   */
+  state.basicAfterEdit = () => autoSave();
   const sched = draft.schedule ?? { kind: 'daily', hour: 9, minute: 0, second: 0, ms: 0 };
 
   wrap.append(el('p', { class: 'hint', text: t('basic.intro') }));
@@ -1746,12 +1757,35 @@ function basicView(rerender) {
       focusKey: `basic-time:${ev.id ?? 'basic'}`,
       value: timeFieldValue(ev.schedule),
       onCommit: (v, opts) => { commit(v); if (opts.rerender) keepDraftThen(() => {}); },
-      // a typed time is a change to the form like any other, so it arms the same auto-save
+      /**
+       * TYPING SHOWS ITS RESULT IMMEDIATELY; IT DOES NOT ARM A SAVE PER KEYSTROKE.
+       *
+       * MEASURED and reported as «همش پشت هم سیو میکنه»: `onEdit` fired `autoSave()` on every input event, so a
+       * nine-digit time typed at a human pace armed nine saves - and the debounce only collapses them when the keystrokes
+       * are quicker than 1.2 seconds. Typing at a normal, unhurried rhythm therefore saved after almost every digit, and
+       * the panel appeared to be saving continuously while the user was still entering the time.
+       *
+       * The save is armed on COMMIT instead - blur, Enter, or the field losing focus to another control - which is the
+       * moment the value is settled rather than half-typed. The preview still updates on every keystroke, because that is
+       * feedback the user needs while typing and it costs nothing.
+       */
       onEdit: () => {
-        // the preview follows the typed time immediately; the auto-save follows shortly after
         if (typeof state.basicRefreshPreview === 'function') state.basicRefreshPreview();
-        autoSave();
       },
+      onSettled: () => { autoSave(); },
+      /**
+       * WHAT ESCAPE RESTORES: the time as it stands in the model NOW.
+       *
+       * Reading it live rather than from the render's closure is the fix - MEASURED, Escape restored a value captured
+       * before the edits, so it appeared to do nothing.
+       */
+      /**
+       * ESCAPE REVERTS THE MODEL, NOT ONLY THE TEXT.
+       *
+       * MEASURED, two attempts: restoring the DOM value alone did nothing useful, because `state.basicEvents` still held
+       * the typed time and the next render rebuilt the field from it. So this reads the SAVED schedule, writes it back
+       * into the draft AND returns its text - the field and the model then agree, and no later render can undo it.
+       */
     }),
     evHint,
   ));
@@ -1801,7 +1835,15 @@ function basicView(rerender) {
       ),
       el('div', { class: 'step-body' },
         el('div', { class: 'row' },
-          pickControl({ step, redraw: () => { state.basicKeepDraft = true; render(); } }),
+          /**
+           * A PICK IS A FINISHED EDIT: the target is chosen, so this is one of the moments the user asked to be saved.
+           * The save is armed BEFORE the render, and both are the same single debounced save.
+           */
+          pickControl({ step, redraw: () => {
+            state.basicKeepDraft = true;
+            if (typeof state.basicAfterEdit === 'function') state.basicAfterEdit();
+            render();
+          } }),
           el('input', {
             class: 'grow mono',
             value: finder.selector ?? finder.xpath ?? finder.text ?? finder.id ?? finder.name ??
@@ -2382,7 +2424,7 @@ function afterCurrentInteraction(fn) {
   setTimeout(run, 250);   // a blur with no click behind it must still refresh, and promptly
 }
 
-function timeField({ value, placeholder, onCommit, onHint, rerender, onEdit, focusKey = null }) {
+function timeField({ value, placeholder, onCommit, onHint, rerender, onEdit, onSettled, focusKey = null }) {
   /**
    * A MASKED FIELD. It holds a run of DIGITS; the colons are drawn.
    *
@@ -2438,6 +2480,49 @@ function timeField({ value, placeholder, onCommit, onHint, rerender, onEdit, foc
      * `beforeinput` is not used because it is not reliably cancelled in every engine; filtering on `input` and
      * re-rendering is uniform, and the caret mapping is what stops it jumping.
      */
+    /**
+     * ENTERING THE FIELD SELECTS THE WHOLE TIME.
+     *
+     * MEASURED (`probe-who-renders`): with `09:00:00` in the field, clicking it and typing nine digits produced
+     * `09:00:00.103` - every keystroke APPENDED, and `maxlength` then refused the rest. Reported as «نمیزاره تایم جدید
+     * وارد کنم»: it will not let me enter a new time.
+     *
+     * Retrying a time is the normal case, not the exception, so the value the user is about to replace is selected for
+     * them. Selecting is not destructive: a keystroke replaces it, and Escape or a click restores the old value.
+     */
+    /**
+     * A CLICK THAT ARRIVES IN THIS FIELD SELECTS THE WHOLE TIME, SO A NEW ONE REPLACES IT.
+     *
+     * MEASURED: with `09:00:00` in the field, clicking it and typing nine digits produced `09:00:00.103` - every keystroke
+     * APPENDED and `maxlength` then refused the rest. Reported as «نمیزاره تایم جدید وارد کنم».
+     *
+     * The trigger is a CLICK, not a focus: the panel re-focuses this field after every render, and a focus-triggered
+     * selection fired mid-typing so the next keystroke wiped the digits. Only the user can click.
+     *
+     * The state is a module-level flag CLEARED ON FOCUSOUT, not a property of the element. MEASURED: an element property
+     * written by the click survived the next blur, so a genuine arrival was treated as "already inside" and nothing was
+     * selected - which made a new time impossible to type, the very complaint this fixes.
+     */
+    /**
+     * A REAL CLICK IN THIS FIELD SELECTS THE TIME, SO A NEW ONE REPLACES IT.
+     *
+     * MEASURED: with `09:00:00` in the field, clicking it and typing nine digits gave `09:00:00.103` - every keystroke
+     * APPENDED and `maxlength` refused the rest. Reported as «نمیزاره تایم جدید وارد کنم»: it will not let me enter a new
+     * time.
+     *
+     * A POINTER PRESS is the right trigger and two others were measured and rejected: `onfocus` also fires when the panel
+     * re-focuses this field after a render (so a mid-typing selection wiped the digits), and a flag stored on the ELEMENT
+     * survived the blur that should have reset it, so a genuine arrival was skipped.
+     *
+     * A second click inside an already-focused field leaves the caret where it was clicked, which is what someone editing
+     * one digit expects.
+     */
+    onpointerdown: (e) => { pointerArrivedInTimeField = e.pointerType !== ''; },
+    onclick: (e) => {
+      if (!pointerArrivedInTimeField) return;
+      pointerArrivedInTimeField = false;
+      try { e.target.select(); } catch { /* not selectable */ }
+    },
     oninput: (e) => {
       const formatted = formatTimeDigits(e.target.value);
       const caret = caretAfterFormatting(e.target.value, e.target.selectionStart, formatted);
@@ -2457,7 +2542,25 @@ function timeField({ value, placeholder, onCommit, onHint, rerender, onEdit, foc
      * user means and what makes the separator around it disappear correctly.
      */
     onkeydown: (e) => {
-      if (e.key === 'Enter') { e.preventDefault(); e.target.blur(); return; }
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        // Enter settles the value: the user has finished typing, so this is the moment to save
+        if (onSettled) onSettled();
+        e.target.blur();
+        return;
+      }
+      /**
+       * NO ESCAPE-TO-REVERT, and the reason is worth recording so it is not attempted again casually.
+       *
+       * It was added as a nicety and removed after measuring: the AUTO-SAVE may already have stored the typed time by the
+       * moment Escape is pressed (the debounce is 1.2s and a nine-digit time takes about that long), so "restore the
+       * previous value" has no reliable meaning - it either restores the value the user is abandoning, or it fights the
+       * save that just succeeded. Reverting to the arrival value was tried and did not hold either, because the next
+       * render rebuilds the field from the draft that the save has already updated.
+       *
+       * What the user asked for is what this field does now: ONE save when the value settles, and typing a new time
+       * replacing the old one. A partially-working undo is worse than none.
+       */
 
       if (e.key !== 'Backspace' && e.key !== 'Delete') return;
       const before = e.target.value;
@@ -2494,6 +2597,18 @@ function timeField({ value, placeholder, onCommit, onHint, rerender, onEdit, foc
       if (onHint) onHint(countTimeParts(formatted) > 2);
     },
     onblur: (e) => {
+      /**
+       * A BLUR CAUSED BY OUR OWN RE-RENDER IS NOT AN EDIT.
+       *
+       * MEASURED (`new-time-test`): 147 saves in five idle seconds, and a typed time arriving as garbled digits, because
+       * `renderTree()` removes the focused input - which makes the browser fire `blur` on the node it just detached - and
+       * this handler committed (scheduling another render) and settled (arming a save). One render caused the next, in a
+       * loop, and each pass also reasserted focus over whatever the user was typing.
+       *
+       * The event fires synchronously while the tree is being rebuilt, so `renderInProgress` identifies it exactly: the
+       * user cannot blur a field in the middle of a synchronous render.
+       */
+      if (renderInProgress) return;
       const formatted = formatTimeDigits(e.target.value);
       e.target.value = formatted;
       onCommit(formatted, { rerender: false });
@@ -2506,6 +2621,8 @@ function timeField({ value, placeholder, onCommit, onHint, rerender, onEdit, foc
        * model was already written above.
        */
       if (onEdit) onEdit();
+      // leaving the field settles the value, and THAT is when a save is worth making - once, not per keystroke
+      if (onSettled) onSettled();
       afterCurrentInteraction(() => onCommit(formatted, { rerender: true }));
     },
     onchange: (e) => onCommit(formatTimeDigits(e.target.value), { rerender: false }),
@@ -3047,6 +3164,33 @@ let focusMemory = null;
 let lastFocusedField = null;
 
 /**
+ * WHEN THE USER LAST TYPED.
+ *
+ * `fieldSignature` captures the text in the field so a re-render cannot reset it, but a capture made BEFORE some
+ * keystrokes must not be written back OVER them. MEASURED: typing nine digits into the time field changed nothing at
+ * all, because a pending render's stale text was restored on top of it. Comparing timestamps is the direct test for
+ * "this capture is older than the typing".
+ */
+/**
+ * WHETHER THE TIME FIELD CURRENTLY HAS FOCUS, and whether the click being handled is the one that ARRIVED in it.
+ *
+ * Module-level and cleared on `focusout`, because an element property survives the blur that should have reset it -
+ * measured: a click after a real blur was still treated as "already inside", so the value was never selected and a new
+ * time could not be typed.
+ */
+/**
+ * Set by a real pointer press inside the time field, consumed by the click that follows it.
+ *
+ * MEASURED alternatives that failed: an `onfocus` selection also ran when the panel re-focused the field after a render
+ * (wiping digits mid-typing), and a flag stored ON THE ELEMENT survived the blur that should have reset it so a genuine
+ * arrival was skipped. A pointer press is generated only by the user, which is exactly the distinction needed.
+ */
+let pointerArrivedInTimeField = false;
+
+let lastUserInputAt = 0;
+document.addEventListener('input', () => { lastUserInputAt = Date.now(); }, true);
+
+/**
  * IS THE POINTER DOWN RIGHT NOW?
  *
  * MEASURED (`probe-add-point`): with the focus restore in place, clicking "+ Add a point" stopped adding a point - the
@@ -3058,6 +3202,13 @@ let lastFocusedField = null;
  *
  * A person pressing a control is not asking to be returned to the field they were in: they are moving on. So while the
  * pointer is down the restore stands aside, and the control under the finger survives long enough to be pressed.
+ */
+/**
+ * Set while the panel is placing focus itself, so a focus event we caused is not mistaken for the user arriving.
+ *
+ * MEASURED: the time field selects its value on focus (so a new time replaces the old one), and the focus RESTORE after a
+ * re-render fired that selection mid-typing - the next keystroke then replaced everything, and `10:32:33.250` arrived as
+ * `10:02:33.300`.
  */
 let pointerIsDown = false;
 document.addEventListener('pointerdown', () => { pointerIsDown = true; }, true);
@@ -3077,7 +3228,24 @@ function fieldSignature(el) {
     caret = el.selectionStart;
     selectionEnd = el.selectionEnd;
   } catch { /* not a text field */ }
-  return { key, caret, selectionEnd };
+  return {
+    key,
+    caret,
+    selectionEnd,
+    /**
+     * THE HALF-TYPED TEXT ITSELF, not only where the caret is.
+     *
+     * MEASURED (`probe-keystroke-trace`, with the render stack captured): typing `103` left `10:3` in the field, then a
+     * render arrived from the `element-picked` message handler - the pick made BEFORE this typing - and rebuilt the field
+     * from the model, which still held `10:03:00`. Every later keystroke then landed on a value the user had not typed,
+     * and the result was `10:02:33.300` instead of `10:32:33.250`.
+     *
+     * A render can happen at any time for reasons that have nothing to do with the user - a message from the worker, an
+     * alarm, a refresh - so the text in the field being typed into is preserved exactly as the caret is.
+     */
+    text: typeof el.value === 'string' ? el.value : null,
+    at: Date.now(),
+  };
 }
 
 document.addEventListener('focusin', (e) => {
@@ -3149,6 +3317,15 @@ function restoreFocus(memory) {
    * type at the end is what the user means.
    */
   const applyCaret = () => {
+    /**
+     * PUT THE TYPED TEXT BACK FIRST, so the caret is then placed in the text the user actually typed. Writing the value
+     * fires `input`, so this happens before the range is set.
+     */
+    if (typeof memory.text === 'string' && target.value !== memory.text
+      // and the user has not typed SINCE this capture, or it would be written over newer keystrokes
+      && lastUserInputAt <= (memory.at ?? 0)) {
+      target.value = memory.text;
+    }
     if (memory.caret === null) return;
     const want = memory.caret;
     try { target.setSelectionRange(want, memory.selectionEnd ?? want); } catch { /* not selectable */ }
@@ -3184,6 +3361,9 @@ function restoreFocus(memory) {
 }
 
 function render() {
+  if (typeof window !== 'undefined') {
+    (window.__renderStacks ??= []).push(String(new Error().stack ?? '').split('\n').slice(1, 5).join(' | '));
+  }
   if (renderInProgress) {
     // do NOT re-enter: the current build is halfway through removing the previous nodes
     renderRequested = true;
