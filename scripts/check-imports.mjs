@@ -68,6 +68,73 @@ const AMBIENT = new Set([
  * So the substitution is done in pieces: `\`${` opens an interpolation whose contents are kept until the matching `}`,
  * and only the literal text between interpolations is blanked.
  */
+/**
+ * COMMENTS ARE REMOVED BEFORE LITERALS, and that order is the whole point.
+ *
+ * MEASURED: a JSDoc line saying "`state.pickTarget` was set" contains BACKTICKS inside a comment. This function walks the
+ * source looking for literals, so it saw the first backtick as the start of a template string and swallowed everything up
+ * to the next backtick - or, when the counts did not line up, to end of file. Either way the comment's remaining text
+ * became "code" to the caller, and a word in ordinary prose was reported as an unresolved name (`set`, from
+ * "`state.pickTarget` was set").
+ *
+ * The scanner is a single pass over the text, so the fix is ordering, not another rule: strip comments FIRST, in their
+ * own pass, and only then look for strings. A comment can contain any character - that is what comments are for - so
+ * nothing inside one should ever reach a pattern matcher.
+ */
+function stripCommentsOnly(code) {
+  let out = '';
+  let i = 0;
+  const n = code.length;
+  while (i < n) {
+    const c = code[i];
+    if (c === '/' && code[i + 1] === '*') {
+      const end = code.indexOf('*/', i + 2);
+      i = end === -1 ? n : end + 2;
+      out += ' ';
+      continue;
+    }
+    if (c === '/' && code[i + 1] === '/') {
+      const end = code.indexOf('\n', i);
+      // keep the newline: removing the line join changes what a later regex sees
+      if (end === -1) { i = n; break; }
+      out += '\n';
+      i = end + 1;
+      continue;
+    }
+    // a string or template is copied VERBATIM here, so a comment-looking sequence inside it cannot end a comment
+    if (c === '\'' || c === '"' || c === '`') {
+      const quote = c;
+      let k = i + 1;
+      while (k < n) {
+        if (code[k] === '\\') { k += 2; continue; }
+        if (code[k] === quote) { k += 1; break; }
+        k += 1;
+      }
+      out += code.slice(i, k);
+      i = k;
+      continue;
+    }
+    out += c;
+    i += 1;
+  }
+  return out;
+}
+
+/**
+ * THE TWO PASSES MUST NOT BE NESTED, and the first version of this fix got it wrong.
+ *
+ * `stripCommentsOnly` copies strings VERBATIM (so a comment-looking sequence inside one cannot end a comment) and keeps
+ * template interpolations; `stripLiterals` blanks those strings. Calling `stripLiterals(stripCommentsOnly(src))` looks
+ * right but the inner function re-strips comments on text that is no longer the source, and MEASURED it stopped seeing
+ * `describeEvent` - a name used only inside `${...}` was reported clean while it was missing from the import list.
+ *
+ * So they stay two separate passes over the ORIGINAL text, in this order:
+ *
+ *   1. comments out      - a comment may contain any character, including backticks and asterisks
+ *   2. literals out      - strings and template TEXT, with interpolations kept
+ *
+ * `declaredIn` reads the comment-free text, because a name declared in a comment is not declared.
+ */
 function stripLiterals(code) {
   let out = '';
   let i = 0;
@@ -202,7 +269,19 @@ function declaredIn(code) {
    *
    * The lookbehind rejects a `{` whose preceding character is `$`.
    */
-  for (const m of code.matchAll(/(?<!\$)(?:^|[{,,\n])\s*([A-Za-z_$][\w$]*)\s*[:(]/g)) names.add(m[1]);
+  /**
+   * A KEY IS FOLLOWED BY `:`; A SHORTHAND METHOD IS FOLLOWED BY A PARAMETER LIST AND A BODY.
+   *
+   * The rule here was `[{,\n]\s*(name)\s*[:(]` - "after a brace, comma or newline, a name followed by `:` or `(` is a
+   * key or a method". MEASURED, and it cost two wrong fixes elsewhere before being found: a CALL AS A SECOND ARGUMENT
+   * matched it, because `.replace('{time}', describeEvent(x))` has `, describeEvent(` - so `describeEvent` was treated as
+   * defined and a missing import went unreported. The net said "clean" while the panel would have thrown.
+   *
+   * The distinction is grammatical, not stylistic: an object member that is not `key: value` is a method with a BODY, so
+   * `name(args) {`. A call has no body. Requiring the body is what separates them.
+   */
+  for (const m of code.matchAll(/(?<!\$)(?:^|[{,\n])\s*([A-Za-z_$][\w$]*)\s*:/g)) names.add(m[1]);
+  for (const m of code.matchAll(/(?<!\$)(?:^|[{,\n])\s*([A-Za-z_$][\w$]*)\s*\([^()]*\)\s*\{/g)) names.add(m[1]);
   // a name re-exported by this module is in scope if it was imported; and `export { a as b }` brings `b` into the export
   // surface, not the scope - so only the source side counts here.
   for (const m of code.matchAll(/export\s*\{([^}]*)\}/g)) {
@@ -233,12 +312,44 @@ for (const code of FILE_BODIES.values()) {
 
 const offenders = [];
 for (const [file, raw] of FILE_BODIES) {
-  const known = declaredIn(raw);
+  /**
+   * TWO PASSES OVER THE ORIGINAL TEXT, IN THIS ORDER.
+   *
+   * `declaredIn` reads the COMMENT-FREE text: a name that only appears in prose is not declared, and treating it as such
+   * is what hid `orderByNextRun` once already. `stripLiterals` then blanks strings and template text so their contents
+   * cannot look like a call - keeping `${...}` interpolations, because a name called only inside one is still a call and
+   * that is how `describeEvent` was missed.
+   */
+  const noComments = stripCommentsOnly(raw);
+  const known = declaredIn(noComments);
   // strip comments and every literal form, so their contents cannot look like a call
-  const stripped = stripLiterals(raw);
+  const stripped = stripLiterals(noComments);
   const called = new Set();
-  for (const m of stripped.matchAll(/(?:^|[^\w$.])([A-Za-z_$][\w$]*)\s*\(/g)) called.add(m[1]);
+  /**
+   * A GETTER OR SETTER KEYWORD IS NOT A CALL.
+   *
+   * `set finder(v) { ... }` inside an object literal is a method definition; the first version of this check reported the
+   * remaining word `set` as an unresolved name in panel.js. A false positive costs more than a miss here, because it
+   * teaches the reader to skim past the output - which is exactly how the vitest version stopped being a net.
+   */
+  /**
+   * `set` AND `get` ARE LANGUAGE KEYWORDS, so they can never be an unresolved name.
+   *
+   * MEASURED: an object literal with an accessor pair - `get finder() {…}, set finder(v) {…}` - produced a finding for
+   * `set`, because the accessor's own name looks like a call to a name-based scan. There is no function called `set` in
+   * this codebase and there could not be one that means anything, so excluding the two keywords is the honest rule rather
+   * than a pattern that tries to recognise every place an accessor can appear.
+   */
+  for (const m of stripped.matchAll(/(?:^|[^\w$.])([A-Za-z_$][\w$]*)\s*\(/g)) {
+    if (m[1] === 'set' || m[1] === 'get') continue;
+    called.add(m[1]);
+  }
   for (const m of stripped.matchAll(/(?:^|[^\w$.])([A-Za-z_$][\w$]*)\s*\.\s*[A-Za-z_$]/g)) called.add(m[1]);
+  if (process.env.DEBUG_IMPORTS) {
+    for (const m of stripped.matchAll(/(?:^|[^\w$.])([A-Za-z_$][\w$]*)\s*(?:\(|\.)/g)) {
+      if (m[1] === 'set') console.error('  [debug] source of "set":', JSON.stringify(stripped.slice(Math.max(0, m.index - 30), m.index + 20)));
+    }
+  }
 
   for (const name of called) {
     if (AMBIENT.has(name)) continue;

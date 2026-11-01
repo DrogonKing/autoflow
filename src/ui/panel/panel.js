@@ -446,6 +446,7 @@ function scheduleEditor(onChange) {
     wrap.append(el('div', { class: 'row' },
       el('label', { text: t('field.time') }),
       timeField({
+        focusKey: 'editor-time',
         value: `${String(s.hour ?? 9).padStart(2, '0')}:${String(s.minute ?? 0).padStart(2, '0')}`
           + (typeof s.second === 'number' ? `:${String(s.second).padStart(2, '0')}` : ''),
         onCommit: (v, opts) => commitTime(v, opts),
@@ -1741,6 +1742,8 @@ function basicView(rerender) {
   wrap.append(el('div', { class: 'row' },
     el('label', { text: t('basic.time') }),
     timeField({
+      // one key per time: a key derived from position would move when a row is added or deleted
+      focusKey: `basic-time:${ev.id ?? 'basic'}`,
       value: timeFieldValue(ev.schedule),
       onCommit: (v, opts) => { commit(v); if (opts.rerender) keepDraftThen(() => {}); },
       // a typed time is a change to the form like any other, so it arms the same auto-save
@@ -2359,11 +2362,27 @@ function afterCurrentInteraction(fn) {
     document.removeEventListener('mouseup', run, true);
     fn();
   };
-  document.addEventListener('mouseup', run, true);
+  /**
+   * `mouseup` IS ONE EVENT TOO EARLY - THE CLICK COMES AFTER IT.
+   *
+   * MEASURED (`probe-add-point`): blur the time field, then click "+ Add a point" and the point was NOT added, while a
+   * direct DOM click added it. The sequence:
+   *
+   *   mousedown on the button  -> the field blurs -> this helper waits for mouseup
+   *   mouseup                  -> this helper re-renders IMMEDIATELY -> the button under the pointer is replaced
+   *   click                    -> dispatched to a node that no longer exists, so the button never hears it
+   *
+   * The old comment said the deferral existed "so the click that caused this blur can finish", and mouseup was taken to be
+   * that point. It is not: `click` is dispatched after `mouseup`. Deferring by one task lets the click be delivered first,
+   * which is what the deferral was always for.
+   *
+   * The timeout stays as the fallback for a blur with no click behind it, so a keyboard-only edit still refreshes.
+   */
+  document.addEventListener('mouseup', () => setTimeout(run, 0), { capture: true, once: true });
   setTimeout(run, 250);   // a blur with no click behind it must still refresh, and promptly
 }
 
-function timeField({ value, placeholder, onCommit, onHint, rerender, onEdit }) {
+function timeField({ value, placeholder, onCommit, onHint, rerender, onEdit, focusKey = null }) {
   /**
    * A MASKED FIELD. It holds a run of DIGITS; the colons are drawn.
    *
@@ -2382,6 +2401,17 @@ function timeField({ value, placeholder, onCommit, onHint, rerender, onEdit }) {
     inputmode: 'numeric',
     dir: 'ltr',
     class: 'grow mono time-input',
+    /**
+     * A STABLE NAME FOR THIS FIELD, so a re-render can put the user back in it.
+     *
+     * `renderTree()` begins with `root.replaceChildren()`, so every re-render destroys the input the user is typing into
+     * and the browser moves focus to the body - measured as `focused: false` after touching anything else in the form.
+     * `render()` captures the focused element's key and its caret before the rebuild and restores both afterwards.
+     *
+     * The key is the OWNING TIME plus the role, not the position in the DOM: adding or removing a row renumbers
+     * positions, and a key that moved would put the caret in a different time's field.
+     */
+    'data-focus-key': focusKey ?? 'basic-time',
     value: formatTimeDigits(value),
     placeholder: placeholder ?? 'HH:MM:SS',
     autocomplete: 'off',
@@ -2991,6 +3021,168 @@ function historyView() {
 let renderInProgress = false;
 let renderRequested = false;
 
+/**
+ * WHICH CONTROL THE USER WAS IN, AND WHERE IN IT.
+ *
+ * MEASURED (`probe-time-typing`): typing a time and then touching anything else in the form left the field with
+ * `focused: false` and the caret gone, because `renderTree()` starts with `root.replaceChildren()` - every node is
+ * thrown away and rebuilt, so the element the user was typing into no longer exists. The report:
+ *
+ *     «وقتی دارم ساعت تنظیم میکنم بخاطر اوتسیو هی منو از تنظیم ساعت میندازه بیرون و باید به سختی و سریع ساعت رو تنظیم کنم»
+ *
+ * A re-render is unavoidable here (the form has to show the point that was added), so what the form owes the user is its
+ * PLACE: after the rebuild, the same field is focused again and the caret is where it was. The field is identified by a
+ * stable key rather than by position, because adding or removing a row changes positions.
+ */
+let focusMemory = null;
+
+/**
+ * THE FIELD THE USER WAS LAST IN, remembered across the blur the browser performs.
+ *
+ * MEASURED (`probe-focus-key`): clicking "+ Add a point" while the caret sat in the time field left
+ * `document.activeElement === BODY`, and a capture taken inside the click handler therefore had NOTHING to restore. The
+ * browser moves focus on `mousedown`, before any handler runs - so by the time the form re-renders, the field is already
+ * forgotten by the DOM. Remembering it on `focusin` is what makes a restore possible at all.
+ */
+let lastFocusedField = null;
+
+/**
+ * IS THE POINTER DOWN RIGHT NOW?
+ *
+ * MEASURED (`probe-add-point`): with the focus restore in place, clicking "+ Add a point" stopped adding a point - the
+ * button was under the pointer at the moment of the click and gone by the time the click was delivered. The sequence:
+ *
+ *   mousedown on the button -> blur on the time field -> the form re-renders (blur commits, as designed)
+ *   -> restoreFocus puts focus BACK in the time field -> that focus change triggers another build
+ *   -> the button is replaced before `mouseup`, so the click lands on nothing
+ *
+ * A person pressing a control is not asking to be returned to the field they were in: they are moving on. So while the
+ * pointer is down the restore stands aside, and the control under the finger survives long enough to be pressed.
+ */
+let pointerIsDown = false;
+document.addEventListener('pointerdown', () => { pointerIsDown = true; }, true);
+document.addEventListener('pointerup', () => {
+  // cleared on the next frame, because the click event is delivered after pointerup and handlers run before it settles
+  setTimeout(() => { pointerIsDown = false; }, 0);
+}, true);
+document.addEventListener('pointercancel', () => { pointerIsDown = false; }, true);
+
+function fieldSignature(el) {
+  if (!el) return null;
+  const key = el.dataset?.focusKey;
+  if (!key) return null;
+  let caret = null;
+  let selectionEnd = null;
+  try {
+    caret = el.selectionStart;
+    selectionEnd = el.selectionEnd;
+  } catch { /* not a text field */ }
+  return { key, caret, selectionEnd };
+}
+
+document.addEventListener('focusin', (e) => {
+  const sig = fieldSignature(e.target);
+  if (sig) lastFocusedField = sig;
+}, true);
+
+/**
+ * AND THE CARET IS UPDATED AS IT MOVES, not only when the field is first entered.
+ *
+ * MEASURED (`time-typing-test`): the remembered field held `caret: 0` - the position it had at `focusin` - while the user
+ * had typed nine digits and was sitting at the end. Restoring that memory put the caret back at the START of the value, so
+ * continuing to type would have inserted at the beginning of the time. `selectionchange` and `input` both fire as the caret
+ * travels, and recording both is what makes the memory current rather than merely initial.
+ */
+const rememberCaret = (e) => {
+  const sig = fieldSignature(e.target ?? document.activeElement);
+  if (sig) lastFocusedField = sig;
+};
+document.addEventListener('selectionchange', () => rememberCaret({ target: document.activeElement }));
+document.addEventListener('input', rememberCaret, true);
+
+/**
+ * WHERE THE USER WAS, as of the moment a render is asked for.
+ *
+ * The live element wins when it is still focused; otherwise the remembered field is used, but ONLY when focus is sitting
+ * on `body` - which is what our own button click leaves behind. If the user has focused something else (a different
+ * field, an input elsewhere in the panel) that choice is left alone.
+ */
+function captureFocus() {
+  const live = fieldSignature(document.activeElement);
+  if (live) return live;
+  /**
+   * A BUTTON TAKING FOCUS IS NOT THE USER LEAVING THE FIELD.
+   *
+   * MEASURED (`probe-focus-key`, instrumented): the click on "+ Add a point" focuses the BUTTON, so `activeElement` was
+   * neither the time field nor `body` - and a rule that only trusted the remembered field on `body` returned null while
+   * `lastFocusedField` sat there holding `basic-time:basic` with its caret. The restore then had nothing to restore.
+   *
+   * What actually means "the user moved on" is arriving at a DIFFERENT editable field. Anything else - a button, a
+   * checkbox, the page body - leaves the remembered field as the place the user was typing.
+   */
+  const active = document.activeElement;
+  if (!active || active === document.body || active === document.documentElement) return lastFocusedField;
+  const tag = active.tagName;
+  const editable = (tag === 'INPUT' && !/^(button|submit|checkbox|radio|file|range|color)$/i.test(active.type ?? ''))
+    || tag === 'TEXTAREA' || tag === 'SELECT' || active.isContentEditable === true;
+  if (!editable) return lastFocusedField;
+  // a different editable field is the user's choice, and it is not ours to override
+  return null;
+}
+
+function restoreFocus(memory) {
+  if (!memory) return;
+  // a pointer that is down means the user is pressing something; see `pointerIsDown`
+  if (pointerIsDown) return;
+  const target = document.querySelector(`[data-focus-key="${String(memory.key).replace(/"/g, '\\"')}"]`);
+  if (!target) return;
+  try { target.focus({ preventScroll: true }); } catch { return; }
+  /**
+   * THE CARET IS SET ON THE NEXT FRAME, AND VERIFIED.
+   *
+   * MEASURED (`time-typing-test`): the field was focused and held the right value, but `selectionStart` was 0 - so the
+   * next keystroke landed at the START of "10:32:33.250" instead of after it. `setSelectionRange` clamps to 0 when it runs
+   * on an element the layout has not placed yet, and the node had just been created in the same tick.
+   *
+   * One frame later the element is in the layout, so the range takes. It is then read back: if it still did not take, the
+   * caret is put at the END rather than left at zero, because the field is a left-to-right digit mask where continuing to
+   * type at the end is what the user means.
+   */
+  const applyCaret = () => {
+    if (memory.caret === null) return;
+    const want = memory.caret;
+    try { target.setSelectionRange(want, memory.selectionEnd ?? want); } catch { /* not selectable */ }
+    let got = null;
+    try { got = target.selectionStart; } catch { got = null; }
+    if (got !== want) {
+      const end = String(target.value ?? '').length;
+      try { target.setSelectionRange(end, end); } catch { /* not selectable */ }
+    }
+  };
+  applyCaret();
+  if (typeof requestAnimationFrame !== 'function') return;
+  requestAnimationFrame(() => {
+    applyCaret();
+    /**
+     * AND IT IS RE-ASSERTED ON THE NEXT FRAME, because the browser can take focus away AFTER the rebuild.
+     *
+     * MEASURED (`time-typing-test`, roughly one run in three): the field was focused, and a moment later focus was back on
+     * `body`. The button that was clicked is REMOVED by the re-render, and when the browser finishes processing that click
+     * it moves focus off a node that no longer exists - after the synchronous restore has already run. A single restore
+     * therefore loses a race it cannot see.
+     *
+     * It is re-asserted only while nothing has changed: the remembered field is still the one we captured, and the user has
+     * not arrived at a different editable field. If they have, their choice stands and this does nothing.
+     */
+    const active = document.activeElement;
+    const away = !active || active === document.body || active === document.documentElement;
+    if (!away) return;
+    if (lastFocusedField?.key !== memory.key) return;    // the user moved on; leave them there
+    try { target.focus({ preventScroll: true }); } catch { return; }
+    applyCaret();
+  });
+}
+
 function render() {
   if (renderInProgress) {
     // do NOT re-enter: the current build is halfway through removing the previous nodes
@@ -2998,12 +3190,14 @@ function render() {
     return;
   }
   bodyKeptDraftForFollowUp = false;   // reset per sequence, or one kept draft would pin every later render
+  focusMemory = captureFocus();
   renderInProgress = true;
   try {
     renderTree();
   } finally {
     renderInProgress = false;
   }
+  restoreFocus(focusMemory);
   /**
    * Honour a nested request, but not unboundedly.
    *
@@ -3025,12 +3219,16 @@ function render() {
   for (let i = 0; i < 3 && renderRequested; i++) {
     renderRequested = false;
     if (bodyKeptDraftForFollowUp) state.basicKeepDraft = true;
+    // the memory is kept for the follow-up builds too: the first build's own re-render is a new tree without the focused
+    // node, so restoring only after the first build would leave the user out of the field again
+    if (!focusMemory) focusMemory = captureFocus();
     renderInProgress = true;
     try {
       renderTree();
     } finally {
       renderInProgress = false;
     }
+    restoreFocus(focusMemory);
   }
   renderRequested = false;
 }

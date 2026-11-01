@@ -191,8 +191,18 @@ console.log('\n--- 2. the Basic tab ---');
     tabs.some((x) => /basic|ساده/i.test(x)) && tabs.some((x) => /automation|اتوماسیون/i.test(x)),
     JSON.stringify(tabs));
 
-  // enter the tab FRESH. Section 1 added a point to the draft to force a re-render, and unsaved work surviving a
-  // tab switch is correct behaviour - so leaving and returning is how a user would arrive at a clean form.
+  /**
+   * ENTER THE TAB FROM A KNOWN STATE: reload the panel.
+   *
+   * Section 1 typed a time and added a point, so the form holds UNSAVED WORK - and that work surviving a tab switch is
+   * correct behaviour (throwing it away is what reset a typed time to 09:00). A tab round trip therefore does NOT give a
+   * clean form, and depending on one made this section's assertions a statement about the previous section's leftovers.
+   * A reload is what a clean form actually is.
+   */
+  await panel.reload();
+  await panel.waitForLoadState('domcontentloaded');
+  await panel.waitForSelector('nav button', { timeout: 15000 });
+  await panel.waitForTimeout(600);
   await panel.evaluate(() => {
     const other = [...document.querySelectorAll('nav button')].find((x) => /history|تاریخچه/i.test(x.textContent));
     other?.click();
@@ -240,7 +250,18 @@ console.log('\n--- 2. the Basic tab ---');
     shape.isText === true, `type=${shape.isText}`);
   check('and it is laid out left-to-right so 09:00:00 does not render as 00:00:90', shape.ltr === true,
     `dir=${shape.ltr}`);
-  check('it starts with one click point', shape.pointRows === 1, `${shape.pointRows}`);
+  /**
+   * ONE POINT ROW FOR A CLEAN FORM, AND SECTION 2 REACHES IT BY RELOADING.
+   *
+   * The tab round trip below is NOT what produces a clean form, and relying on it was the mistake: section 1 leaves
+   * UNSAVED WORK (a typed time and an added point), and that work now survives a tab switch ON PURPOSE - discarding it is
+   * the bug that reset the user's typed time to 09:00, reported as «تایم روی ٠۹:٠٠ ریست میشه». So this section is made
+   * deterministic by loading the panel fresh instead of hoping a previous section left nothing behind.
+   *
+   * This is a stronger test than the one it replaces: the old version passed only while unsaved work was being thrown
+   * away, which is the very behaviour that was wrong.
+   */
+  check('a fresh panel has one point row', shape.pointRows === 1, `${shape.pointRows}`);
   check('there is a + to add a point', shape.buttons.some((b) => /^\+\s/.test(b)), JSON.stringify(shape.buttons));
   check('there is a Save', shape.buttons.some((b) => /save|ذخیره/i.test(b)), JSON.stringify(shape.buttons));
 

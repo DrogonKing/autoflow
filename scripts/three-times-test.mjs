@@ -73,6 +73,32 @@ await panel.evaluate(() => document.querySelector('nav.tabs button')?.click());
 await new Promise((r) => setTimeout(r, 900));
 
 const timeValue = () => panel.evaluate(() => document.querySelector('input.time-input')?.value ?? '');
+
+/**
+ * THE THREE TARGETS ARE RELATIVE TO NOW, NOT LITERAL CLOCK TIMES.
+ *
+ * MEASURED, and it explains an intermittent "every time got its own alarm: 2": the targets used to be the fixed
+ * `10:32:33.250`, `10:32:40` and `10:35:00`. Run the suite near 10:35 and the third target is in the PAST, so
+ * `scheduleOne` clamps `when` to `now + 1000` - and Chrome fires a sub-30-second alarm IMMEDIATELY, consuming it. The
+ * record was stored, the worker logged `armed`, and the alarm was gone by the time it was counted, which looks exactly
+ * like a missing alarm.
+ *
+ * Building the targets from the clock makes the suite independent of when it runs, and it keeps the three
+ * characteristics the test is actually about: distinct instants, a millisecond fraction on the first, and seconds plus a
+ * few minutes on the others.
+ */
+const now0 = new Date();
+const pad = (n) => String(n).padStart(2, '0');
+const atOffsetMinutes = (mins, second, ms) => {
+  const d = new Date(now0.getTime() + mins * 60000);
+  return { hh: pad(d.getHours()), mm: pad(d.getMinutes()), ss: pad(second), ms: String(ms).padStart(3, '0') };
+};
+const T1 = atOffsetMinutes(45, 33, 250);
+const T2 = atOffsetMinutes(52, 40, 0);
+const T3 = atOffsetMinutes(60, 0, 0);
+const TIMES = [`${T1.hh}:${T1.mm}:${T1.ss}.${T1.ms}`, `${T2.hh}:${T2.mm}:${T2.ss}`, `${T3.hh}:${T3.mm}:${T3.ss}`];
+const DIGITS = [`${T1.hh}${T1.mm}${T1.ss}${T1.ms}`, `${T2.hh}${T2.mm}${T2.ss}`, `${T3.hh}${T3.mm}${T3.ss}`];
+console.log(`  targets (relative to now): ${TIMES.join(' · ')}`);
 const chips = () => panel.evaluate(() => [...document.querySelectorAll('.event-chip')].map((c) => c.textContent.trim()));
 const press = async (re) => {
   const box = await panel.evaluate((pattern) => {
@@ -113,15 +139,15 @@ console.log('\n=== 1. CAN A REAL KEYBOARD ENTER MILLISECONDS? ===');
 const f0 = await panel.$('input.time-input');
 const ml = await f0.getAttribute('maxlength');
 check('the field allows twelve characters, which is what HH:MM:SS.mmm needs', Number(ml) >= 12, `maxlength=${ml}`);
-await typeTime('103233250');
-check('typing nine digits produces a fraction of a second', (await timeValue()) === '10:32:33.250', await timeValue());
+await typeTime(DIGITS[0]);
+check('typing nine digits produces a fraction of a second', (await timeValue()) === TIMES[0], await timeValue());
 
 console.log('\n=== 2. THREE TIMES, EACH WITH ITS OWN POINT ===');
 await setSelector('#pad1');
 const before = (await chips()).length;
 check('one time is shown, and no chooser yet', before === 0, `${before} chip(s)`);
 
-for (const [n, digits, sel] of [[2, '103240000', '#pad2'], [3, '103500000', '#pad3']]) {
+for (const [n, digits, sel] of [[2, DIGITS[1], '#pad2'], [3, DIGITS[2], '#pad3']]) {
   const added = await press('^\\+\\s*New time');
   check(`"New time" is pressable for time ${n}`, added, '');
   await typeTime(digits);
@@ -131,8 +157,53 @@ const all = await chips();
 check('three times are listed, each with one point', all.length === 3, all.join(' | '));
 
 console.log('\n=== 3. AUTO-SAVE: no Save press at all ===');
-// the last change was the selector on time 3, which arms the auto-save; wait past the debounce
-await new Promise((r) => setTimeout(r, 2200));
+/**
+ * WAIT FOR THE WORK, NOT FOR A DURATION.
+ *
+ * MEASURED: a fixed 2.2s was not always enough. Three times means three sequential `save-automation` round-trips plus
+ * three alarm registrations, and on a loaded machine only two had completed - so this suite failed intermittently with
+ * "every time got its own alarm: 2". Polling for the expected state is the assertion's own condition, so it cannot be
+ * early, and it gives up with the real count rather than hanging.
+ */
+/**
+ * POLL FOR AN ALARM FOR EACH OF THIS FORM'S THREE IDS - not for "three alarms exist".
+ *
+ * MEASURED: the previous condition counted every alarm in the profile, and stale alarms from earlier saves satisfied it,
+ * so the loop exited while only two of the three times were actually armed. A count of the whole registry is not evidence
+ * about this form.
+ */
+const deadline = Date.now() + 20000;
+let ready = null;
+while (Date.now() < deadline) {
+  ready = await sw.evaluate(async () => {
+    const all = await chrome.storage.local.get(null);
+    const list = all.automations ?? [];
+    const names = (await chrome.alarms.getAll()).map((al) => String(al.name));
+    return {
+      automations: list.length,
+      ids: list.map((a) => a.id),
+      armed: list.filter((a) => names.includes(`autoflow:run:${a.id}`)).length,
+    };
+  });
+  if (ready.automations >= 3 && ready.armed >= 3) break;
+  await new Promise((r) => setTimeout(r, 300));
+}
+console.log(`  settled at automations=${ready.automations} armed=${ready.armed} of ${JSON.stringify(ready.ids)}`);
+/**
+ * WHAT THE WORKER SAID, as part of this suite's output.
+ *
+ * This test is about arming, so the arming record is evidence rather than debug noise: `save-armed-nothing` names the
+ * reason a time did not get an alarm, and without it a failure here reads only as a count.
+ */
+const armingRecord = await sw.evaluate(async () => {
+  const all = await chrome.storage.local.get(null);
+  return (all.diagnosticEvents ?? [])
+    .filter((e) => ['armed', 'arm-failed', 'save-armed-nothing', 'arm-skipped'].includes(e.kind))
+    .slice(-12)
+    .map((e) => `${e.kind}:${e.automationId ?? ''}${e.reason ? '(' + e.reason + ')' : ''}`);
+});
+console.log('  arming record:', JSON.stringify(armingRecord));
+
 const stored = await sw.evaluate(async () => {
   const all = await chrome.storage.local.get(null);
   const list = all.automations ?? [];
@@ -142,14 +213,26 @@ const stored = await sw.evaluate(async () => {
     times: list.map((a) => `${a.schedule?.hour}:${String(a.schedule?.minute).padStart(2, '0')}:${String(a.schedule?.second).padStart(2, '0')}${a.schedule?.ms ? '.' + String(a.schedule.ms).padStart(3, '0') : ''}`).sort(),
     steps: list.map((a) => (a.steps ?? []).length),
     selectors: list.flatMap((a) => (a.steps ?? []).map((s) => s.finder?.selector ?? '—')),
-    alarms: alarms.length,
+    /**
+     * ONLY THE ALARMS THIS FORM OWNS.
+     *
+     * `chrome.alarms.getAll()` returns every alarm in the profile, including the worker's own bookkeeping ones, so the raw
+     * length is not "how many of my times are armed". An automation's alarm is named `autoflow:run:<id>`, and the ids this
+     * form owns are the ones it just stored - so the count is derived from those, which is what the assertion means.
+     *
+     * MEASURED: with the raw length the count was 3 while the assertion wanted 3 and reported 2 - the total included
+     * alarms from earlier in the same profile and the filter is what makes the number mean something.
+     */
+    alarms: alarms.filter((al) => list.some((a) => String(al.name) === `autoflow:run:${a.id}`)).length,
+    alarmsTotal: alarms.length,
+    alarmNames: alarms.map((al) => String(al.name)),
   };
 });
 console.log('  stored:', JSON.stringify(stored));
 check('all three times were saved WITHOUT pressing Save', stored.count === 3, `${stored.count}`);
 check('and each kept its own point', stored.steps.every((n) => n === 1) && stored.selectors.length === 3,
   JSON.stringify(stored.selectors));
-check('every time got its own alarm', stored.alarms === 3, `${stored.alarms}`);
+check('every time got its own alarm', stored.alarms === 3, `${stored.alarms} (total ${stored.alarmsTotal})`);
 
 console.log('\n=== 4. THE SAVE SURVIVES A REOPEN ===');
 await panel.reload();

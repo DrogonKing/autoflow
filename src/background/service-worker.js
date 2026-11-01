@@ -1660,8 +1660,23 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           schedule = { scheduled: false, reason: String(e?.message ?? e) };
           recordEvent({ kind: 'arm-failed', automationId: saved.id, error: schedule.reason });
         }
-        if (!schedule.scheduled) {
-          await cancelOne(saved.id);      // a disabled or unarmable schedule must not leave a stale alarm behind
+        /**
+         * A STALE ALARM IS ONLY STALE IF THE SCHEDULE IS GONE.
+         *
+         * This cancelled the alarm on ANY unsuccessful arm. MEASURED (`three-times-test`, intermittent): three times were
+         * stored, each with its own point and target, and one of them had NO alarm - `alarm names:
+         * ["autoflow:run:basic-new2","autoflow:run:basic-new1"]` with the third record present and correct. The cause is
+         * here: one arm attempt on `basic` did not report success, so a perfectly good alarm that was already registered
+         * for that automation was CLEARED - and the time would then never fire, with the panel showing it as saved and
+         * armed.
+         *
+         * Cancelling is right for the two cases where an alarm must not exist: the automation is gone or disabled, or its
+         * schedule is manual. For a transient arm failure the previous alarm is better than none: it is still the right
+         * time to fire, and re-arming happens on the next save, the next run and every worker start.
+         */
+        const gone = saved.enabled === false || !saved.schedule || saved.schedule.kind === 'manual';
+        if (!schedule.scheduled && gone) {
+          await cancelOne(saved.id);
         }
         /**
          * A SAVE THAT ARMED NOTHING SAYS SO, and it is recorded too.
