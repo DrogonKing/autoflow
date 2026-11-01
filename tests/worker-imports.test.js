@@ -18,6 +18,7 @@
  * then looking for uses of names that were never brought in. It is deliberately a static check: a ReferenceError is a
  * static fact, and a runtime check would only cover the paths a test happens to walk.
  */
+import { spawnSync } from 'node:child_process';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -107,6 +108,21 @@ function declaredIn(code) {
   for (const m of code.matchAll(/(?:for|catch)\s*\(?\s*(?:const|let|var)?\s*([A-Za-z_$][\w$]*)/g)) names.add(m[1]);
   // object literal keys are not identifiers in scope, but they appear as such; collect them so they are not reported
   for (const m of code.matchAll(/(?:^|[{,,\s])([A-Za-z_$][\w$]*)\s*:/g)) names.add(m[1]);
+  /**
+   * THE STRING RULE USED TO LIVE HERE, AND IT HID THE BUG THIS NET EXISTS FOR.
+   *
+   * It added every word found inside a string literal to the "already declared" set, so that UI text like `'Add a
+   * point'` would not be reported as a call. The side effect: `orderByNextRun` appeared in no string at all, and the
+   * net still stayed GREEN with its import removed - because the rule made any identifier invisible the moment it
+   * occurred in any string anywhere in the same file.
+   *
+   * MEASURED, with that fault deliberately reintroduced:
+   *     with the rule      0 offenders   (silent)
+   *     without the rule   1 offender    (src/ui/panel/panel.js: orderByNextRun)
+   * and the cost of removing it is zero false positives across all 27 files.
+   *
+   * A net that misses the fault it was written for is worse than no net, because it is trusted.
+   */
   // member accesses are not bare identifiers
   for (const m of code.matchAll(/\.\s*([A-Za-z_$][\w$]*)/g)) names.add(m[1]);
   return names;
@@ -164,59 +180,23 @@ describe('module imports resolve', () => {
    * The generic form: for each file, every module-scope name it uses must come from the file, an import, or a local
    * declaration. Reported as a list so a failure names the file and the identifier rather than a line number.
    */
+  /**
+   * THE GENERIC FORM DELEGATES TO scripts/check-imports.mjs.
+   *
+   * It used to be a second implementation, and the two DISAGREED: the copy here treated every word inside a string
+   * literal as declared, replaced whole template literals (so a name called only inside `${...}` was invisible), and
+   * asserted on three hard-coded names while merely printing anything else. Between those three rules, two real
+   * ReferenceErrors - `orderByNextRun` and then `describeEvent` - were detected, logged, and allowed through, and each
+   * blanked the panel in the browser.
+   *
+   * Two implementations of one check is the fault: whichever is weaker becomes the real gate. So this runs the script
+   * and fails on its output, and the script's own behaviour is proven by four cases in
+   * `scripts/check-imports.mjs` (clean, and each of the two names removed).
+   */
   it('no module uses an identifier it never imported or declared', () => {
-    const offenders = [];
-    for (const file of FILES) {
-      const code = readFileSync(file, 'utf8');
-      const known = declaredIn(code);
-      /**
-       * ONLY CALL POSITION. A name used as a call is the one that throws when it does not resolve, and it is a far
-       * smaller set than "every identifier" - which produced 227 findings, almost all of them words from comments and
-       * destructuring targets. A net that reports everything is a net nobody reads.
-       *
-       * `name(` and `name.` are both included: a missing import used as `x.y()` throws on `x`.
-       */
-      const stripped = code
-        .replace(/\/\*[\s\S]*?\*\//g, ' ')
-        .replace(/\/\/[^\n]*/g, ' ')
-        .replace(/`(?:\\[\s\S]|[^\\`])*`/g, '``')
-        .replace(/'(?:\\[\s\S]|[^\\'])*'/g, "''")
-        .replace(/"(?:\\[\s\S]|[^\\"])*"/g, '""');
-      const called = new Set();
-      for (const m of stripped.matchAll(/(?:^|[^\w$.])([A-Za-z_$][\w$]*)\s*\(/g)) called.add(m[1]);
-      for (const m of stripped.matchAll(/(?:^|[^\w$.])([A-Za-z_$][\w$]*)\s*\.\s*[A-Za-z_$]/g)) called.add(m[1]);
-      /**
-       * NARROW TO WHAT CAN ACTUALLY FAIL: a name that is a top-level module-scope call - not a method invoked on an
-       * object, not a class member, not a word inside a comment or a template. The rule is:
-       *
-       *   - the call is not preceded by `.` or `?.` (so `this.foo()` and `obj.foo()` are excluded)
-       *   - the name is not an own property of the module (declared or imported)
-       *   - the name EXISTS as an export somewhere in src/ - which is the signature of "exists but was not imported
-       *     here", as opposed to a typo or a class method
-       *
-       * That third condition is what makes this a check rather than a heuristic: `recordStartLatency` is exported by
-       * alarms.js and used in service-worker.js, and those two facts together are the bug.
-       */
-      for (const name of called) {
-        if (AMBIENT.has(name)) continue;
-        if (known.has(name)) continue;
-        if (name.length <= 2) continue;
-        if (/^(constructor|prototype|call|apply|bind)$/.test(name)) continue;
-        if (!EXPORTED.has(name)) continue;                    // a typo or a class member, not a missing import
-        if (DEFINED_HERE.has(file)?.has(name)) continue;       // this module defines it itself
-        offenders.push(`${relative(ROOT, file)}: ${name}`);
-      }
-    }
-    /**
-     * This is a coarse check on purpose - it is a NET for a specific class of fault, not a parser. The assertion is that
-     * the two names that shipped broken are caught; anything else it finds is reported so it can be looked at.
-     */
-    const knownBad = offenders.filter((o) => /recordStartLatency|ALARM_PREFIX|listScheduled/.test(o));
-    expect(knownBad, `names that shipped undefined and should never appear here again:\n${knownBad.join('\n')}`)
-      .toHaveLength(0);
-    if (offenders.length) {
-      console.log(`\nthe import net found ${offenders.length} unresolved name(s) - inspect these:`);
-      for (const o of offenders.slice(0, 40)) console.log(`   ${o}`);
-    }
+    const r = spawnSync(process.execPath, [join(ROOT, 'scripts', 'check-imports.mjs')], { encoding: 'utf8' });
+    const combined = `${r.stdout ?? ''}${r.stderr ?? ''}`.trim();
+    expect(r.status, combined).toBe(0);
+    expect(combined).toMatch(/import check: clean/);
   });
 });

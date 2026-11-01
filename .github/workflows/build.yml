@@ -48,6 +48,12 @@ jobs:
       - name: unit tests
         run: npx vitest run
 
+      - name: every name used is imported or declared
+        # Runs independently of the vitest suite as well as inside it. The suite carries a delegating test, but two of
+        # the four gaps found in this check were in that test rather than in the code, so the script is also invoked
+        # directly - a failure here names the file and the identifier.
+        run: node scripts/check-imports.mjs
+
       - name: build both targets
         run: npm run build:all
 

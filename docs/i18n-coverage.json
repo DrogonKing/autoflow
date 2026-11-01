@@ -1,17 +1,17 @@
 {
-  "en_keys": 279,
-  "fa_keys": 279,
-  "used_keys": 180,
+  "en_keys": 285,
+  "fa_keys": 285,
+  "used_keys": 188,
   "missing_in_en": [],
   "missing_in_fa": [],
   "unused_keys": [
     "action.addStep",
-    "action.copied",
     "action.export",
     "action.import",
     "action.newList",
     "app.tagline",
     "basic.name",
+    "basic.needTime",
     "basic.savedHint",
     "empty.data",
     "empty.scheduled",
@@ -44,8 +44,6 @@
     "msg.notValidJson",
     "msg.scriptWarning",
     "opt.appearance",
-    "opt.stepDelay",
-    "opt.stepDelayHint",
     "run.done",
     "run.error",
     "run.next",
@@ -105,6 +103,14 @@
     "timer.nextPreview",
     "timer.title"
   ],
-  "hardcoded": [],
-  "passed": true
+  "hardcoded": [
+    "src/ui/panel/panel.js:622  hardcoded literal: 'x'",
+    "src/ui/panel/panel.js:625  hardcoded literal: 'y'",
+    "src/ui/panel/panel.js:993  hardcoded literal: 'variable'",
+    "src/ui/panel/panel.js:1002  hardcoded literal: 'attribute'",
+    "src/ui/panel/panel.js:1308  hardcoded literal: '\\\\u2715'",
+    "src/ui/panel/panel.js:995  hardcoded literal: 'variable name'",
+    "src/ui/panel/panel.js:1004  hardcoded literal: 'attribute name'"
+  ],
+  "passed": false
 }

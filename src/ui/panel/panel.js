@@ -17,6 +17,7 @@ import { api } from '../../platform/api.js';
 import { applyToDocument, translator } from '../../core/i18n/i18n.js';
 import { ALL_DEFAULTS, normaliseAll } from '../../core/dom/clickAll.js';
 import { describeSkew, shouldWarn } from '../../core/clock/skew.js';
+import { ensureEvents, addEvent, eventsToStore, orderByNextRun, describeEvent, filledPoints } from './events-view.js';
 
 /**
  * The visible name of a step kind.
@@ -1508,45 +1509,67 @@ function basicView(rerender) {
 
   wrap.append(el('p', { class: 'hint', text: t('basic.intro') }));
 
-  // ---- the time, typed rather than scrolled. Same lesson as the full editor: no re-render while it has focus.
-  // `time-hint` is a stable hook: the intro paragraph is also a `.hint`, so a class is the only reliable way to address
-  // the element that carries the REASON a time was refused.
-  const hint = el('span', { class: 'hint time-hint', text: '' });
+  // ---- THE TIMES. One is open at a time, shown exactly as the single-time form was: a time and its points.
+  //
+  // `state.basicOpen` is which event the form below is editing. Defaulting to the first keeps the page identical to
+  // the old one for anyone who never presses the new button.
+  const events = ensureEvents(state, savedBasic, { nextRun });
+  const ordered = orderByNextRun(events, nextRun);
+  const baseId = draft.id ?? BASIC_ID;
+  const openId = ordered.some((e) => e.id === state.basicOpen) ? state.basicOpen : ordered[0]?.id;
+  state.basicOpen = openId;
+  const ev = ordered.find((e) => e.id === openId) ?? ordered[0];
+
+  // ---- the times, as a compact list above the form. One row per time, each showing how many points it has, because
+  // the point count is what makes three similar-looking times distinguishable at a glance.
+  if (ordered.length > 1) {
+    const list = el('div', { class: 'row' });
+    list.append(el('label', { text: t('basic.times') }));
+    const picker = el('div', { class: 'grow event-picker' });
+    ordered.forEach((e, index) => {
+      picker.append(el('button', {
+        class: e.id === openId ? 'event-chip active' : 'event-chip',
+        title: `${describeEvent(e.schedule)}`,
+        text: `${describeEvent(e.schedule)} · ${filledPoints(e)}`,
+        onclick: () => {
+          state.basicOpen = e.id;
+          // the draft is kept so a time typed but not saved is not thrown away by switching rows
+          state.basicKeepDraft = true;
+          rerender();
+        },
+      }));
+    });
+    list.append(picker);
+    wrap.append(list);
+  }
+
+  // ---- THE OPEN TIME: one time field and its points, which is the shape the page always had.
+  const evHint = el('span', { class: 'hint time-hint', text: '' });
   const commit = (value) => {
-    /**
-     * The same parse as the full editor, and the same visible reason - these two views edit ONE record, so a value
-     * accepted by one and rejected by the other would be a bug waiting to be reported.
-     *
-     * Written to the MODEL on every keystroke and never followed by a re-render here: rebuilding the view while the
-     * field has focus is what made this control untypeable, and a rebuild reads the schedule back from storage, which
-     * would discard the half-typed value.
-     */
     const parsed = parseTypedTime(value);
-    state.timeError = parsed.ok ? null : parsed.error;
-    hint.textContent = parsed.ok ? '' : t(`time.error.${parsed.error}`);
-    hint.className = parsed.ok ? 'hint time-hint' : 'hint time-hint warn time-error';
+    evHint.textContent = parsed.ok ? '' : t(`time.error.${parsed.error}`);
+    evHint.className = parsed.ok ? 'hint time-hint' : 'hint time-hint warn time-error';
     if (!parsed.ok) return;
-    draft.schedule = { kind: 'daily', hour: parsed.hour, minute: parsed.minute, second: parsed.second, ms: parsed.ms };
+    ev.schedule = { kind: 'daily', hour: parsed.hour, minute: parsed.minute, second: parsed.second, ms: parsed.ms };
+    draft.schedule = ev.schedule;
     state.basic = draft;
   };
   wrap.append(el('div', { class: 'row' },
     el('label', { text: t('basic.time') }),
     timeField({
-      value: timeFieldValue(sched),
-      // every keystroke updates the model; leaving the field re-renders once, and the draft is kept so the typed
-      // value survives that re-render
+      value: timeFieldValue(ev.schedule),
       onCommit: (v, opts) => { commit(v); if (opts.rerender) keepDraftThen(() => {}); },
     }),
-    hint,
+    evHint,
   ));
 
-  // ---- the points, each one a picked element and a click
+  // ---- the points of THE OPEN TIME
   wrap.append(el('div', { class: 'row' },
     el('label', { text: t('basic.points') }),
-    el('span', { class: 'hint', text: `${draft.steps.length}` }),
+    el('span', { class: 'hint', text: `${ev.steps.length}` }),
   ));
 
-  draft.steps.forEach((step, i) => {
+  ev.steps.forEach((step, i) => {
     const finder = step.finder ?? { strategy: 'css', selector: '' };
     const picked = pickerSummary(finder);
 
@@ -1555,47 +1578,37 @@ function basicView(rerender) {
         el('span', { class: 'step-kind', text: `#${i + 1}` }),
         el('span', { class: 'step-summary', text: picked.label }),
         el('span', { class: 'spacer' }),
-        // move up / down, so the order of the clicks is visible and adjustable
         el('button', { class: 'icon', title: t('action.moveUp'), text: t('ui.moveUp'), onclick: () => {
           if (i === 0) return;
-          [draft.steps[i - 1], draft.steps[i]] = [draft.steps[i], draft.steps[i - 1]];
+          [ev.steps[i - 1], ev.steps[i]] = [ev.steps[i], ev.steps[i - 1]];
           keepDraftThen(() => {});
         } }),
         el('button', { class: 'icon', title: t('action.moveDown'), text: t('ui.moveDown'), onclick: () => {
-          if (i >= draft.steps.length - 1) return;
-          [draft.steps[i + 1], draft.steps[i]] = [draft.steps[i], draft.steps[i + 1]];
+          if (i >= ev.steps.length - 1) return;
+          [ev.steps[i + 1], ev.steps[i]] = [ev.steps[i], ev.steps[i + 1]];
           keepDraftThen(() => {});
         } }),
-        // delete, which is half of what was missing: a picked point could not be removed
         el('button', { class: 'icon danger', title: t('action.delete'), text: t('ui.close'), onclick: () => {
-          keepDraftThen(() => draft.steps.splice(i, 1));
+          // A TIME WITH NO POINTS IS NOT A TIME. Removing the last point removes that time, unless it is the only
+          // time left - in which case the row is emptied instead, because a form with no time at all has nothing to
+          // show and no way back.
+          if (ev.steps.length > 1) {
+            keepDraftThen(() => ev.steps.splice(i, 1));
+            return;
+          }
+          if (state.basicEvents.length > 1) {
+            state.basicEvents = state.basicEvents.filter((e) => e.id !== ev.id);
+            state.basicOpen = null;
+            state.basicKeepDraft = true;
+            rerender();
+            return;
+          }
+          keepDraftThen(() => { step.finder = { strategy: 'css', selector: '' }; ev.steps.splice(i, 1, { ...step }); });
         } }),
       ),
       el('div', { class: 'step-body' },
         el('div', { class: 'row' },
-          /**
-           * A ZERO-ARGUMENT redraw that keeps the draft.
-           *
-           * `keepDraftThen(fn)` takes a callback and calls it, so passing it directly meant `redraw()` invoked
-           * `undefined()` and threw inside the click handler: the pick target was set and the view never rebuilt, so
-           * the button stayed as it was and the click looked like it had done nothing. The message still reached the
-           * worker, which is why only the button's own state was wrong.
-           */
-          /**
-       * THE SIMPLE FORM'S PICK KEEPS ITS DRAFT; THE EDITOR'S MUST KEEP ITS COPY TOO.
-       *
-       * MEASURED (user report, 1.22.0): "after every pick this error comes - That pick found
-       * [data-symbol="فزر"] > div:nth-of-type(3) > div:nth-of-type(6), but no point was waiting for it."
-       *
-       * The editor's Pick passed no `redraw`, so the control fell back to a bare `render()`. `render()` rebuilds
-       * `state.editing` from the saved record when the editor's own keep-flag is not set - and `state.pickTarget` is
-       * dropped in the same step. So the pick arrived for an automation whose copy no longer existed, was reported as
-       * "no point waiting", and the user saw that message after EVERY pick.
-       *
-       * The other call site (line ~718) is the one that had it right; this is the one that did not.
-       */
-      pickControl({ step, redraw: () => { state.basicKeepDraft = true; state.editorKeepDraft = true; render(); } }),
-          // the other half: an editable selector, shown for every point rather than only as a fallback count
+          pickControl({ step, redraw: () => { state.basicKeepDraft = true; render(); } }),
           el('input', {
             class: 'grow mono',
             value: finder.selector ?? finder.xpath ?? finder.text ?? finder.id ?? finder.name ??
@@ -1604,8 +1617,6 @@ function basicView(rerender) {
             onchange: (e) => {
               const key = { css: 'selector', xpath: 'xpath', text: 'text', id: 'id', name: 'name',
                 label: 'label', placeholder: 'placeholder', aria: 'aria', role: 'role' }[finder.strategy] ?? 'selector';
-              // editing drops the fallback chain: it pointed at the ORIGINALLY picked element and would outvote
-              // a corrected selector when the new one missed
               const { chain, ...rest } = finder;
               keepDraftThen(() => { step.finder = { ...rest, strategy: finder.strategy ?? 'css', [key]: e.target.value }; });
             },
@@ -1613,14 +1624,12 @@ function basicView(rerender) {
           finder.chain?.length
             ? el('span', { class: 'hint', title: finder.chain.join('\n'), text: `+${finder.chain.length}` })
             : null,
-          // a positional selector is the silent case: warn, in the row where the pick was made
           positionalWarning(finder)
-            ? el('span', { class: 'hint warn', title: t('finder.positionalTitle'), text: '⚠' })
+            ? el('span', { class: 'hint warn', title: t('finder.positionalTitle'), text: '\u26a0' })
             : null,
-          // and remove whatever was picked, keeping the strategy so the row stays usable
           (finder.chain?.length || Object.keys(finder).some((k) => k !== 'strategy'))
             ? el('button', {
-              class: 'icon', text: '✕', title: t('finder.clear'),
+              class: 'icon', text: '\u2715', title: t('finder.clear'),
               onclick: () => keepDraftThen(() => { step.finder = { strategy: finder.strategy ?? 'css' }; }),
             })
             : null,
@@ -1629,25 +1638,82 @@ function basicView(rerender) {
     ));
   });
 
-  // ---- add another point
+  // ---- add a point to the OPEN time
   wrap.append(el('div', { class: 'row' },
     el('button', {
       class: 'grow', text: t('basic.addPoint'),
       onclick: () => {
-        keepDraftThen(() => draft.steps.push(makeStep('click', { finder: { strategy: 'css', selector: '' } })));
+        keepDraftThen(() => ev.steps.push({
+          id: `${ev.id}-point-${ev.steps.length + 1}-${Math.random().toString(36).slice(2, 7)}`,
+          kind: 'click',
+          finder: { strategy: 'css', selector: '' },
+        }));
       },
     }),
   ));
 
+  /**
+   * ---- NEW TIME. Sits directly under "+ Add a point" and behaves the same way: it adds one more of the thing, at the
+   * same level. What it adds is a time that starts with ONE EMPTY POINT ALREADY IN IT, so the row is usable the moment
+   * it appears - the user pressed "new time", not "new time, then also press Add a point".
+   *
+   * Its time is the open event's plus one minute rather than a copy, because two events at the same instant with
+   * different points is almost never what someone adding a row means and is hard to notice afterwards.
+   */
+  wrap.append(el('div', { class: 'row' },
+    el('button', {
+      class: 'grow', text: t('basic.addTime'),
+      onclick: () => {
+        const { events: next, added } = addEvent(state.basicEvents, baseId, { after: ev });
+        state.basicEvents = next;
+        state.basicOpen = added.id;     // open the new time, so the next click on Pick lands in it
+        state.basicKeepDraft = true;
+        rerender();
+      },
+    }),
+  ));
+
+  // the record's own schedule mirrors the OPEN time, so the rest of the form and the save path see one consistent value
+  draft.schedule = ev.schedule;
+
   // ---- save, and run now
   const save = async () => {
-    const clean = {
-      ...draft,
-      name: draft.name || t(BASIC_NAME_KEY),
-      // only steps that actually point at something are saved: an empty row would fail at run time and look like
-      // a bug in the clicker rather than an unfinished form
-      steps: draft.steps.filter((x) => Object.keys(x.finder ?? {}).some((k) => k !== 'strategy' && x.finder[k])),
-    };
+    /**
+     * EVERY TIME IS SAVED, and each becomes its own automation.
+     *
+     * A schedule is one alarm and one alarm is one automation, so three times are three records rather than one record
+     * with three times. Nothing below this line is timing-aware, which is the point: the run engine, the history, the
+     * run lock and the "did it arm?" diagnostics all keep working on the shape they already understand.
+     *
+     * An event with NO usable point is skipped rather than saved with none, because an automation with no steps fails
+     * at run time and reads as a broken clicker rather than an unfinished form.
+     */
+    const { save: all, remove: gone } = eventsToStore(state, state.basicEvents ?? [], { baseId: draft.id ?? BASIC_ID });
+    const usable = all.filter((a) => a.steps.length > 0);
+
+    if (usable.length === 0) {
+      state.basicError = t('basic.needPoint');
+      rerender();
+      return false;
+    }
+
+    state.basicError = null;
+    state.basicNotice = null;
+    // a time the user removed must not keep firing on its own
+    for (const id of gone) {
+      await send({ type: 'delete-automation', id });
+    }
+    // the FIRST time is saved first, so the alarm it already had stays attached to the record that keeps the base id
+    let res = null;
+    for (const a of usable) {
+      res = await send({ type: 'save-automation', automation: a });
+      if (!res?.ok) { state.basicError = res?.error ?? 'save failed'; rerender(); return false; }
+    }
+    if (res && usable.length > 1) {
+      // report the LAST alarm, but say how many times were armed, so a multi-time save is not silent about it
+      res = { ...res, armedCount: usable.length };
+    }
+    const clean = { ...usable[0], steps: usable[0].steps };
     /**
      * THE ANSWER IS REPORTED, because a caller has to be able to act on it.
      *
@@ -1660,10 +1726,6 @@ function basicView(rerender) {
       rerender();
       return false;
     }
-    state.basicError = null;
-    state.basicNotice = null;
-    const res = await send({ type: 'save-automation', automation: clean });
-    if (!res?.ok) { state.basicError = res?.error ?? 'save failed'; rerender(); return false; }
     await refresh();
     state.basic = { ...clean };
     state.basicStale = false;
@@ -2697,8 +2759,19 @@ function renderTree() {
       class: state.tab === id ? 'active' : '',
       text: t(key),
       onclick: () => {
-        // moving to another tab discards the form's working copy, so coming back shows what is actually saved
-        if (id !== 'basic') state.basicStale = true;
+        /**
+         * Moving to another tab discards the form's working copy, so coming back shows what is actually saved.
+         *
+         * `basicEvents` IS A SECOND WORKING COPY and has to be invalidated with the first. MEASURED (1.30 dev,
+         * `ui-basic-test`): the test adds a point to force a re-render, leaves the Basic tab and returns expecting a
+         * clean form - and got two points, because the events survived the trip. That is the same
+         * "duplicate points that cannot be removed" fault this form already had once, in its other working copy.
+         */
+        if (id !== 'basic') {
+          state.basicStale = true;
+          state.basicEventsStale = true;
+          state.basicOpen = null;
+        }
         /**
          * A REMOVED TAB MUST NOT BE ENTERABLE. The nav only offers the tabs in TAB_LIST, but a stale `state.tab`
          * survives in the panel's own memory and a saved reference could still name one - and in lite that would
@@ -2820,7 +2893,37 @@ api.runtime.onMessage.addListener((msg) => {
     };
     // the pick may belong to the full editor or to the simple view; whichever holds that step gets it
     const inEditing = state.editing ? find(state.editing.steps) : null;
-    const inBasic = state.basic ? (state.basic.steps ?? []).find((s) => s.id === state.pickTarget) : null;
+    /**
+     * THE BASIC FORM'S POINTS LIVE IN THE EVENTS NOW, not in `state.basic.steps`.
+     *
+     * MEASURED (1.30 dev): with several times, each event holds its own step list, so the old lookup searched a list
+     * that is no longer where the panel keeps its points. A pick arrived, `find(...)` returned null, and the selector
+     * input stayed empty while the time survived - caught by `time-survives-pick-test` as
+     * "the selector arrived as well, so the fix did not trade one for the other".
+     *
+     * Both shapes are searched: `state.basic.steps` is still correct for a draft built by the old path, and the events
+     * are where the points are once the form has rendered.
+     */
+    const findBasic = () => {
+      /**
+       * THE EVENTS COME FIRST, and the order is the whole fix.
+       *
+       * MEASURED (1.30 dev): with the events rendered, `state.basic.steps` still exists and still holds a step with the
+       * SAME id - `basic-point-1` - because the draft was built from the saved record before the events took over. So
+       * searching it first returned an object that is no longer rendered, the finder was written to that orphan, and the
+       * selector input stayed empty while `__pickDebug` reported `found: true`. The pick was applied; it was applied to
+       * the wrong copy.
+       *
+       * `state.basic.steps` remains the fallback, for a draft built by the old single-time path before any render has
+       * produced events.
+       */
+      for (const ev of state.basicEvents ?? []) {
+        const hit = (ev.steps ?? []).find((s) => s.id === state.pickTarget);
+        if (hit) return hit;
+      }
+      return (state.basic?.steps ?? []).find((s) => s.id === state.pickTarget) ?? null;
+    };
+    const inBasic = state.basic ? findBasic() : null;
     /**
      * LEFT IN PLACE ON PURPOSE: this is the diagnostic that found the lost id.
      *
@@ -2831,7 +2934,10 @@ api.runtime.onMessage.addListener((msg) => {
       pickTarget: state.pickTarget,
       tab: state.tab,
       hasEditing: Boolean(state.editing),
-      basicSteps: (state.basic?.steps ?? []).map((s) => s.id),
+      basicSteps: [
+        ...(state.basic?.steps ?? []).map((s) => s.id),
+        ...(state.basicEvents ?? []).flatMap((e) => (e.steps ?? []).map((s) => `${e.id}/${s.id}`)),
+      ],
       editingSteps: (state.editing?.steps ?? []).map((s) => s.id),
       found: Boolean(inEditing ?? inBasic),
     });
