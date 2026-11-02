@@ -15,6 +15,7 @@ import { findElement, findAll, describeElement, buildFinder, isVisible } from '.
 import { afterClick, describeAllClicks, normaliseAll, pickNext } from '../core/dom/clickAll.js';
 import {
   realClick, fillElement, selectOption, pressKeys, scrollAction, ActionError,
+  verifyLabel,
 } from '../core/dom/actions.js';
 
 const PICKER_ATTR = 'data-autoflow-pick';
@@ -302,6 +303,27 @@ async function executeStep(step, timing) {
 
   switch (step.kind) {
     case 'click': {
+      /**
+       * THE ELEMENT MUST STILL BE THE ONE THAT WAS PICKED.
+       *
+       * MEASURED (`security-click-integrity-test`): a page that replaced its own button with a different element carrying
+       * the same `id` received the click, and so did a swap that happened after this run resolved the element. The finder
+       * is an anchor - attribute plus value - and re-resolving it finds whatever now holds that anchor; the label the
+       * picker already records was never compared.
+       *
+       * Only checked when a label was recorded, so nothing that works today starts failing. A mismatch refuses the step
+       * and names both values, because a wrong click on a trading page is worse than no click.
+       */
+      if (el && step.finder) {
+        const labelCheck = verifyLabel(el, step.finder);
+        if (!labelCheck.ok) {
+          throw new ActionError(
+            `refusing to click: the element no longer reads "${labelCheck.expected}"`
+              + ` (it now reads "${labelCheck.found}"). The page replaced it after this point was recorded.`,
+            { finder: step.finder, expected: labelCheck.expected, found: labelCheck.found },
+          );
+        }
+      }
       // ---- click EVERY match, when the step asks for it
       //
       // The finding above resolved one element. With `clickAll` set the step means "every match", so the list

@@ -15,7 +15,7 @@
  * controlled input unchanged, which is the single most common "the field stayed empty" report.
  */
 
-import { findElement, FinderError, isVisible, describeElement } from './finder.js';
+import { findElement, FinderError, isVisible, describeElement, accessibleName } from './finder.js';
 
 export class ActionError extends Error {
   constructor(message, detail = {}) {
@@ -93,6 +93,36 @@ function bringIntoView(el, block = 'center') {
  *
  * The coordinates come from the element's own box so a listener reading `clientX` gets a sensible value.
  */
+/**
+ * Does the element still carry the label it was recorded with?
+ *
+ * @returns {{ok: true} | {ok: false, expected: string, found: string}} `expected` and `found` are trimmed and collapsed so
+ *   a re-render that only changes whitespace is not treated as a swap.
+ */
+export function verifyLabel(el, finder) {
+  const expected = typeof finder?.label === 'string' ? finder.label.replace(/\s+/g, ' ').trim() : '';
+  if (!expected) return { ok: true };            // nothing recorded, nothing to check
+  const found = accessibleName(el).replace(/\s+/g, ' ').trim();
+  if (found === expected) return { ok: true };
+  /**
+   * AN EMPTY NAME IS NOT A MISMATCH.
+   *
+   * MEASURED: `accessibleName` returns '' for an INPUT that has a value but no label, aria-label, title or text - the
+   * usual case for a quantity or price field. Comparing '' against a recorded label would REFUSE every legitimate click on
+   * such an element, and for a trading clicker a false refusal is a missed order. Only a genuinely different, non-empty
+   * name is evidence that the element was replaced.
+   */
+  if (!found) return { ok: true };
+  /**
+   * A RECORDED LABEL THAT NO LONGER MATCHES IS A REFUSAL, NOT A WARNING.
+   *
+   * MEASURED (`security-click-integrity-test`): replacing the button with a different element that inherits the recorded
+   * `id` made the extension click the replacement. On a trading page "click buy" landing on a control the user did not
+   * choose is the exact failure the recorded text exists to catch, so the step fails loudly and names both values.
+   */
+  return { ok: false, expected, found };
+}
+
 export function realClick(el, { button = 'left', clickCount = 1, force = false } = {}) {
   if (!el) throw new ActionError('cannot click: no element');
   const w = windowOf(el);

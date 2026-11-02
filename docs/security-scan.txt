@@ -11,7 +11,7 @@ Findings: 14
 ------------------------------------------------------------------------------
 MEDIUM (4)
 ------------------------------------------------------------------------------
-  src/background/service-worker.js:1361
+  src/background/service-worker.js:1388
     network-call
     const res = await fetch(url, {
   src/manifest.json:18
@@ -42,28 +42,28 @@ LOW (10)
   src/ui/options/options.js:19
     innerText-from-page
     else if (k === 'text') node.textContent = v;
-  src/ui/panel/panel.js:34
+  src/ui/panel/panel.js:35
     innerText-from-page
     else if (k === 'text') node.textContent = v;
-  src/ui/panel/panel.js:395
+  src/ui/panel/panel.js:411
     innerText-from-page
     timeHint.textContent = t(`time.error.${state.timeError}`);
-  src/ui/panel/panel.js:399
+  src/ui/panel/panel.js:415
     innerText-from-page
     timeHint.textContent = hasSecond ? t('sched.secondHint') : '';
-  src/ui/panel/panel.js:658
+  src/ui/panel/panel.js:682
     innerText-from-page
     live.textContent = t('ui.pick');
-  src/ui/panel/panel.js:1503
+  src/ui/panel/panel.js:1725
     innerText-from-page
-    hint.textContent = parsed.ok ? '' : t(`time.error.${parsed.error}`);
+    evHint.textContent = parsed.ok ? '' : t(`time.error.${parsed.error}`);
 
 ------------------------------------------------------------------------------
 Message handlers and sender validation
 ------------------------------------------------------------------------------
   onMessage listeners found : 1
   that inspect the sender  : 1
-    src/background/service-worker.js:1233  params=(msg, sender, sendResponse)  validates sender: yes
+    src/background/service-worker.js:1260  params=(msg, sender, sendResponse)  validates sender: yes
 
 ------------------------------------------------------------------------------
 Manifest
