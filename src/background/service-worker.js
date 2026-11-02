@@ -108,10 +108,20 @@ function withTimeout(promise, ms, label) {
  * makes the first run work on an already-open page.
  */
 async function sendToTab(tabId, message, { injectIfMissing = true } = {}) {
+  /**
+   * THE PAYLOAD IS BUILT ONCE, OUTSIDE THE `try`.
+   *
+   * The payload crosses a message port, which structured-clones it; a function anywhere inside would fail the send on
+   * Firefox, so the step is sanitised here.
+   *
+   * MEASURED (`send-to-tab-retry.test`): this was declared with `const` INSIDE the `try` and used by the retry in the
+   * `catch`. Out of scope there, so the retry threw `ReferenceError: safeMessage is not defined` - content.js was
+   * injected and the message was never re-sent. The first attempt after an extension reload, or on a freshly opened tab,
+   * is exactly the case the retry exists for; and for a scheduled precise run the first element step has already consumed
+   * `atMs`, so the runner's retry has no target time left and the click can fire before its instant.
+   */
+  const safeMessage = message?.step ? { ...message, step: cloneableOrString(message.step) } : message;
   try {
-    // The payload crosses a message port, which structured-clones it. A function anywhere inside would
-    // fail the send on Firefox; sanitising here means a page-derived value can never break the channel.
-    const safeMessage = message?.step ? { ...message, step: cloneableOrString(message.step) } : message;
     /**
      * THE CAP DEPENDS ON WHAT THE STEP IS ALLOWED TO DO.
      *

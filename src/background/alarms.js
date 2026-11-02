@@ -45,8 +45,30 @@ export async function rescheduleAll(automations, { now = Date.now() } = {}) {
      * case. Both facts are now passed to `armTarget`: the evidence (`firedAt`) and the fact that the question here is
      * "what comes next". Asking from the fired target makes `nextRun` return the following occurrence directly.
      */
-    const askFrom = Number.isFinite(fired) && fired < now ? fired : now;
-    const armed = armTarget(a.schedule, askFrom, { firedAt: fired });
+    /**
+     * ASK FROM AFTER WHAT FIRED, BUT NOT FROM AN ANCIENT INSTANT.
+     *
+     * MEASURED (`reschedule-long-gap`): `fired` was used raw, so for a target that ran 30 seconds ago `nextRun(schedule,
+     * fired)` returned that SAME occurrence - it had already passed - and `when = max(base, now + 1000)` armed an alarm for
+     * now. A restart 30 seconds after a run therefore ran the automation a SECOND time, and a browser closed through a
+     * target armed "now" instead of the next occurrence.
+     *
+     * `scheduleOne` already protects against exactly this with `Math.max(fired, now - 1000)`; this function did not.
+     * The one-second floor keeps "ask from just before now" while making an already-passed occurrence unreachable.
+     */
+    const askFrom = Number.isFinite(fired) && fired < now ? Math.max(fired, now - 1000) : now;
+    /**
+     * `preferNext` WHEN SOMETHING ALREADY FIRED, because this caller is asking what comes NEXT.
+     *
+     * MEASURED (`reschedule-long-gap`): with only the one-second floor, a target that fired 30 seconds ago still came
+     * back as `justMissedMs: 30000` and armed `now + 1000` - a SECOND run of a time that had already run, which is the
+     * duplicate-order case the restart guard exists to prevent. `armTarget`'s "just missed" answer belongs to the other
+     * question ("the user saved a time that has just gone by - should it run now?"), which is `scheduleOne`'s caller.
+     *
+     * A worker start, a restart and an import all come through here, and in every one of them a time that already fired
+     * must wait for its next occurrence rather than firing again.
+     */
+    const armed = armTarget(a.schedule, askFrom, { firedAt: fired, preferNext: Number.isFinite(fired) && fired < now });
     const at = armed.at;
     if (at === null && armed.missedMs === 0) {
       results.push({ id: a.id, name: a.name, ok: false, reason: 'this schedule will not fire again' });

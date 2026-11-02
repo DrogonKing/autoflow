@@ -1,112 +1,62 @@
-# AutoFlow 1.39.0 — first stable release since 1.28.0
+> ## 1.39.2 — three faults from the review, each reproduced before being fixed
+>
+> Verified in a controlled browser and by executing the real functions, **not against a real trading site yet**.
 
-Schedules precise clicks on a trading page. Multiple independent times, each with its own picks, millisecond targets,
-and a Persian/English panel. This is the first build promoted out of beta after a long series of reported faults were
-found, reproduced in a real browser, and fixed.
+Three of the review's findings were confirmed by reproducing them here, then fixed. Each has a test that fails
+without the fix — checked by reverting the fix and watching the suite go red.
 
-> **The honest scope of testing.** Every fix here was measured in a controlled Chromium with the extension loaded, and
-> the test that proves it is in the repository. What has **not** been proven end to end is a real trade on your live
-> trading site — the selectors you recorded are positional and the site's own latency is not reproducible in a harness.
-> Treat the first live run as a test: watch the Log tab.
-
----
-
-## Install
-
-**Chrome / Edge / Brave / Opera** — download `autoflow-chrome.zip`, unpack it, then
-`chrome://extensions` → enable Developer mode → **Load unpacked** → pick the unpacked folder.
-
-**A lighter build** is available as `autoflow-chrome-lite.zip` (93 KB against 140 KB). It drops the panel's extras and
-keeps the scheduling core.
-
-**Firefox** — download `autoflow-firefox.zip`. A permanent install needs Mozilla's signature, which this archive does
-not carry, so use `about:debugging#/runtime/this-firefox` → **Load Temporary Add-on** → pick `manifest.json`. Temporary
-add-ons are removed when Firefox closes. A `-lite` variant exists for Firefox too.
-
-**Source** — `autoflow-source.zip` is the full tree, including tests and security scripts.
-
----
-
-## What changed since 1.28.0
-
-Everything below was reported by the user, reproduced, and fixed with a test that fails without the fix.
-
-### Multiple times, each with its own picks
-
-One time per schedule is gone. Add a time, give it its own click points, add another. **Each time carries its own
-targets and its own alarm** — verified end to end: three times, three points picked with a real mouse, three alarms
-armed, each firing its own clicks.
-
-A `✕` on each time removes it, and the removal is saved immediately rather than on a debounce.
-
-### Millisecond timing
-
-`13:50:01.250` is accepted and honoured. The field used to hold `maxlength="8"`, which silently refused the seventh
-character of a twelve-character time. Fixed, and the test types with a **real keyboard** — the earlier version used
-`insertText`, which bypasses `maxlength` and therefore missed the fault entirely.
-
-### The time field behaves
-
-Four separate faults, all measured:
-
-- **A typed time replaces the old value.** Clicking into the field selects the current time, so entering a new one
-  does not append to it. Before: `09:00:00` + nine digits became `09:00:00.103`, and `maxlength` refused the rest.
-- **One save, when the value settles.** Blur, Enter, or leaving the field. Before: a save per keystroke — nine digits
-  armed nineteen saves, and an idle panel made a hundred and forty-seven in five seconds.
-- **Clicking anywhere else leaves the field.** The panel used to treat a press on a label or the background as "still
-  in the time field" and put the caret back, so the only way out was Tab or Enter.
-- **A ✓ beside each time** saves that time immediately and leaves the field — a second, visible way out.
-
-### Focus is no longer stolen
-
-Typing into the field was interrupted by the panel rebuilding the view. The form now remembers which field you were in,
-where the caret was, and the text you had typed, and restores all three. A blur caused by the panel's own rebuild is
-not treated as an edit.
-
-### Correct page per time
-
-A pick's page was recorded against the **first** automation regardless of which time it belonged to, so only the first
-time could run — the other times failed with *"has never had an element picked in it"*. Each pick's page is now
-recorded against the time that owns it.
-
-### One firing per target, not a storm
-
-A failed run re-armed for a moment that had already passed, and Chrome fires a past-due alarm immediately — so one
-target fired three times in two seconds. Measured: three firings become one.
-
-### A failing save no longer destroys a good alarm
-
-An unsuccessful arming attempt cancelled an alarm that was already registered, leaving a time saved, shown as armed,
-and never firing.
-
-### Import guard
-
-A static check that catches an identifier used but never imported — the fault class that produced two blank-panel
-bugs. It had been blind five separate times; each hole was found and closed, and it is now proven in both directions:
-a clean tree passes, and removing a single import fails with that name.
-
----
-
-## Verified before this archive was produced
+## P0 — `sendToTab`'s retry threw `ReferenceError` [was real]
 
 ```
-776 unit tests · 39 files
-41 browser suites green · 0 red
-import guard: clean, and proven to fail on a planted fault
+ReferenceError: safeMessage is not defined
 ```
 
-Each release claim above has a suite that fails without its fix: `new-time-test`, `leave-field-test`,
-`per-time-pick-page-test`, `remove-time-test`, `time-typing-test`, `three-times-test`, `alarm-storm-live-test`.
+`safeMessage` was declared with `const` **inside** the `try` and used by the retry in the `catch`. Out of scope there, so
+content.js was injected and the message was **never re-sent**.
 
----
+Why it mattered more than a confusing error: the first attempt after an extension reload, or on a freshly opened tab, is
+exactly the case this retry exists for. With a scheduled precise run the first element step has already consumed `atMs`,
+so the runner's retry has no target time left and the click can fire **before** its instant.
 
-## Known limits, stated plainly
+`tests/send-to-tab-retry.test.js` — 5 tests. The function is extracted from the source and run against a stubbed browser
+API, with the **real** `cloneableOrString`, so the test cannot pass on a stub that does nothing.
 
-- **A live trade on your exchange has not been proven.** Timing accuracy end to end is `alarm ≈2ms → worker wake
-  10–50ms → tab resolution → message 5–15ms → a 30ms wait`. A background tab is throttled by the browser and that
-  cannot be worked around.
-- **An alarm set less than ~30 seconds ahead fires immediately.** This is Chrome's behaviour, not a bug here.
-- **Firefox needs a signature** for a permanent install.
-- **Anchored selectors cannot tell two byte-identical windows apart.** If the trading site opens a second window with
-  identical structure, no selector distinguishes them.
-- **An automation restored from a backup arrives switched off**, deliberately.
+## P1 — `rescheduleAll` armed *now* after a long gap, and re-ran a recent one [was real]
+
+`scheduleOne` had `Math.max(fired, now - 1000)`; `rescheduleAll` used `fired` raw. Two separate consequences, both
+measured:
+
+- a target that fired **30 seconds ago** came back as `justMissedMs: 30000` and armed `now + 1000` — a **second run** of
+  a time that had already run. This is the duplicate-order case the restart guard exists to prevent;
+- a target from yesterday or five days ago armed "now", so a schedule without a second **ran hours late**.
+
+Both halves are fixed: the one-second floor, and `preferNext` when something already fired. `tests/reschedule-long-gap.test.js`
+— 7 tests over the review's five rows plus the no-second variants. Reverting either half fails 3 of them.
+
+## P3 — `parseNum` treated every comma as a thousands separator [was real]
+
+```
+"12,50"   → 1250     (a hundredfold error on a price)
+"12٫50"   → NaN      (the Persian decimal separator was not handled)
+```
+
+A condition comparing 12.5 against 1250 is silently the wrong question. The comma is now a thousands separator **only
+when it groups exactly three digits**; otherwise it is the decimal point. All three real-world shapes are handled —
+`1,234.56` (Anglo), `1.234,56` (European) and a bare `12,50` — plus U+066B, and Persian/Arabic digits.
+`tests/decimal-comma.test.js` — 7 tests.
+
+## Not done in this build, and why
+
+- **P2, the late-alarm policy** — the review itself says this needs a product decision. A per-automation
+  `lateToleranceMs`, applied to *every* schedule kind, plus a visible signal when a run is skipped, is a feature rather
+  than a defect fix. It is not in this build, and the current behaviour is unchanged and documented below.
+- **P3's smaller items** (stop after `newTab`/`switchTab`, stopping a `repeat` with zero gap, `focusBeforePrecise`
+  visibility, the clock-offset sample correlation). They are real and are next.
+
+## Current behaviour worth knowing
+
+- **An alarm set less than ~30 seconds ahead fires immediately** — Chrome's behaviour, not this code.
+- **`clickAll` inside a run ends the run** by design and by test. The review's note about the loop not yielding to
+  `abort-step` was **not reproduced**: `stepAborted` is checked by the existing `clickAll` suite, so that item is
+  unconfirmed rather than fixed.
+- **A precise run brings the target tab into focus by default.** It will take the window from whatever you are doing.

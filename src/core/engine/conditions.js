@@ -26,16 +26,61 @@ export class ConditionError extends Error {
 /**
  * A number from an observed or expected value, or NaN when there is none.
  *
- * Persian and Arabic digits are converted and thousands separators removed, because a page formats numbers that way.
- * null, undefined, booleans and blank text are NaN rather than 0, so an absent value is never silently a number.
+ * Persian and Arabic digits are converted, because a page formats numbers that way. null, undefined, booleans and blank
+ * text are NaN rather than 0, so an absent value is never silently a number.
+ *
+ * A COMMA IS ONLY A THOUSANDS SEPARATOR WHEN IT GROUPS THREE DIGITS.
+ *
+ * MEASURED (`decimal-comma`): every comma was stripped, so `12,50` became `1250` - a hundredfold error, silently, on a
+ * price. A condition on 12.5 against 1250 is simply the wrong question with the wrong answer. The Persian decimal
+ * separator (U+066B) was not handled at all and produced NaN, so a Persian-formatted price could not be compared.
+ *
+ * The rule: a separator counts as thousands only when what follows it is exactly a group of three digits (and, if a
+ * decimal part follows, that too is consistent). Otherwise it is the decimal separator, which is what a locale that writes
+ * decimals with a comma means.
  */
 function parseNum(v) {
   if (v === null || v === undefined || typeof v === 'boolean' || String(v).trim() === '') return NaN;
   if (typeof v === 'number') return v;
-  const s = String(v)
+  let s = String(v)
     .replace(/[\u06F0-\u06F9]/g, (d) => String(d.charCodeAt(0) - 0x06F0))
     .replace(/[\u0660-\u0669]/g, (d) => String(d.charCodeAt(0) - 0x0660))
-    .replace(/[,\u066C]/g, '');
+    // the Persian and Arabic decimal separators are decimal points, not thousands
+    .replace(/[\u066B]/g, '.')
+    .replace(/[\u066C\u2019\u00A0\u202F]/g, '');   // Arabic thousands, apostrophe, non-breaking and narrow spaces
+  /**
+   * THOUSANDS SEPARATORS ARE REMOVED ONLY WHERE THEY REALLY ARE THOUSANDS SEPARATORS.
+   *
+   * `1,234,567.5` and `1,234` are groups of three; `12,50` and `1,5` are not, and the comma there is the decimal point.
+   * The pattern is applied repeatedly so multi-group values collapse fully.
+   */
+  /**
+   * WHICH SEPARATOR IS THE DECIMAL ONE IS DECIDED BY POSITION, NOT BY GUESSING AT A LOCALE.
+   *
+   * Three shapes are all in real use and all reach this function:
+   *   `1,234.56`  Anglo - comma groups, dot decimals
+   *   `1.234,56`  European - dot groups, comma decimals
+   *   `12,50`     a bare decimal comma
+   *
+   * If BOTH appear, the LAST one is the decimal separator and the other is grouping. If only one appears, it is the
+   * decimal separator unless it groups exactly three digits (so `1,234` is 1234 but `12,50` is 12.5).
+   */
+  const lastComma = s.lastIndexOf(',');
+  const lastDot = s.lastIndexOf('.');
+  if (lastComma >= 0 && lastDot >= 0) {
+    if (lastComma > lastDot) {
+      // European: dots group, the comma is the decimal point
+      s = `${s.slice(0, lastComma).replace(/[.,]/g, '')}.${s.slice(lastComma + 1).replace(/[.,]/g, '')}`;
+    } else {
+      // Anglo: commas group, the dot is the decimal point
+      s = `${s.slice(0, lastDot).replace(/,/g, '')}.${s.slice(lastDot + 1).replace(/,/g, '')}`;
+    }
+  } else if (lastComma >= 0) {
+    // only commas: thousands when each divides a group of three, otherwise the decimal separator
+    s = s.replace(/(\d)[,](?=(\d{3})(\D|$))/g, '$1');
+    const firstComma = s.indexOf(',');
+    if (firstComma >= 0) s = `${s.slice(0, firstComma)}.${s.slice(firstComma + 1).replace(/,/g, '')}`;
+  }
   return Number(s);
 }
 
