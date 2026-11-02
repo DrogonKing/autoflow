@@ -74,3 +74,11 @@ security-xss-test           3 ok · 0 medium · 0 HIGH
 security-click-integrity    3 ok · 0 medium · 0 HIGH
 import guard clean
 ```
+## Also in this build — a flake removed at its cause
+
+`events-ui-test` failed twice in a row with `exactly ONE time field is shown  0`. Not a regression: the harness looked for
+the form before the panel had drawn it. Two guesses were replaced by conditions — `waitForEvent('serviceworker')` cannot
+see a worker that is already running, and `setTimeout(600)` passes or fails by luck under load. The test now polls for the
+worker and waits for the panel's own elements. Three consecutive runs: 9/9, 9/9, 9/9.
+
+A test that says "0 time fields" now means the form did not draw, not that the harness was early.

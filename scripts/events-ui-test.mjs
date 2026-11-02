@@ -46,18 +46,34 @@ const main = async () => {
     args: [`--disable-extensions-except=${dist}`, `--load-extension=${dist}`, '--no-sandbox'],
     viewport: { width: 1280, height: 1000 },
   });
+  /**
+   * WAIT FOR A CONDITION, NOT FOR A TIMEOUT, AND DO NOT MISS AN ALREADY-RUNNING WORKER.
+   *
+   * MEASURED flake: this test failed twice in a row with `exactly ONE time field is shown  0` - it looked for the form
+   * before the panel had drawn it. A fixed `setTimeout(600)` is a guess that passes or fails by luck under load, and
+   * `waitForEvent('serviceworker')` only catches a worker that starts AFTER the listener is attached, so a worker that is
+   * already running is missed - the documented "no worker" flake. Polling for the worker and then waiting for the panel's
+   * own button removes both: if this test says "0 time fields", the form really did not draw.
+   */
   let [sw] = ctx.serviceWorkers();
-  if (!sw) sw = await ctx.waitForEvent('serviceworker', { timeout: 20000 });
+  for (let i = 0; i < 20 && !sw; i += 1) {
+    await new Promise((r) => setTimeout(r, 500));
+    [sw] = ctx.serviceWorkers();
+  }
+  if (!sw) throw new Error('no service worker appeared at all');
   const extId = new URL(sw.url()).host;
 
   const panel = await ctx.newPage();
   await panel.goto(`chrome-extension://${extId}/panel.html`);
   await panel.waitForLoadState('domcontentloaded');
+  await panel.waitForFunction(() => document.querySelectorAll('nav.tabs button').length > 0, { timeout: 25000 });
   await panel.evaluate(() => {
     const b = [...document.querySelectorAll('nav.tabs button')].find((x) => /Basic|پایه/.test(x.textContent));
     b?.click();
   });
-  await new Promise((r) => setTimeout(r, 600));
+  // the Basic form is drawn when its own field exists, which is what every assertion below depends on
+  await panel.waitForFunction(() => document.querySelector('input.time-input') !== null, { timeout: 15000 })
+    .catch(() => {});
 
   /** Read the form's shape as the user sees it. */
   const shape = () => panel.evaluate(() => {
