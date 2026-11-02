@@ -1,50 +1,43 @@
-> ## ⚠️ BETA — click anywhere to leave the time, and a ✓ to save it by hand
+> ## 1.39.1 — one fix: time ids were nested, and now they are not
 >
 > Verified in a controlled browser, **not against a real trading site yet**.
 
-## What you asked for
+## What was wrong
 
-> «وقتی من عادت دارم وقتی ساعت رو مشخص کردم روی یه جای دیگه داخل صفحه کلیک کنم که از نوشتار ساعت بیام بیرون ولی تو این
-> نسخه تو نوشتار میموند»
-> «انتهای هر ساعت هم یه علامت تیک بذار برای سیو دستی ساعت»
-
-Both are in this build.
-
-**Clicking elsewhere now leaves the field, and saves the time.** The panel used to treat a press on a button, a label or
-the background as "still in the time field" and put the caret back — so the only way out was Tab or Enter. A press
-anywhere outside the field is now read for what it is: the edit is finished. The value is committed and saved once.
-
-**Each time has a ✓ at its end.** It commits what is in the field, leaves it, and saves immediately rather than waiting
-for the debounce — so it is a second, visible way out that also saves. It also works for anyone who would rather click a
-button than the background.
-
-## What was measured, and one thing that cannot be
+Adding times to the Basic form produced **nested, order-dependent ids**:
 
 ```
-click the panel background  → focus left the field ✅ · the new time was stored ✅ · one save ✅
-press ✓                     → time stored ✅ · field left ✅ · saved at once, not on the debounce ✅
+was:   basic, basic-new1, basic-new1-new1, basic-new1-new2
+now:   basic, basic-new1, basic-new2, basic-new3
 ```
 
-**A press on the trading page itself (rather than the panel)** is handled by the same code, through the panel's
-`window` blur and `visibilitychange`. That path could not be driven end to end in this harness — Playwright's
-`bringToFront` does not move real OS focus between pages, measured as `panel saw window blur: 0`. The handler's own
-contract is asserted instead, and the test says so rather than claiming more than it checked. It is worth a look when
-you next use it for real.
+The root used to name a new time was `draft.id` — and after every save the panel sets its draft to the **first** record in
+next-run order. So the root was "whichever time happens to be soonest", which changes with the clock and with every
+retime. Retiming one time was measured to rename another's id.
 
-## One subtlety worth knowing
+**Why that matters more than it sounds.** These ids are what the alarms are registered under
+(`autoflow:run:<id>`). An identifier that depends on sort order is the same class of fault that has already, in this
+project, made a deletion remove the **wrong time** and an alarm point at the **wrong instant**. Generated ids now come
+from the form itself, so they are a simple, stable counter, and an id already in use is skipped rather than taken.
 
-Leaving the field is now **sticky**: after you click away, a later re-render will not pull the caret back into the time
-box. It is cleared only when you next click into a time field. That was the actual cause of being trapped — a press
-commits the value, the save produces a re-render, and the restore put the caret straight back.
+Your stored data is untouched — existing ids are never rewritten. Only newly added times are named differently, and the
+counter skips anything already used, so an older nested id in storage can never be duplicated.
 
 ## Verified
 
 ```
-leave-field-test  10/10   ✓ present and to the right of the field · clicking away leaves and saves ·
-                          ✓ saves at once and leaves · the hidden-window handler leaves the field
-new-time-test      8/8    a typed time replaces the old one, one save, no idle saves
-time-typing        8/8    focus and caret survive a re-render
-ui-basic          25/25   add, delete, reorder points
-three-times       11/11   three times, each with its own point and alarm
-776 unit tests · 39 files · import check clean
+stable-ids-test  9/9   no nesting · one form root plus a counter · the ids match storage ·
+                       every id unique · retiming relabels nothing · an occupied id is skipped
 ```
+
+## Also investigated in this pass, and NOT bugs
+
+Three things looked wrong in a deep sweep and were measured rather than assumed:
+
+- **"Adding ten times only stored three records."** All ten rows were added; a time with **no point is not saved**, by
+  design, because an automation with no steps fails at run time and reads as a broken clicker. The counter was right.
+- **A time stored as `0:00:00.090` once.** The harness typed into a field it had not focused, so the digits went in a
+  different order. Typing into the focused field — fast or slow — produces the right value every time.
+- **A pick recorded for the wrong time.** The harness located the Pick button by position and pressed the wrong one.
+
+Each of those is now asserted in the suites so they cannot be mistaken for faults again.

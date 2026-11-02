@@ -1912,7 +1912,18 @@ function basicView(rerender) {
     el('button', {
       class: 'grow', text: t('basic.addTime'),
       onclick: () => {
-        const { events: next, added } = addEvent(state.basicEvents, baseId, { after: ev });
+        /**
+         * `BASIC_ID`, NOT `draft.id`: generated ids must not depend on which time happens to be first.
+         *
+         * MEASURED (`deep-debug-1`): three times produced `basic`, `basic-new1`, `basic-new1-new1`, and retiming one made
+         * it `basic-new1-new2`. `baseId` was `draft.id`, and after each save `state.basic` is set to the FIRST event in
+         * `orderByNextRun` order - so the id used for the next one was "whichever time is soonest", which changes with the
+         * clock. These ids are what the alarms are registered under (`autoflow:run:<id>`), and an identifier that depends
+         * on sort order is the class of fault that has already made an alarm point at the wrong time here.
+         *
+         * `nextEventId` checks every existing id before choosing, so even an id of an older shape cannot be reused.
+         */
+        const { events: next, added } = addEvent(state.basicEvents, BASIC_ID, { after: ev });
         state.basicEvents = next;
         state.basicOpen = added.id;     // open the new time, so the next click on Pick lands in it
         state.basicKeepDraft = true;
