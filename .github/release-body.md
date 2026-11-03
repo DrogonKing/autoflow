@@ -1,84 +1,80 @@
-> ## 1.39.3 — security review, with one real finding fixed
->
-> Assessed against a hostile page in a real browser, not by reading source.
+## AutoFlow 1.40.2 — the per-time click gap, and Persian digits
 
-A full security pass was run with three adversarial harnesses. **No privilege escalation, no code execution, no path from
-a page to the extension's APIs or storage.** One behavioural finding was real and is fixed here; one correctness issue is
-documented with a workaround.
+Confirmed working on the real page by the user before this stable tag. Everything below was measured with a real browser and
+real clicks, not inferred from the source.
 
-The full write-up is `docs/SECURITY-REVIEW-1.39.2.md` in the source archive.
+## New: a click gap for each time
 
-## Fixed — a swapped element was clicked
-
-The extension re-resolved a recorded point by its **anchor** (an attribute and its value) and clicked whatever now held it,
-without comparing the label the picker had recorded. Measured on a hostile page:
+Beside the **time field** there is a small **⚙**. It opens one row, directly under the field it belongs to:
 
 ```
-the page replaced its "BUY 100 shares" button with a different element carrying the same id
-before:  buy=0  evil=1     ← the replacement received the click
-after:   buy=0  evil=0     ← refused, with the reason named
-         error: "refusing to click: the element no longer reads "BUY 100 shares" (it now reads "SELL 100 shares")"
+Gap between clicks   [ 20 ] ms   ✓  ✕
+Milliseconds between this time's picks. 0 means they fire together. It applies to this time only.
 ```
 
-On a trading page, "click buy" landing on a control the user did not choose is exactly the failure the recorded text
-exists to catch — and the text was stored but never compared.
+Default is **0** — exactly the previous behaviour, so nothing changes until you use it. Type 20, press Enter or ✓, and that
+time's picks fire 20 ms apart. **Persian and Arabic digits are accepted** (۲۰ or ٢٠), the same as the time field.
 
-**The check is deliberately narrow.** It runs only when a label was recorded, so nothing that works today starts failing.
-And an element with **no** accessible name is never refused: a quantity or price field usually has none, and a false refusal
-on a trading clicker is a missed order. `tests/verify-label.test.js` locks both properties in — 6 tests.
+Setting a gap on one time changes nothing about any other time.
 
-## Confirmed safe
+## How the gap is measured
 
-| Attack | Result |
-|---|---|
-| read `chrome.storage` / `chrome.runtime` from a page | no access |
-| `fetch('chrome-extension://<id>/…')` from a page | refused |
-| `postMessage` forgery to the extension | no listener accepts it |
-| poison `localStorage`/`sessionStorage` | separate stores, no effect |
-| overwrite extension globals from a page | no effect |
-| `<img onerror>` / `<svg onload>` / `"><script>` picked through the real picker | stored as **text**, never parsed |
-| crafted backup file imported through the real backup control | no markup produced |
-| a full-screen overlay absorbing the click | impossible — the click is dispatched on the resolved element, not by coordinate |
+```
+gap 0   → the picks land 3–5 ms apart   (a real click costs a millisecond or two)
+gap 20  → 24/24 ms apart, twice in a row, with the engine's own trace agreeing
+```
 
-`externally_connectable` is not declared, which is the single most important line in the manifest: no web page can message
-the extension at all. `cookies`, `debugger`, `webRequest` and `clipboard` are all absent.
+The gap is a **floor between consecutive picks**, measured from the moment the previous click finished. It is never less than
+the value set. A slow page therefore lengthens the real interval honestly rather than cancelling the gap — which is the fault
+that made the first version look unapplied: the earlier design used one absolute target per pick, so a 24 ms click round trip
+silently ate the first gap.
 
-## Documented, not fixed — the Basic form records no page
+## Detail worth knowing
 
-Every automation created in the Basic form is stored with `urls: []`, so at run time the worker falls back to the **active
-tab** — whatever the user has in front. This is the same fact reported earlier as *"has never had an element picked in it,
-so a scheduled run has no page"*.
+- **The first pick is never delayed.** It is the scheduled instant, which is the whole point of the schedule.
+- **Only clicks consume a gap slot.** A `fill` between two picks is not a pick.
+- **Clamped:** 0 to 60000 ms, digits only. A typed `-5` or `1e9` cannot become the interval.
+- **One save, when the value settles** — Enter, ✓, or leaving the field. Not per keystroke.
+- **The record carries it explicitly**, even at zero, so clearing the setting is a real change. Existing records have no such
+  key and behave as zero — nothing to migrate.
 
-The consequence for a timed clicker is worth stating plainly: a run can act on a tab the user did not intend. **Workaround
-today:** set the URL pattern on the Automation tab, or keep the trading page the active tab at the firing moment.
+## Fixed along the way
 
-## Four traps in my own harness, recorded because each produced a false green
+**Persian and Arabic digits in the gap field.** It parsed with ASCII-only digits, so ۲۰ became an empty string and the value
+fell back to zero silently. The project already had a normaliser and the time field already used it; this field was written
+without it.
 
-1. **A message from the service worker to itself never reaches its own listener.** `sendMessage` called *from* the worker
-   returned `res: null`, nothing was clicked, and all four click attacks "passed" against a run that never happened.
-2. **The panel opens on `Automations`**, so the backup file input does not exist in the document until the `data` tab is
-   opened — the import check reported "no file input" and then passed.
-3. **`recordUrls: []` means no page to act on**, and the fallback is the active tab, which in a harness is the panel itself.
-4. **`typeof x` returns a string**, so a truthiness test on it is always true — the permission check reported
-   cookies/debugger/webRequest/clipboard as present while printing `"cookies":"undefined"` beside it.
+That needed a structural fix rather than a one-line one: the normaliser lived inside `panel.js`, which runs a browser API at
+file scope and cannot be imported by a unit test — so the existing test held a **copy** of the function and asserted the copy
+against a copy of the expectations. It could not catch this class of fault, and did not. Digit handling is now a pure module,
+imported by both the panel and the tests, so there is one definition and it is the one that runs.
 
-A security test that passes without exercising the thing it names is worse than no test, so each of these now asserts its
-own precondition.
+**The gap settings box opened at the bottom of the form.** Pressing the gear looked like it did nothing, because the row
+appeared off-screen at the end of the panel. It now renders directly under the time field.
+
+**The diagnostic export could not show this setting.** It listed automations without their options, so a log could not settle
+whether a value had been stored. The export now prints each record's `options`, and the automation line carries `gap=Nms`.
+
+## Tooling
+
+A browser harness can no longer measure a bundle that predates its source: `scripts/lib/fresh-build.mjs` compares the newest
+source mtime against the newest bundle mtime and refuses to run, printing how far behind the build is. A stale `dist/` cost a
+round of debugging **three times** in this project — twice making a fix look broken, once hiding a real bug.
 
 ## Verified
 
 ```
-801 unit tests · 43 files (up from 795)
-security-adversarial-test   7 ok · 0 medium · 0 HIGH
-security-xss-test           3 ok · 0 medium · 0 HIGH
-security-click-integrity    3 ok · 0 medium · 0 HIGH
-import guard clean
+823 unit tests · 45 files
+48 browser suites · 0 failures
+click-gap-browser-test   11 ok · 0 medium · 0 HIGH
+gap-persist-test         Persian digits accepted, survives closing and reopening the panel, picks land 24 ms apart
 ```
-## Also in this build — a flake removed at its cause
 
-`events-ui-test` failed twice in a row with `exactly ONE time field is shown  0`. Not a regression: the harness looked for
-the form before the panel had drawn it. Two guesses were replaced by conditions — `waitForEvent('serviceworker')` cannot
-see a worker that is already running, and `setTimeout(600)` passes or fails by luck under load. The test now polls for the
-worker and waits for the panel's own elements. Three consecutive runs: 9/9, 9/9, 9/9.
+## Not yet proven
 
-A test that says "0 time fields" now means the form did not draw, not that the harness was early.
+**A real run against the trading site.** Everything above is a controlled browser. The positional selectors and the site's
+latency cannot be reproduced here, so treat the first real run as a test and read the Log tab.
+
+Separately, and **not fixed in this build**: the log shows `FIRED TOO LATE ... by 86423068ms`. A key that resolves to the day
+*before* fires as "too late" instead of on the next valid occurrence. It affects a stale date in the target, not normal use,
+and is the next item.
