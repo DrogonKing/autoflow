@@ -1756,6 +1756,15 @@ function basicView(rerender) {
       // one key per time: a key derived from position would move when a row is added or deleted
       focusKey: `basic-time:${ev.id ?? 'basic'}`,
       saveConfirm: true,
+      placeholder: describeEvent(ev.schedule),
+      /**
+       * THE GEAR OPENS THE GAP SETTINGS FOR THE TIME CURRENTLY IN THE FIELD - the "selected time", which is what the request
+       * named. It does not switch which time is open, so nothing being typed is lost.
+       */
+      onOpenSettings: () => {
+        state.basicGapFor = state.basicGapFor === ev.id ? null : ev.id;
+        rerender();
+      },
       value: timeFieldValue(ev.schedule),
       onCommit: (v, opts) => { commit(v); if (opts.rerender) keepDraftThen(() => {}); },
       /**
@@ -2197,6 +2206,74 @@ function basicView(rerender) {
   wrap.append(refreshPreview());
   state.basicRefreshPreview = refreshPreview;
 
+  /**
+   * THE SETTINGS ROW for the time whose gear is open.
+   *
+   * PLACED HERE, AFTER `save` IS DEFINED, and that ordering is the reason: committing the value calls `save`, and a call
+   * from above the definition is a temporal-dead-zone error. A previous attempt put this block beside the chooser and
+   * reached for `save` through a holder instead; keeping it here is simpler and needs no indirection.
+   *
+   * A separate, small row rather than fields added to the main form: the form is already dense with the time and the
+   * points, and the gap is a property of one time. The value is clamped on commit, so a typed "-5" or "1e9" cannot become
+   * the record's interval.
+   */
+  if (state.basicGapFor) {
+    const gapEvent = (state.basicEvents ?? []).find((x) => x.id === state.basicGapFor);
+    if (gapEvent) {
+      const current = Math.max(0, Number(gapEvent.clickGapMs) || 0);
+      const gapField = el('input', {
+        class: 'grow mono gap-input',
+        type: 'text',
+        inputmode: 'numeric',
+        maxlength: '5',
+        value: String(current),
+        'aria-label': t('basic.gapLabel'),
+        'focus-key': `gap:${gapEvent.id}`,
+      });
+      /**
+       * COMMIT ON SETTLE, NOT ON EVERY KEYSTROKE - the same rule as the time field, for the same measured reason: a save per
+       * keystroke armed nineteen saves for one edit and made the panel unusable while typing.
+       */
+      const commitGap = () => {
+        const digits = String(gapField.value).replace(/[^0-9]/g, '');
+        const ms = Math.min(60_000, Math.max(0, Number(digits) || 0));
+        gapField.value = String(ms);
+        const evs = state.basicEvents ?? [];
+        const at = evs.findIndex((x) => x.id === gapEvent.id);
+        if (at < 0) return;
+        if ((evs[at].clickGapMs ?? 0) === ms) return;
+        evs[at] = { ...evs[at], clickGapMs: ms };
+        state.basicEvents = evs;
+        state.basicKeepDraft = true;
+        save({ silent: true });
+      };
+      gapField.addEventListener('blur', commitGap);
+      gapField.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') { e.preventDefault(); commitGap(); gapField.blur(); }
+        if (e.key === 'Escape') { e.preventDefault(); gapField.value = String(current); gapField.blur(); }
+      });
+
+      wrap.append(el('div', { class: 'row gap-settings' },
+        el('span', { class: 'hint', text: t('basic.gapLabel') }),
+        gapField,
+        el('span', { class: 'hint', text: 'ms' }),
+        el('button', {
+          class: 'icon gap-save',
+          text: '\u2713',
+          title: t('basic.gapClose'),
+          onclick: () => { commitGap(); state.basicGapFor = null; rerender(); },
+        }),
+        el('button', {
+          class: 'icon gap-cancel',
+          text: '\u2715',
+          title: t('basic.gapClose'),
+          onclick: () => { state.basicGapFor = null; rerender(); },
+        }),
+      ));
+      wrap.append(el('div', { class: 'hint gap-why', text: t('basic.gapWhy') }));
+    }
+  }
+
   return wrap;
 }
 
@@ -2455,7 +2532,7 @@ function afterCurrentInteraction(fn) {
  * ساعت و سیو کردنش اضافه میشه" - and it doubles as the visible way out of the text for anyone who does not think to click
  * the background.
  */
-function timeField({ value, placeholder, onCommit, onHint, rerender, onEdit, onSettled, onSaveNow = null, saveConfirm = false, focusKey = null }) {
+function timeField({ value, placeholder, onCommit, onHint, rerender, onEdit, onSettled, onSaveNow = null, saveConfirm = false, focusKey = null, onOpenSettings = null }) {
   /**
    * A MASKED FIELD. It holds a run of DIGITS; the colons are drawn.
    *
@@ -2707,7 +2784,23 @@ function timeField({ value, placeholder, onCommit, onHint, rerender, onEdit, onS
       if (onSaveNow) onSaveNow();
     },
   });
-  return el('span', { class: 'time-with-save' }, input, confirm);
+  /**
+   * THE PER-TIME SETTINGS AFFORDANCE LIVES BESIDE THE TIME FIELD.
+   *
+   * Requested as "یه علامت تنظیمات کوچیک برای هر زمان انتخابی" - a small settings mark for each SELECTED time. The field is
+   * where the selected time is and it is always on screen, whereas the chip row is hidden when there is only one time (a
+   * chooser with one choice is noise, and two existing tests assert that). Putting the mark here means the setting is
+   * reachable in every case without changing the chooser's rule.
+   */
+  const settings = el('button', {
+    class: 'icon time-settings',
+    type: 'button',
+    title: t('basic.gapTitle').replace('{time}', placeholder ?? ''),
+    text: '\u2699',
+    onpointerdown: (e) => { e.preventDefault(); },
+    onclick: () => { if (onOpenSettings) onOpenSettings(); },
+  });
+  return el('span', { class: 'time-with-save' }, input, confirm, settings);
 }
 
 /** A short description of what a finder points at, for the collapsed row. */

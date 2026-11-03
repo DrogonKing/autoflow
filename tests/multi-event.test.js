@@ -113,7 +113,14 @@ describe('merge: events into records', () => {
 
   it('keeps a field the Basic form does not edit, by spreading the template first', () => {
     const { save } = merge('basic', [ev(9, 0, 0, 0, 1)], { template: { name: 'Basic', options: { speed: 'fast' }, enabled: false } });
-    expect(save[0].options).toEqual({ speed: 'fast' });
+    /**
+     * THE TEMPLATE'S OWN FIELDS SURVIVE, and the one field this form DOES own is written explicitly beside them.
+     *
+     * `clickGapMs` is added by the per-time settings feature and is written even when zero, so that clearing the setting is
+     * a real change rather than the absence of a key - a record saved before the feature also means zero, so both shapes
+     * behave the same. The assertion names it rather than allowing any extra key, so a future field cannot slip in unnoticed.
+     */
+    expect(save[0].options).toEqual({ speed: 'fast', clickGapMs: 0 });
   });
 
   it('always stores enabled: true, because a saved event that is off would never fire', () => {

@@ -168,8 +168,43 @@ export class Runner {
     };
   }
 
+  /**
+   * Walk a list of steps, applying the run's click gap BETWEEN its clicks.
+   *
+   * THE GAP IS MEASURED BETWEEN THE CLICKS, NOT BETWEEN THE SLEEPS.
+   *
+   * Requested as "فاصله کلیک بین pickها": a millisecond interval between the picks of one time, defaulting to zero. The
+   * naive implementation - sleep the gap after each click - measures from the END of one click to the START of the next, so
+   * every click's own duration is added to the interval. With three picks at 20 ms and clicks that each take 12 ms, the
+   * starts come out 32 ms apart, and on a slow page the error accumulates across the sequence.
+   *
+   * Here each click's target is ABSOLUTE: the instant the first click landed on, plus its index times the gap. A slow click
+   * therefore cannot push the following ones back - it just has less waiting left to do, and if it overran the next target
+   * the next click starts immediately rather than pretending to wait.
+   *
+   * Only `click` steps consume a slot. A `fill` between two clicks is not a pick, and spacing it would change what the step
+   * does rather than when it happens.
+   */
   async #runBlock(steps, state, push, depth) {
+    const gapMs = Math.max(0, Number(state.opts.clickGapMs) || 0);
+    /** The instant the first click landed on, and how many clicks have happened since. */
+    let anchorAt = null;
+    let clickIndex = 0;
+    const isClick = (step) => step.kind === 'click';
+
     for (const step of steps) {
+      if (gapMs > 0 && isClick(step)) {
+        if (anchorAt === null) {
+          // the FIRST pick is not delayed: it is the scheduled instant, which is the entire point of the schedule
+          anchorAt = this.host.now();
+        } else {
+          const targetAt = anchorAt + clickIndex * gapMs;
+          const waitMs = targetAt - this.host.now();
+          // a negative wait means this click overran the next target; waiting would misreport the moment, so it proceeds
+          if (waitMs > 0) await this.host.sleep(waitMs);
+        }
+        clickIndex += 1;
+      }
       await this.#runStep(step, state, push, depth);
     }
   }

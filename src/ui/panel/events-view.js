@@ -69,6 +69,13 @@ export function ensureEvents(state, savedBasic, { nextRun } = {}) {
         ...(a.schedule?.ms ? { ms: a.schedule.ms } : {}),
       },
       urls: a.urls,
+      /**
+       * THE CLICK GAP MUST SURVIVE A REBUILD FROM STORAGE, and this line is the whole reason the test suite has a case for
+       * it: the rows above are rebuilt field by field from the record, so anything not named here is silently dropped on
+       * every reload. MEASURED: without it, a gap of 20 ms came back as 0 after reopening the panel - the setting looked
+       * like it had never been applied, and the picks fired together again.
+       */
+      clickGapMs: Math.max(0, Number(a.options?.clickGapMs) || 0),
       steps: (a.steps ?? []).map((s, i) => ({ ...s, id: s.id ?? `${a.id}-point-${i + 1}` })),
     }));
   } else {

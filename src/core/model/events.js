@@ -29,7 +29,11 @@ export const emptyPoint = (id) => ({ id, kind: 'click', finder: { strategy: 'css
 
 /** A fresh event at a given time. */
 export function makeEvent(id, schedule) {
-  return { id, schedule, name: '', steps: [emptyPoint(`${id}-point-1`)] };
+  /**
+   * `clickGapMs: 0` IS PRESENT FROM THE START, so the settings affordance always has a value to edit and the record always
+   * carries an explicit number. Zero is today's behaviour: the picks fire together.
+   */
+  return { id, schedule, name: '', clickGapMs: 0, steps: [emptyPoint(`${id}-point-1`)] };
 }
 
 /**
@@ -76,6 +80,8 @@ export function split(automation, { extraTimes = [] } = {}) {
       ...(schedule.ms ? { ms: schedule.ms } : {}),
     },
     name: base.name ?? '',
+    // THE GAP IS THE RECORD'S OWN SETTING, so it stays with the first event exactly as the urls do below
+    clickGapMs: Math.max(0, Number(base.options?.clickGapMs) || 0),
     // the tabs/url patterns travel with the FIRST event, because a record with none falls back to the remembered Pick
     // page - and moving them to a later event would change where the first one runs
     urls: base.urls,
@@ -161,6 +167,17 @@ export function merge(baseId, events, { template = {} } = {}) {
        * fail at run time. The filter belongs here, in the one place that decides what a record contains, rather than at
        * each call site.
        */
+      /**
+       * THE CLICK GAP BELONGS TO THE TIME, so it lands in that record's `options` and nowhere else.
+       *
+       * Requested as a small settings affordance per time: "فاصله کلیک بین pickها" in milliseconds. Setting 20 ms on the
+       * 10:10:50.250 time must not touch any other time, which is why it is read from the event and written to the record
+       * the event becomes, rather than to the form's shared template.
+       *
+       * It is written even when zero, so that clearing the setting is a real change rather than the absence of a field -
+       * a record saved before this feature has no such key and means zero, which is the same behaviour.
+       */
+      options: { ...(template.options ?? {}), clickGapMs: Math.max(0, Number(ev.clickGapMs) || 0) },
       steps: ev.steps
         .filter((s) => s?.finder && Object.keys(s.finder).some((k) => k !== 'strategy' && s.finder[k]))
         .map((s, k) => ({ ...s, id: s.id ?? `${id}-point-${k + 1}` })),
