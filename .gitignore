@@ -11,3 +11,14 @@ node_modules/
 # Playwright downloads its browsers here when it installs; nothing in the repo needs them.
 .playwright/
 test-results/
+
+# THE LITE BUILDS ARE GENERATED, so they are not tracked. CI builds them with `npm run build:all` and the package step
+# consumes them from disk. Tracking them meant two sources of truth for the same manifest, and every rebuild produced a
+# large diff that buried the real change.
+dist-lite/
+dist-firefox-lite/
+
+# AN ATTACK-ORIENTED SECURITY BRIEFING IS NOT PUBLISHED. `docs/review-packet.md` is 1171 lines of security-relevant code
+# with real line numbers, written to be read "as an attacker". The generator `scripts/build_review_packet.py` stays, so a
+# reviewer can reproduce it on request; the packet itself is not in the tree.
+docs/review-packet.md

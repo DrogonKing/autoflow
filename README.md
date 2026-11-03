@@ -3,12 +3,16 @@
 Auto-click, fill, record and **schedule** browser automations.
 **Chrome, Edge and Firefox** (Manifest V3), from one source.
 
-Verified in a real browser on both engines: 372 unit tests, 20 Chromium load checks, 26 Chromium
-end-to-end checks, **31 Firefox checks**, and Mozilla's own linter reporting 0 errors and 0 warnings.
+Verified in a real browser on both engines: **823 unit tests**, 49 browser suites driven by real Chromium with the
+extension loaded, **31 Firefox checks**, and Mozilla's own linter reporting 0 errors and 0 warnings.
 
-Built after studying what a paid autoclicker extension actually does — including its scheduling, its
-loops and conditions, and its failure modes — with two differences: no telemetry, and nothing locked
-behind a subscription.
+> These numbers are measured, not estimated. A test count that drifts below the real suite is the first sign a README has
+> stopped being maintained, so each figure is regenerated with the command beside it in "Verifying".
+
+Built after studying what a paid autoclicker extension actually does — its **observable behaviour**: the scheduling, the
+loops and conditions, and the failure modes. No code was taken, read or copied from it; the design decisions here are made
+from its behaviour and from the public specifications of the standards involved. Two differences from that product: no
+telemetry, and nothing locked behind a subscription.
 
 ---
 
@@ -67,7 +71,7 @@ For Edge: `edge://extensions`, same steps.
 ## Tests
 
 ```
-314 unit tests           npm test
+823 unit tests           npm test
 26  real-browser checks  npm run test:e2e       (loads the extension in Chromium)
 20  load/UI checks       npm run test:browser   (manifest, worker, panel, options)
 ```
@@ -156,7 +160,7 @@ src/
   content/         the page side: performs steps, the element picker
   ui/              side panel and options page
   manifest.json
-tests/             314 unit tests
+tests/             823 unit tests
 scripts/           build, icons, browser tests, packaging
 ```
 ---
@@ -176,7 +180,7 @@ npm run package                               # release/autoflow-chrome.zip + -f
 
 | Job step | What it proves |
 |---|---|
-| `npx vitest run` | 381 unit tests |
+| `npx vitest run` | 823 unit tests |
 | `npm run build:all` | both targets build from the checkout alone |
 | manifest check | `manifest_version: 3` on both, and every file each manifest references exists |
 | `web-ext lint` | Mozilla's own linter: 0 errors, 0 warnings |
@@ -270,6 +274,10 @@ appears. Measured after the fact:
 | 20.19.0 | **fails** — 11 unhandled jsdom errors, exit 1, every test reported passed |
 | 22.22.0 | 381/381 passed |
 | 24.22.2 | 381/381 passed |
+
+> The `381` figures are what the suite held **at the time of that measurement**, kept as recorded rather than rewritten to
+> today's count — a dated observation that is edited later stops being evidence. The suite is now 823 tests; the point of
+> the table is the exit code, not the total.
 
 Fixed by moving the workflow to Node 22 and adding `scripts/preflight.mjs`, which checks for the missing
 `zlib` function and prints one clear sentence. It runs as `pretest`, so the confusing failure cannot recur.
