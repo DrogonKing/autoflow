@@ -15,10 +15,15 @@ import http from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
 import { autoCleanup, installProfileSweep } from './lib/profile.mjs';
+import { assertFreshBuild } from './lib/fresh-build.mjs';
 
 installProfileSweep();
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const CHROME = process.env.AUTOFLOW_CHROMIUM || '/root/.cache/ms-playwright/chromium-1208/chrome-linux64/chrome';
+
+// Refuse to measure a bundle that predates its source. MEASURED three times: a stale dist/ made a fix look broken twice and
+// hid a real bug once. See scripts/lib/fresh-build.mjs.
+assertFreshBuild(ROOT);
 
 const findings = [];
 const record = (sev, title, detail) => {

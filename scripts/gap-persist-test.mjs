@@ -17,10 +17,15 @@ import http from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
 import { autoCleanup, installProfileSweep } from './lib/profile.mjs';
+import { assertFreshBuild } from './lib/fresh-build.mjs';
 
 installProfileSweep();
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const CHROME = process.env.AUTOFLOW_CHROMIUM || '/root/.cache/ms-playwright/chromium-1208/chrome-linux64/chrome';
+
+// Refuse to measure a bundle that predates its source. MEASURED three times: a stale dist/ made a fix look broken twice and
+// hid a real bug once. See scripts/lib/fresh-build.mjs.
+assertFreshBuild(ROOT);
 
 const PAGE = `<!doctype html><meta charset="utf-8"><title>gap</title>
 <style>button{position:absolute;width:180px;height:44px} #b1{top:60px;left:40px} #b2{top:120px;left:40px} #b3{top:180px;left:40px}</style>
@@ -142,10 +147,20 @@ console.log('  field:', JSON.stringify(field));
 await panel.mouse.click(field.x, field.y);
 await panel.waitForTimeout(200);
 await panel.keyboard.press('Control+a');
-await panel.keyboard.type('20');
+/**
+ * PERSIAN DIGITS, typed as a Persian keyboard produces them.
+ *
+ * Reported: "الان درست شد فقط اعداد فارسی قبول نمیکنه". `insertText` is used rather than `type` because the field's
+ * handler reads the VALUE, and this asserts what a user would actually end up with - U+06F2 U+06F0, not ASCII.
+ */
+await panel.keyboard.insertText('۲۰');
+const typed = await panel.evaluate(() => document.querySelector('input.gap-input')?.value);
+console.log('  typed (Persian):', JSON.stringify(typed));
 await panel.keyboard.press('Enter');
 await panel.waitForTimeout(2400);
-console.log('  after Enter :', JSON.stringify(await records()));
+const afterPersian = await records();
+console.log('  after Enter :', JSON.stringify(afterPersian));
+console.log(`  ${afterPersian[0]?.gap === 20 ? 'ok  ' : 'HIGH'} Persian digits ۲۰ were accepted as 20 ms   gap=${afterPersian[0]?.gap}`);
 
 console.log('\n================ THE UNTESTED STEP: close and reopen the panel ================');
 await panel.close();

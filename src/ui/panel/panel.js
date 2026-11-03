@@ -12,6 +12,7 @@
 import { describeSchedule, nextRun, SCHEDULE_KINDS, ScheduleError, validateSchedule } from '../../core/schedule/schedule.js';
 import { STEP_KINDS, STEP_LABELS, BLOCK_KINDS, makeStep, countSteps } from '../../core/model/steps.js';
 import { describeCondition } from '../../core/engine/conditions.js';
+import { normaliseDigits, digitsToNumber } from '../../core/text/digits.js';
 import { readCsv } from '../../core/io/csv.js';
 import { api } from '../../platform/api.js';
 import { applyToDocument, translator } from '../../core/i18n/i18n.js';
@@ -1841,8 +1842,16 @@ function basicView(rerender) {
        * keystroke armed nineteen saves for one edit and made the panel unusable while typing.
        */
       const commitGap = () => {
-        const digits = String(gapField.value).replace(/[^0-9]/g, '');
-        const ms = Math.min(60_000, Math.max(0, Number(digits) || 0));
+        /**
+         * PERSIAN AND ARABIC DIGITS ARE NORMALISED BEFORE PARSING - the same rule, and the same helper, as the time field.
+         *
+         * MEASURED (reported): typing ۲۰ with a Persian keyboard stored 0. `replace(/[^0-9]/g, '')` keeps ASCII digits only,
+         * so ۰۱۲۳۴۵۶۷۸۹ (U+06F0..) and ٠١٢٣٤٥٦٧٨٩ (U+0660..) were stripped to an empty string and the value fell back to
+         * zero. The project already had `normaliseDigits` for exactly this, and the time field already used it; this field
+         * was written without it, which is the kind of gap a shared helper exists to prevent.
+         */
+        // one definition of "a number typed with any keyboard", shared with the tests rather than mirrored by them
+        const ms = digitsToNumber(gapField.value, { min: 0, max: 60_000 });
         gapField.value = String(ms);
         const evs = state.basicEvents ?? [];
         const at = evs.findIndex((x) => x.id === gapEvent.id);
@@ -2291,11 +2300,7 @@ function basicView(rerender) {
  * Only digit characters are translated, so a malformed time stays malformed and is rejected by the usual validation
  * rather than being silently rewritten into a valid one.
  */
-export function normaliseDigits(text) {
-  return String(text ?? '')
-    .replace(/[\u06F0-\u06F9]/g, (d) => String(d.charCodeAt(0) - 0x06F0))
-    .replace(/[\u0660-\u0669]/g, (d) => String(d.charCodeAt(0) - 0x0660));
-}
+export { normaliseDigits };
 
 /**
  * Normalise the digits a person actually types, then keep only what a time can contain.
