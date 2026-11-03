@@ -187,24 +187,28 @@ export class Runner {
    */
   async #runBlock(steps, state, push, depth) {
     const gapMs = Math.max(0, Number(state.opts.clickGapMs) || 0);
-    /** The instant the first click landed on, and how many clicks have happened since. */
-    let anchorAt = null;
-    let clickIndex = 0;
     const isClick = (step) => step.kind === 'click';
+    let clickIndex = 0;
 
     for (const step of steps) {
-      if (gapMs > 0 && isClick(step)) {
-        if (anchorAt === null) {
-          // the FIRST pick is not delayed: it is the scheduled instant, which is the entire point of the schedule
-          anchorAt = this.host.now();
-        } else {
-          const targetAt = anchorAt + clickIndex * gapMs;
-          const waitMs = targetAt - this.host.now();
-          // a negative wait means this click overran the next target; waiting would misreport the moment, so it proceeds
-          if (waitMs > 0) await this.host.sleep(waitMs);
-        }
-        clickIndex += 1;
+      /**
+       * THE GAP IS A FLOOR BETWEEN CLICKS, NOT AN ABSOLUTE OFFSET FROM THE FIRST ONE.
+       *
+       * MEASURED from the engine's own trace (`gap-persist-test`): with a 20 ms gap the steps landed at 24, 30 and 44 ms -
+       * intervals of 6 and 14 ms - so the setting looked like it had not been applied at all.
+       *
+       * The cause was the absolute design: each target was `firstClick + index x gap`, so when the FIRST click took 24 ms
+       * (a message round trip to the page), the second target had already passed and the first gap was silently dropped.
+       * An absolute schedule is right when the work is free and wrong when it is not, and a click into a page is never free.
+       *
+       * The rule is now the one the request describes - an interval BETWEEN the picks - so the wait is measured from the
+       * moment the previous click finished. It can only ever be at least `gapMs`, which is what makes the setting reliable:
+       * a slow page lengthens the real interval instead of eating the gap.
+       */
+      if (gapMs > 0 && isClick(step) && clickIndex > 0) {
+        await this.host.sleep(gapMs);
       }
+      if (isClick(step)) clickIndex += 1;
       await this.#runStep(step, state, push, depth);
     }
   }

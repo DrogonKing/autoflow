@@ -201,8 +201,15 @@ export function exportAsText(doc) {
             ? ` ${String(sc.hour).padStart(2, '0')}:${String(sc.minute ?? 0).padStart(2, '0')}`
               + `${Number.isFinite(sc.second) ? `:${String(sc.second).padStart(2, '0')}` : ''}`
             : '';
+    /**
+     * THE GAP IS PRINTED IN THE AUTOMATION ROW, because a report that cannot show a setting cannot settle a question about
+     * it. MEASURED: "the gap was not applied" arrived with an export that omitted options entirely, so neither side could
+     * tell whether the value had been stored. A reader of this line can now see it.
+     */
+    const gap = Math.max(0, Number(a.options?.clickGapMs) || 0);
     L.push(`${a.id}  "${a.name}"  enabled=${a.enabled !== false}  schedule=${sc.kind ?? '-'}${when}`
-      + `  steps=${(a.steps ?? []).length}`);
+      + `  steps=${(a.steps ?? []).length}`
+      + `  gap=${gap}ms`);
   }
   L.push('');
 

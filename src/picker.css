@@ -455,33 +455,45 @@ body.options-page textarea { width: 100%; font-family: var(--mono); font-size: 1
   color: var(--good, var(--ok, #2e7d32));
   font-weight: 600;
 }
-/* the per-time settings affordance, and the small row it opens */
-.event-chip-settings {
+/* THE GEAR BESIDE THE TIME FIELD, and the small box it opens directly underneath. */
+.time-settings {
   background: transparent;
   border: 0;
-  border-left: 1px solid var(--border, #333);
   color: inherit;
   cursor: pointer;
-  font-size: 12px;
+  font-size: 13px;
   line-height: 1;
-  padding: 3px 6px;
+  padding: 4px 6px;
+  border-radius: 4px;
 }
 
-.event-chip-settings:hover { background: color-mix(in srgb, currentColor 14%, transparent); }
+.time-settings:hover { background: color-mix(in srgb, currentColor 16%, transparent); }
 
+/**
+ * THE BOX IS INDENTED UNDER THE TIME FIELD, not a full-width row at the end of the form.
+ *
+ * MEASURED (reported by the user): the row was appended at the very bottom of the form, far below the field the gear sits
+ * on, so pressing the gear looked like it did nothing - the box opened off-screen and the setting stayed at zero.
+ * Visually attaching it to the field is what makes the control's effect discoverable.
+ */
 .gap-settings {
   align-items: center;
   gap: 6px;
-  margin-top: 4px;
+  margin: 2px 0 8px 0;
+  padding: 6px 8px;
+  border-left: 2px solid var(--accent, #4a9eff);
+  background: color-mix(in srgb, var(--accent, #4a9eff) 8%, transparent);
+  border-radius: 0 4px 4px 0;
 }
 
 .gap-input {
-  max-width: 76px;
+  max-width: 72px;
   text-align: right;
 }
 
 .gap-why {
-  margin-bottom: 8px;
+  margin: -4px 0 8px 0;
+  opacity: 0.75;
 }
 
 .time-save:hover { background: color-mix(in srgb, var(--good, var(--ok, #2e7d32)) 16%, transparent); }

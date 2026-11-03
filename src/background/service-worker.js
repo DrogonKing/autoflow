@@ -1530,6 +1530,15 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         const automations = (await listAutomations()).map((a) => ({
           id: a.id, name: a.name, enabled: a.enabled !== false, schedule: a.schedule,
           urls: a.urls ?? [], steps: (a.steps ?? []).map((x) => ({ kind: x.kind, id: x.id })),
+          /**
+           * THE OPTIONS ARE INCLUDED BECAUSE THE LOG MUST BE ABLE TO ANSWER ITS OWN QUESTIONS.
+           *
+           * MEASURED: the user reported "the gap between picks was not applied" and the export could not settle it - it
+           * listed the automations without their options, so neither of us could tell whether the gap had been stored at
+           * all. The per-time settings `clickGapMs` and the other runner options now appear, so a future report like this
+           * is answered by the file rather than by a round of questions.
+           */
+          options: a.options ?? {},
         }));
         const header = buildHeader({
           version: manifest.version,

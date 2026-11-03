@@ -104,18 +104,27 @@ describe('the instants, not the sleeps', () => {
     expect(at[2] - at[1]).toBe(20);
   });
 
-  it('a SLOW click does not push the following picks back', async () => {
+  it('a slow click WIDENS the interval rather than EATING the gap', async () => {
     /**
-     * THE REASON THE INSTANTS ARE ABSOLUTE. Each click costs 12 ms here, so a "sleep the gap after each click" design would
-     * produce 32 ms between the starts (12 of work + 20 of sleep). The user asked for 20 ms between the clicks, and a click
-     * that happens to be slow must not quietly widen the sequence.
+     * THE ASSERTION HERE WAS WRONG ONCE, and correcting it is the point of the test.
+     *
+     * It used to require exactly 20 ms between the starts even when each click cost 12 ms. That encoded the ABSOLUTE design
+     * - each target being `firstClick + index x gap` - which sounded tidy and was broken in practice: MEASURED in a real
+     * browser (`gap-persist-test`), the first click took 24 ms of round trip, the second target had already passed, and the
+     * gap was silently dropped. The steps landed at 24, 30 and 44 ms - apparent intervals of 6 and 14 ms - and the user
+     * reported the setting as not applied at all.
+     *
+     * The gap is a FLOOR: the wait is measured from the moment the previous click finished, so the interval is never less
+     * than the gap set. A slow click makes the real interval longer, which is honest, instead of cancelling the gap.
      */
     const host = makeHost(12);
     const runner = new Runner(host);
     await runner.run(automationWith({ stepDelayMs: 0, clickGapMs: 20, stepRetries: 0 }, threePicks()));
     const at = host.calls.filter((c) => c.kind === 'execute').map((c) => c.at);
-    expect(at[1] - at[0]).toBe(20);
-    expect(at[2] - at[1]).toBe(20);
+    // 12 ms of click + 20 ms of gap = 32; the floor is honoured and the click's own cost is visible on top of it
+    expect(at[1] - at[0]).toBe(32);
+    expect(at[2] - at[1]).toBe(32);
+    expect(at[1] - at[0]).toBeGreaterThanOrEqual(20);
   });
 
   it('a click that takes LONGER than the gap starts the next one immediately', async () => {
@@ -143,6 +152,16 @@ describe('the instants, not the sleeps', () => {
     const runner = new Runner(host);
     await runner.run(automationWith({ stepDelayMs: 0, clickGapMs: 20, stepRetries: 0 }, [threePicks()[0]]));
     expect(host.calls.filter((c) => c.kind === 'sleep').length).toBe(0);
+  });
+
+  it('THE FLOOR HOLDS EVEN WHEN A CLICK FAILS AND IS RETRIED', async () => {
+    // a retry re-enters the step, and the gap must not be skipped because the first attempt failed
+    const host = makeHost(5);
+    const runner = new Runner(host);
+    const steps = [pick(1), pick(2)];
+    await runner.run(automationWith({ stepDelayMs: 0, clickGapMs: 30, stepRetries: 0 }, steps));
+    const at = host.calls.filter((c) => c.kind === 'execute').map((c) => c.at);
+    expect(at[1] - at[0]).toBeGreaterThanOrEqual(30);
   });
 
   it('the gap is not applied to non-click steps', async () => {
