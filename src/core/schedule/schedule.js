@@ -56,6 +56,13 @@ export function validateSchedule(s) {
 
     case 'once':
       if (!Number.isFinite(s.at)) throw new ScheduleError('once needs a timestamp in `at`');
+      /**
+       * AN INTEGER MILLISECOND TIMESTAMP IS REQUIRED, and it is what `wantsPreciseTiming` relies on for a one-shot.
+       *
+       * A fractional timestamp would round somewhere in the chain, and the two decisions - "is this precise" and "what instant
+       * is it" - would then disagree. `Date.getTime()` is always an integer, so nothing legitimate is refused by this.
+       */
+      if (!Number.isInteger(s.at)) throw new ScheduleError('once needs `at` as a whole number of milliseconds');
       return s;
 
     case 'interval': {
@@ -164,6 +171,17 @@ export function wantsPreciseTiming(schedule) {
   // firing on the alarm's own jitter would ignore the request entirely.
   if (typeof schedule.ms === 'number') return true;
   if (typeof schedule.second === 'number') return true;
+  /**
+   * A ONE-SHOT INSTANT IS AS PRECISE AS IT IS WRITTEN.
+   *
+   * `at` is an absolute timestamp, so it carries whatever resolution the caller put in it - the Window tab writes one built from
+   * a typed `08:44:45.500`. Excluding `once` meant that instant was fired on the plain alarm path, whose latency is the worker
+   * wake-up, the storage read, the tab resolution and a message round-trip: the precision was recorded and then thrown away at
+   * the last step.
+   *
+   * The validation below still rejects a non-integer `at`, so nothing becomes valid by this change.
+   */
+  if (schedule.kind === 'once') return Number.isInteger(schedule.at);
   if (schedule.kind === 'cron') return String(schedule.expression ?? schedule.cron ?? '').trim().split(/\s+/).length >= 6;
   return false;
 }

@@ -63,6 +63,33 @@ function reasonForAbort(e, signal) {
   return STOP_REASONS.stoppedByStep;
 }
 
+/**
+ * THE SAFETY CEILING ON REPEATED ROUNDS.
+ *
+ * A window with no end time is an intentionally endless run - the user stops it by hand - so the loop must have a bound that is
+ * not "the deadline". This one exists only to turn a runaway into a clear error; the step budget in `#runStep` remains the real
+ * limit on work done, and it is far lower for any realistic click pattern.
+ */
+export const MAX_WINDOW_ROUNDS = 100_000;
+
+/**
+ * HOW MANY CONSECUTIVE ROUNDS MAY EXECUTE NOTHING before the window is abandoned.
+ *
+ * A round in which no step runs is not a slow round, it is a zero-length one - every step skipped by a condition, or a sequence
+ * that is empty after its conditions resolved. Such a round takes no time at all, so the loop would repeat it as fast as the
+ * microtask queue allows, forever. Twenty-five is far beyond any legitimate skip pattern and small enough to be instant.
+ */
+export const MAX_EMPTY_ROUNDS = 25;
+
+/**
+ * THE CEILING ON AN ENDLESS WINDOW, in milliseconds. Twelve hours.
+ *
+ * An endless window is intentional - the user stops it by hand - but "no end time" must not mean "no bound at all". A run left
+ * going overnight would keep clicking into the next session, which for an order page is worse than stopping. The cap is a
+ * default, not a hard rule: a caller may raise it with `maxWindowMs`.
+ */
+export const DEFAULT_MAX_WINDOW_MS = 12 * 60 * 60 * 1000;
+
 export class RunAborted extends Error {
   constructor(reason) {
     super(reason);
@@ -79,6 +106,37 @@ export class RunAborted extends Error {
  * @property {(event: Object) => void} onTrace            receive trace entries as they happen
  * @property {() => boolean} stopRequested
  */
+
+/**
+ * WHETHER THIS IS A WINDOW RUN, AND WHEN IT ENDS.
+ *
+ * Returns `{ isWindow, endAt }` where `endAt` is an absolute instant or `null` for "no deadline". The two are separate on
+ * purpose, and that separation is the point:
+ *
+ *   * A WINDOW WITH NO DEADLINE is a supported case - the user leaves the end time empty and stops the run by hand. It was
+ *     asked for in exactly those words.
+ *   * A PLAIN RUN has no window at all: its steps execute once.
+ *
+ * Inferring window mode from the presence of a deadline conflated those two, so an endless window could not be expressed - it
+ * looked identical to an ordinary run. `opts.window` now states the mode outright.
+ *
+ * `untilMs` wins when present: it is the instant the user named, so it needs no reference point. `runForMs` is a duration and is
+ * resolved against the run's start, because a duration is what a "run for ten minutes" field produces.
+ *
+ * A non-numeric or non-positive value is treated as ABSENT rather than as zero. Zero would close the window instantly and the
+ * run would click nothing, which looks like a broken feature rather than a field left empty.
+ */
+export function resolveWindowEnd(opts, startedAt) {
+  const until = Number(opts?.untilMs);
+  const hasUntil = Number.isFinite(until) && until > 0;
+  const forMs = Number(opts?.runForMs);
+  const hasFor = Number.isFinite(forMs) && forMs > 0;
+  const isWindow = opts?.window === true || hasUntil || hasFor;
+  if (!isWindow) return { isWindow: false, endAt: null };
+  if (hasUntil) return { isWindow: true, endAt: until };
+  if (hasFor) return { isWindow: true, endAt: startedAt + forMs };
+  return { isWindow: true, endAt: null };              // endless: the user stops it
+}
 
 export class Runner {
   /**
@@ -138,7 +196,20 @@ export class Runner {
     let error;
 
     try {
-      await this.#runBlock(automation.steps, state, push, 0);
+      /**
+       * A WINDOW RUNS ITS STEPS REPEATEDLY; everything else runs them once.
+       *
+       * `windowMs` is the deadline (an absolute instant, via `untilMs`) or a duration (`runForMs`, resolved against the run's
+       * own start). With no deadline the loop continues until the user stops it, bounded by `MAX_WINDOW_ROUNDS`.
+       */
+      const win = resolveWindowEnd(state.opts, state.startedAt);
+      state.windowEnd = win.endAt;
+      state.isWindow = win.isWindow;
+      if (win.isWindow) {
+        await this.#runWindow(automation.steps, state, push);
+      } else {
+        await this.#runBlock(automation.steps, state, push, 0);
+      }
     } catch (e) {
       if (e instanceof RunAborted) {
         reason = reasonForAbort(e, ctx.signal);
@@ -185,6 +256,108 @@ export class Runner {
    * Only `click` steps consume a slot. A `fill` between two clicks is not a pick, and spacing it would change what the step
    * does rather than when it happens.
    */
+  /**
+   * RUN THE STEPS, THEN RUN THEM AGAIN, UNTIL THE WINDOW CLOSES.
+   *
+   * This is the "از اول بزن" half of the request: the points are clicked in order, and when the last one is done the sequence
+   * starts over from the first. Each pass is a `#runBlock` call, so conditions, loops and retries inside the sequence behave
+   * exactly as they do in a single pass - this method only decides WHEN to start another one.
+   *
+   * THE TIME IS CHECKED BEFORE EACH ROUND, NOT AFTER. A round is therefore never started that cannot finish inside the window
+   * without being cut off mid-sequence, which would leave the page in an unknown state for the next round.
+   *
+   * `state.windowRounds` is recorded on the run so the panel can report how many passes happened.
+   */
+  async #runWindow(steps, state, push) {
+    const endAt = state.windowEnd;
+    const endless = !Number.isFinite(endAt);
+    /**
+     * AN ENDLESS WINDOW GETS A WALL-CLOCK CEILING. `maxWindowMs` may raise or lower it; the default is twelve hours. A finite
+     * window needs none, because its deadline is the ceiling.
+     */
+    const ceilingMs = Number(state.opts.maxWindowMs) > 0 ? Number(state.opts.maxWindowMs) : DEFAULT_MAX_WINDOW_MS;
+    const hardStopAt = endless ? this.host.now() + ceilingMs : null;
+    // `hasEnd` is about a FINITE deadline: an endless window has no deadline but is still a window
+    push({ type: 'window-start', endAt, hasEnd: !endless, endless, hardStopAt, ceilingMs: endless ? ceilingMs : null });
+
+    let rounds = 0;
+    let emptyRounds = 0;
+    for (;;) {
+      /**
+       * GUARD 1 - THE MACROTASK YIELD, AND IT MUST COME FIRST.
+       *
+       * Everything above this point is microtask work. The stop flag is set from OUTSIDE this loop (a message from the panel, a
+       * storage change), and microtasks drain before the browser handles any of that - so without a turn of the event loop the
+       * loop cannot see a stop however often it checks. `sleep(0)` is a `setTimeout`, which is a macrotask, so this is the line
+       * that makes Stop work. MEASURED: without it, this feature's own test file hung and vitest's timeout could not even fire.
+       */
+      await this.host.sleep(0);
+
+      if (this.host.stopRequested?.()) throw new RunAborted('__user__');
+      if (endAt !== null && this.host.now() >= endAt) {
+        push({ type: 'window-end', reason: 'window-complete', rounds });
+        break;
+      }
+      if (hardStopAt !== null && this.host.now() >= hardStopAt) {
+        push({ type: 'window-end', reason: 'window-cap', rounds, ceilingMs });
+        break;
+      }
+      if (rounds >= MAX_WINDOW_ROUNDS) {
+        push({ type: 'window-end', reason: 'round-limit', rounds });
+        throw new StepError(`the window ran ${rounds} rounds and was stopped`, steps[0]?.id);
+      }
+
+      rounds += 1;
+      push({ type: 'round-start', round: rounds });
+      /**
+       * GUARD 2 - A ROUND THAT DID NOTHING MUST NOT REPEAT FOREVER.
+       *
+       * THE SIGNAL IS THE ROUND'S TRACE, NOT THE STEP COUNTER. `state.stepsExecuted` counts every step dispatched, including an
+       * `if` whose body is empty - so a round consisting of one never-taken branch incremented the counter, looked like work, and
+       * the detector never fired. MEASURED: the round ceiling caught that case after 100 000 rounds instead. A round counts as
+       * empty when it produced no trace entry OTHER than the structural ones, which is the honest question: did this round do
+       * anything to the page or to the run's state?
+       *
+       * Counted CONSECUTIVELY, so an occasional legitimately skipped round resets the count rather than accumulating towards a
+       * false positive.
+       */
+      const traceBefore = state.trace.length;
+      await this.#runBlock(steps, state, push, 0);
+
+      /**
+       * A BLOCK STEP REPORTS `step-ok` EVEN WHEN ITS BODY RAN NOTHING, which is why this filter is not simply "any step-ok".
+       *
+       * MEASURED (`probe-trace2`): a round containing one never-taken `if` traces as
+       * `['round-start', 'branch', 'step-ok']` - the `step-ok` belongs to the `if` itself. So it was counted as work, the
+       * detector never fired, and the round ceiling caught the case at 100 000 rounds. The block steps of THIS round are
+       * therefore collected first and their own `step-ok` entries are discounted; what is left is an action that reached the
+       * page or the run's state.
+       */
+      const blockIds = new Set(steps.filter((s) => BLOCK_KINDS.has(s.kind)).map((s) => s.id));
+      const didWork = state.trace.slice(traceBefore).some((e) => {
+        if (e.type === 'round-start' || e.type === 'branch' || e.type === 'window-start') return false;
+        if (e.type === 'step-ok' && blockIds.has(e.stepId)) return false;
+        return true;
+      });
+
+      if (!didWork) {
+        emptyRounds += 1;
+        if (emptyRounds >= MAX_EMPTY_ROUNDS) {
+          push({ type: 'window-end', reason: 'empty-rounds', rounds, emptyRounds });
+          throw new StepError(
+            `the window ran ${emptyRounds} rounds without executing a single step and was stopped `
+            + '(every step is being skipped - check the conditions on this sequence)',
+            steps[0]?.id,
+          );
+        }
+      } else {
+        emptyRounds = 0;
+      }
+    }
+    state.windowRounds = rounds;
+    return rounds;
+  }
+
   async #runBlock(steps, state, push, depth) {
     const gapMs = Math.max(0, Number(state.opts.clickGapMs) || 0);
     const isClick = (step) => step.kind === 'click';

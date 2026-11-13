@@ -34,6 +34,14 @@ export const PROFILE_PREFIXES = [
   'af-',
   'autoflow-profile-',
   'ac-',
+  /**
+   * THE WINDOW SUITE'S PREFIXES. MEASURED: they were missing, so nothing swept them and every run of the two window scripts
+   * leaked one browser profile. 191 had accumulated in /tmp before it was noticed - the leak the comment above warns about, and
+   * the reason a new suite has to add itself here rather than trusting the sweep.
+   */
+  'autoflow-win-',
+  'autoflow-winrun-',
+  'af-probe-',
 ];
 
 /** Directories registered by autoCleanup(), removed by the exit hook below. */

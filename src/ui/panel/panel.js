@@ -13,6 +13,9 @@ import { describeSchedule, nextRun, SCHEDULE_KINDS, ScheduleError, validateSched
 import { STEP_KINDS, STEP_LABELS, BLOCK_KINDS, makeStep, countSteps } from '../../core/model/steps.js';
 import { describeCondition } from '../../core/engine/conditions.js';
 import { normaliseDigits, digitsToNumber } from '../../core/text/digits.js';
+import {
+  WINDOW_ID, buildWindowPlan, buildWindowAutomation, formatTimeOfDay, parseTimeOfDay,
+} from '../../core/model/window.js';
 import { readCsv } from '../../core/io/csv.js';
 import { api } from '../../platform/api.js';
 import { applyToDocument, translator } from '../../core/i18n/i18n.js';
@@ -95,7 +98,7 @@ let t = translator('en');
  */
 const TAB_LIST = __LITE__
   ? [['basic', 'tab.basic']]
-  : [['basic', 'tab.basic'], ['automations', 'tab.automations'], ['scheduled', 'tab.scheduled'], ['data', 'tab.data'], ['history', 'tab.history'], ['log', 'tab.log']];
+  : [['basic', 'tab.basic'], ['window', 'tab.window'], ['automations', 'tab.automations'], ['scheduled', 'tab.scheduled'], ['data', 'tab.data'], ['history', 'tab.history'], ['log', 'tab.log']];
 
 const state = {
   automations: [],
@@ -118,6 +121,23 @@ const state = {
   pickCancelled: null,    // when a pick was last cancelled, so the fact is not silent
   timeError: null,        // why the typed time was not accepted, shown where the time is typed
   basicNotice: null,      // what Save did with the schedule: armed for an instant, or not scheduled at all
+  /**
+   * THE WINDOW TAB. Its own working copy, its own pick target and its own settings-box openers, kept apart from the Basic
+   * tab's: the two tabs edit different records and a shared target would apply a pick to the wrong one.
+   */
+  windowDraft: null,      // { start: 'HH:MM:SS.mmm', end: '', steps: [], clickGapMs: 0, urls: [] }
+  windowStale: true,      // true means "rebuild the copy from storage on the next render"
+  windowPickTarget: null, // the step id awaiting a pick, within this tab
+  windowGapOpen: false,   // whether the gap box under the time fields is open
+  windowError: null,      // why the typed times were not accepted, shown where they are typed
+  windowNotice: null,     // what Save did: armed for an instant, or not armed and why
+  windowSavedAt: null,    // when Save last succeeded, so the button can confirm and then stop
+  /**
+   * WHICH `pickTarget` THE SHARED POINT ROW WRITES TO. Defaulted so every existing caller is unchanged; the Window tab sets it
+   * while its own points are being built. A hardcoded target in the shared helper is exactly how a pick would be filed against
+   * the wrong tab's record.
+   */
+  pickTargetKey: 'pickTarget',
 };
 
 // ---------------------------------------------------------------------------------------------
@@ -579,7 +599,8 @@ function scheduleEditor(onChange) {
 function pickControl({ step, redraw, rerender }) {
   // `rerender` accepted as an alias so an older call site cannot silently pass the wrong behaviour
   redraw = redraw ?? rerender;
-  const picking = state.pickTarget === step.id;
+  const targetKey = state.pickTargetKey ?? 'pickTarget';
+  const picking = state[targetKey] === step.id;
   /**
    * A pick that just landed says so, the way Save does.
    *
@@ -616,7 +637,16 @@ function pickControl({ step, redraw, rerender }) {
     'data-step-id': step.id,
     onclick: async () => {
       if (picking) { cancelPick(redraw); return; }
-      state.pickTarget = step.id;
+      /**
+       * THE WAITING POINT IS NAMED BY THE CALLER, not hardcoded to the Basic tab's.
+       *
+       * MEASURED BY READING, before the Window tab could ship: this line wrote `state.pickTarget`, which is the BASIC tab's
+       * target. Reusing `stepRow` in another tab therefore sent every pick to the Basic target, so a pick made in the Window tab
+       * would be applied to the wrong record - or to none, and the selector would stay empty while the button claimed success.
+       * The default keeps every existing caller behaving exactly as before.
+       */
+      const targetKey = state.pickTargetKey ?? 'pickTarget';
+      state[targetKey] = step.id;
       state.pickSavedAt = null;      // the new pick supersedes the previous confirmation
       state.pickSavedFor = null;
       // recorded so a lost target can be SEEN: the ring is the only observer of the moment the message arrives
@@ -1323,6 +1353,381 @@ function stepsEditor(list, rerender, label) {
   return wrap;
 }
 
+/**
+ * THE GAP SETTINGS BOX, directly under the time fields it belongs to.
+ *
+ * SHARED BY BOTH TABS, AND THE CONTRACT IS AN ADAPTER RATHER THAN A STORAGE LAYOUT.
+ *
+ * The first version of this function read `state.basicGapFor` and `state.basicEvents`, because that is how the Basic tab stores
+ * its gap: one interval per time. The Window tab has ONE interval for the whole window, so passing its flag and draft into the
+ * event-shaped contract made the box never render - MEASURED in a real browser, pressing the gear did nothing.
+ *
+ * What stays shared is the part genuinely worth not writing twice: the digit normaliser, the clamp, the commit-on-settle keys,
+ * the markup, and the placement under the field whose gear opened it. That last one is a feature requirement, not styling - the
+ * box was first appended at the end of the form, below the fold, and the user pressed the gear, saw nothing and reported the
+ * feature as broken.
+ *
+ * `onCommit` receives a millisecond number that has already been normalised and clamped, so no caller re-implements
+ * `digitsToNumber` - this field shipped once without it and silently rejected Persian digits because of it.
+ */
+function gapSettingsRow({ rerender, isOpen, currentValue, onCommit, onClose, focusKey = 'gap' }) {
+  const wrap = el('div', { class: 'gap-host' });
+  if (typeof isOpen !== 'function' || !isOpen()) return wrap;
+
+  const current = Math.max(0, Number(currentValue()) || 0);
+  const gapField = el('input', {
+    class: 'grow mono gap-input',
+    type: 'text',
+    inputmode: 'numeric',
+    maxlength: '5',
+    value: String(current),
+    'aria-label': t('basic.gapLabel'),
+    /**
+     * THE FOCUS KEY IS PART OF THE CONTRACT, because a render must not steal the caret out of a field being typed into - the
+     * panel preserves focus by matching this attribute, and two open boxes must not each claim the same key.
+     */
+    'focus-key': `${focusKey}:${current}`,
+  });
+
+  /**
+   * COMMIT ON SETTLE, NOT ON EVERY KEYSTROKE - the same rule as the time field, for the same measured reason: a save per
+   * keystroke armed nineteen saves for one nine-digit edit and made the panel unusable while typing.
+   */
+  const commitGap = () => {
+    // one definition of "a number typed with any keyboard", shared with the tests rather than mirrored by them
+    const ms = digitsToNumber(gapField.value, { min: 0, max: 60_000 });
+    gapField.value = String(ms);
+    if (ms === current) return;        // nothing changed: no write, no save, no re-render
+    onCommit(ms);
+  };
+  gapField.addEventListener('blur', commitGap);
+  gapField.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); commitGap(); gapField.blur(); }
+    if (e.key === 'Escape') { e.preventDefault(); gapField.value = String(current); gapField.blur(); }
+  });
+
+  wrap.append(el('div', { class: 'row gap-settings' },
+    el('span', { class: 'hint', text: t('basic.gapLabel') }),
+    gapField,
+    el('span', { class: 'hint', text: 'ms' }),
+    el('button', {
+      class: 'icon gap-save',
+      text: '\u2713',
+      title: t('basic.gapClose'),
+      onclick: () => { commitGap(); onClose(); rerender(); },
+    }),
+    el('button', {
+      class: 'icon gap-cancel',
+      text: '\u2715',
+      title: t('basic.gapClose'),
+      onclick: () => { onClose(); rerender(); },
+    }),
+  ));
+  wrap.append(el('div', { class: 'hint gap-why', text: t('basic.gapWhy') }));
+  return wrap;
+}
+
+
+/**
+ * THE WINDOW TAB: a start with milliseconds, an optional end, and points clicked over and over between the two.
+ *
+ * The request, for reference: «بشه بهش زمان با دقت میلی ثانیه داد ... انتهاش اجباری نباشه ... تو این فاصله شروع کنه به ترتیب
+ * نقاط انتخاب شده رو بزنه و اگر نقاط تموم شد دوباره بره از اول بزنه تا زمانی که زمانش تموم بشه».
+ *
+ * THREE THINGS THIS VIEW IS CAREFUL ABOUT, each because of a fault already paid for elsewhere in this file:
+ *
+ *   1. THE DRAFT IS NOT REBUILT ON EVERY RENDER. A pick arrives asynchronously and a rebuild from storage drops the step that is
+ *      waiting for it - the fault documented at length above `rememberFinder`.
+ *   2. THE TIMES ARE VALIDATED BY THE MODEL, NOT HERE. `buildWindowPlan` is the single definition of what a time is, and it is
+ *      the same function the tests exercise. A second parse in the view is how the gap field ended up rejecting Persian digits.
+ *   3. NOTHING IS ARMED BY OPENING THE TAB. The record is written only by Save, and it is built disabled.
+ */
+function windowView(rerender) {
+  const wrap = el('div', { class: 'card' });
+  wrap.append(el('div', { class: 'sub-label', text: t('window.intro') }));
+
+  // ---- the draft, rebuilt from storage only when it is stale
+  if (state.windowStale || !state.windowDraft) {
+    state.windowDraft = windowDraftFromStored();
+    state.windowStale = false;
+  }
+  const draft = state.windowDraft;
+  const keepDraftThen = (mutate) => {
+    mutate();
+    state.windowStale = false;     // a render caused by this edit must not rebuild from storage
+    rerender();
+  };
+
+  // ---- the start: mandatory, milliseconds included
+  const startField = el('input', {
+    class: 'grow win-start',
+    id: 'win-start',
+    value: draft.start,
+    placeholder: '08:44:45.500',
+    inputmode: 'numeric',
+    maxlength: '12',
+  });
+  startField.addEventListener('change', () => keepDraftThen(() => { draft.start = startField.value.trim(); }));
+
+  // ---- the end: OPTIONAL. Empty means "click until I press stop"
+  const endField = el('input', {
+    class: 'grow win-end',
+    id: 'win-end',
+    value: draft.end,
+    placeholder: t('window.endPlaceholder'),
+    inputmode: 'numeric',
+    maxlength: '12',
+  });
+  endField.addEventListener('change', () => keepDraftThen(() => { draft.end = endField.value.trim(); }));
+
+  wrap.append(el('div', { class: 'row win-times' },
+    el('label', { text: t('window.start') }),
+    startField,
+    el('button', {
+      class: 'icon win-gap', title: t('window.gapTitle'), text: t('ui.gearGlyph'),
+      onclick: () => { state.windowGapOpen = !state.windowGapOpen; rerender(); },
+    }),
+  ));
+  wrap.append(el('div', { class: 'row win-times' },
+    el('label', { text: t('window.end') }),
+    endField,
+    el('span', { class: 'hint', text: t('window.endOptional') }),
+  ));
+  /**
+   * THE GAP BOX SITS DIRECTLY UNDER THE TIMES it belongs to. The Basic tab's version was first appended at the end of the form,
+   * below the fold, and the user pressed its gear, saw nothing, and reported the feature as broken. The placement is part of the
+   * feature.
+   */
+  /**
+   * THE WINDOW TAB'S ADAPTER: ONE interval for the whole window, held on the draft, with a boolean for the open state - a
+   * different shape from the Basic tab's per-time value, which is exactly why the row takes functions rather than a storage key.
+   */
+  wrap.append(gapSettingsRow({
+    rerender,
+    focusKey: 'gap:window',
+    isOpen: () => state.windowGapOpen === true,
+    currentValue: () => Math.max(0, Number(draft.clickGapMs) || 0),
+    onCommit: (ms) => {
+      draft.clickGapMs = ms;
+      state.windowStale = false;       // the draft is the truth; a rebuild from storage would drop the value just typed
+      saveWindow({ silent: true });
+    },
+    onClose: () => { state.windowGapOpen = false; },
+  }));
+
+  // ---- what the typed times mean, shown as a plain sentence
+  const plan = buildWindowPlan({ startText: draft.start, endText: draft.end, nowMs: Date.now() });
+  if (!plan.ok) {
+    state.windowError = plan.error;
+  }
+  if (state.windowError) {
+    wrap.append(el('div', { class: 'hint win-error', text: t(`window.err.${state.windowError}`) }));
+  }
+  wrap.append(el('div', { class: 'hint win-summary', text: describeWindowPlan(plan) }));
+
+  // ---- the points, in order
+  wrap.append(el('div', { class: 'row' },
+    el('label', { text: t('window.points') }),
+    el('span', { class: 'hint', text: `${draft.steps.length}` }),
+  ));
+  /**
+   * THE SHARED ROW WRITES TO WHICHEVER TARGET IS NAMED HERE. Set before the rows are built and restored afterwards, so the
+   * Basic tab's own target is untouched by a render of this tab.
+   */
+  const previousTargetKey = state.pickTargetKey;
+  state.pickTargetKey = 'windowPickTarget';
+  draft.steps.forEach((step, i) => {
+    wrap.append(el('div', { class: 'win-step', 'data-step': step.id }, stepRow(step, draft.steps, i, () => {
+      state.windowStale = false;
+      rerender();
+    })));
+  });
+  state.pickTargetKey = previousTargetKey;
+  wrap.append(el('div', { class: 'row add' },
+    el('button', {
+      class: 'grow',
+      id: 'win-add-point',
+      text: t('window.addPoint'),
+      onclick: () => keepDraftThen(() => { draft.steps.push(makeStep('click', { finder: { strategy: 'css', selector: '' } })); }),
+    }),
+  ));
+
+  // ---- save, then run, then STOP
+  const running = Boolean(state.activeRun) && state.activeRun.automationId === WINDOW_ID;
+  wrap.append(el('div', { class: 'row win-actions' },
+    el('button', {
+      class: 'primary grow',
+      id: 'win-save',
+      text: state.windowSavedAt ? t('window.saved') : t('window.save'),
+      onclick: () => { saveWindow({}); },
+    }),
+    el('button', {
+      class: 'grow',
+      id: 'win-run-now',
+      text: t('window.runNow'),
+      onclick: () => { runWindowNow(); },
+    }),
+    /**
+     * STOP IS PART OF THIS FEATURE, NOT A NICETY.
+     *
+     * With the end time left empty the run continues until the user stops it - that is what "انتهاش خالی باشه" means. A tab
+     * that can start such a run and cannot stop it would be missing the control the mode depends on, so Stop sits beside Run,
+     * shown while this automation is the active run.
+     */
+    running ? el('button', {
+      class: 'danger',
+      id: 'win-stop',
+      text: t('window.stop'),
+      onclick: async () => { await send({ type: 'stop-run' }); await refresh(); },
+    }) : null,
+  ));
+  if (running) {
+    wrap.append(el('div', { class: 'hint win-running', text: t('window.running') }));
+  }
+  if (state.windowNotice) wrap.append(el('div', { class: 'hint win-notice', text: state.windowNotice }));
+
+  return wrap;
+}
+
+/**
+ * RUN NOW: save first, then start that record.
+ *
+ * SAVE FIRST on purpose. `start-run` takes an automation id and the worker reads the STORED record, so starting a run without
+ * saving would run whatever was saved last - which is not what is on screen, and is the kind of difference that looks like the
+ * form being ignored. Saving validates the times through the model in the same call.
+ */
+async function runWindowNow() {
+  await saveWindow({ silent: true });
+  if (state.windowError) return;
+  const res = await send({ type: 'start-run', automationId: WINDOW_ID, trigger: 'manual' })
+    .catch((e) => ({ ok: false, error: String(e?.message ?? e) }));
+  if (!res?.ok) {
+    state.windowNotice = String(res?.error ?? t('window.runRefused'));
+  } else {
+    state.windowNotice = t('window.runStarted');
+  }
+  await refresh().catch(() => {});
+  render();
+}
+
+/**
+ * The window draft, built from the stored record - or a sensible empty one.
+ *
+ * A time-of-day is reconstructed from the stored absolute instant in LOCAL time, because that is the clock the field shows. The
+ * end is absent when the record carries no deadline, which is how "endless" round-trips: `untilMs` missing means the user left
+ * the end empty.
+ */
+function windowDraftFromStored() {
+  const rec = (state.automations ?? []).find((a) => a.id === WINDOW_ID) ?? null;
+  if (!rec) {
+    // a default start a minute ahead, so the field is never empty and Save is never a surprise
+    const soon = new Date(Date.now() + 60_000);
+    return {
+      start: formatTimeOfDay({ hour: soon.getHours(), minute: soon.getMinutes(), second: soon.getSeconds(), ms: soon.getMilliseconds() }),
+      end: '',
+      steps: [makeStep('click', { finder: { strategy: 'css', selector: '' } })],
+      clickGapMs: 0,
+      urls: [],
+    };
+  }
+  const at = Number(rec.schedule?.at);
+  const startTime = Number.isFinite(at) ? new Date(at) : new Date();
+  const until = Number(rec.options?.untilMs);
+  const hasEnd = Number.isFinite(until) && until > 0;
+  const endTime = hasEnd ? new Date(until) : null;
+  return {
+    start: formatTimeOfDay({
+      hour: startTime.getHours(), minute: startTime.getMinutes(),
+      second: startTime.getSeconds(), ms: startTime.getMilliseconds(),
+    }),
+    end: endTime
+      ? formatTimeOfDay({
+        hour: endTime.getHours(), minute: endTime.getMinutes(),
+        second: endTime.getSeconds(), ms: endTime.getMilliseconds(),
+      })
+      : '',
+    steps: applyPickedFinders(rec.steps ? JSON.parse(JSON.stringify(rec.steps)) : []),
+    clickGapMs: Math.max(0, Number(rec.options?.clickGapMs) || 0),
+    urls: Array.isArray(rec.urls) ? [...rec.urls] : [],
+  };
+}
+
+/** The steps a run should use: the remembered finders applied, so a pick that landed late is not lost. */
+function windowStepsForRun(draft) {
+  return applyPickedFinders(JSON.parse(JSON.stringify(draft.steps ?? [])));
+}
+
+/**
+ * Which pages the run may act on.
+ *
+ * Taken from the finders' own recorded pages when the panel knows them, and otherwise from the stored record - a window run
+ * without a URL falls back to the active tab, which is documented behaviour but not what a scheduled run wants.
+ */
+function windowUrlsForRun(draft) {
+  const fromDraft = (draft.urls ?? []).filter((u) => typeof u === 'string' && u.trim());
+  if (fromDraft.length) return fromDraft;
+  const rec = (state.automations ?? []).find((a) => a.id === WINDOW_ID);
+  return Array.isArray(rec?.urls) ? rec.urls.filter((u) => typeof u === 'string' && u.trim()) : [];
+}
+
+/** One sentence saying what the typed times mean, so "when will this run" is never a guess. */
+function describeWindowPlan(plan) {
+  if (!plan?.ok) return '';
+  const start = new Date(plan.atMs).toLocaleString();
+  if (plan.end.kind === 'none') return t('window.sum.endless').replace('{start}', start);
+  const end = new Date(plan.end.atMs).toLocaleString();
+  return t('window.sum.finite').replace('{start}', start).replace('{end}', end);
+}
+
+/**
+ * SAVE: validate, build the record, store it, then arm it.
+ *
+ * THE ORDER MATTERS. The record is stored by the same `save-automation` path every other tab uses, which is also what arms or
+ * disarms the schedule - so a window that is saved is a window that will fire, and no separate arming call can disagree.
+ *
+ * `silent` is used by the gap box, which saves the value on settle without wanting the full save ceremony.
+ */
+async function saveWindow({ silent = false } = {}) {
+  const draft = state.windowDraft ?? windowDraftFromStored();
+  state.windowDraft = draft;
+  const plan = buildWindowPlan({ startText: draft.start, endText: draft.end, nowMs: Date.now() });
+  if (!plan.ok) {
+    state.windowError = plan.error;
+    state.windowNotice = null;
+    render();
+    return;
+  }
+  state.windowError = null;
+
+  const steps = windowStepsForRun(draft);
+  const filled = steps.filter((s) => s.finder && (s.finder.selector || s.finder.text || s.finder.id || s.finder.xpath));
+  if (!filled.length) {
+    state.windowNotice = t('window.needPoints');
+    render();
+    return;
+  }
+
+  const rec = buildWindowAutomation({
+    plan,
+    steps,
+    urls: windowUrlsForRun(draft),
+  });
+  rec.options.clickGapMs = Math.max(0, Number(draft.clickGapMs) || 0);
+  rec.enabled = true;               // Save is the arming action; opening the tab is not
+
+  await send({ type: 'save-automation', automation: rec }).catch((e) => {
+    state.windowNotice = String(e?.message ?? e);
+  });
+
+  state.windowStale = true;
+  if (!silent) {
+    state.windowSavedAt = Date.now();
+    state.windowNotice = plan.start.rolledToTomorrow ? t('window.notice.tomorrow') : t('window.notice.armed');
+  }
+  await refresh().catch(() => {});
+  rerender();
+}
+
 // ---------------------------------------------------------------------------------------------
 // views
 // ---------------------------------------------------------------------------------------------
@@ -1814,80 +2219,29 @@ function basicView(rerender) {
   ));
 
   /**
-   * THE SETTINGS ROW, DIRECTLY UNDER THE TIME FIELD IT BELONGS TO.
-   *
-   * PLACED HERE, AFTER `save` IS DEFINED, and that ordering is the reason: committing the value calls `save`, and a call
-   * from above the definition is a temporal-dead-zone error. A previous attempt put this block beside the chooser and
-   * reached for `save` through a holder instead; keeping it here is simpler and needs no indirection.
-   *
-   * A separate, small row rather than fields added to the main form: the form is already dense with the time and the
-   * points, and the gap is a property of one time. The value is clamped on commit, so a typed "-5" or "1e9" cannot become
-   * the record's interval.
+   * THE BASIC TAB'S ADAPTER: the gap belongs to ONE time, addressed by the id in `state.basicGapFor`. The behaviour is exactly
+   * what it was before the row was shared - same value, same write, same save.
    */
-  if (state.basicGapFor) {
-    const gapEvent = (state.basicEvents ?? []).find((x) => x.id === state.basicGapFor);
-    if (gapEvent) {
-      const current = Math.max(0, Number(gapEvent.clickGapMs) || 0);
-      const gapField = el('input', {
-        class: 'grow mono gap-input',
-        type: 'text',
-        inputmode: 'numeric',
-        maxlength: '5',
-        value: String(current),
-        'aria-label': t('basic.gapLabel'),
-        'focus-key': `gap:${gapEvent.id}`,
-      });
-      /**
-       * COMMIT ON SETTLE, NOT ON EVERY KEYSTROKE - the same rule as the time field, for the same measured reason: a save per
-       * keystroke armed nineteen saves for one edit and made the panel unusable while typing.
-       */
-      const commitGap = () => {
-        /**
-         * PERSIAN AND ARABIC DIGITS ARE NORMALISED BEFORE PARSING - the same rule, and the same helper, as the time field.
-         *
-         * MEASURED (reported): typing ۲۰ with a Persian keyboard stored 0. `replace(/[^0-9]/g, '')` keeps ASCII digits only,
-         * so ۰۱۲۳۴۵۶۷۸۹ (U+06F0..) and ٠١٢٣٤٥٦٧٨٩ (U+0660..) were stripped to an empty string and the value fell back to
-         * zero. The project already had `normaliseDigits` for exactly this, and the time field already used it; this field
-         * was written without it, which is the kind of gap a shared helper exists to prevent.
-         */
-        // one definition of "a number typed with any keyboard", shared with the tests rather than mirrored by them
-        const ms = digitsToNumber(gapField.value, { min: 0, max: 60_000 });
-        gapField.value = String(ms);
-        const evs = state.basicEvents ?? [];
-        const at = evs.findIndex((x) => x.id === gapEvent.id);
-        if (at < 0) return;
-        if ((evs[at].clickGapMs ?? 0) === ms) return;
-        evs[at] = { ...evs[at], clickGapMs: ms };
-        state.basicEvents = evs;
-        state.basicKeepDraft = true;
-        save({ silent: true });
-      };
-      gapField.addEventListener('blur', commitGap);
-      gapField.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter') { e.preventDefault(); commitGap(); gapField.blur(); }
-        if (e.key === 'Escape') { e.preventDefault(); gapField.value = String(current); gapField.blur(); }
-      });
-
-      wrap.append(el('div', { class: 'row gap-settings' },
-        el('span', { class: 'hint', text: t('basic.gapLabel') }),
-        gapField,
-        el('span', { class: 'hint', text: 'ms' }),
-        el('button', {
-          class: 'icon gap-save',
-          text: '\u2713',
-          title: t('basic.gapClose'),
-          onclick: () => { commitGap(); state.basicGapFor = null; rerender(); },
-        }),
-        el('button', {
-          class: 'icon gap-cancel',
-          text: '\u2715',
-          title: t('basic.gapClose'),
-          onclick: () => { state.basicGapFor = null; rerender(); },
-        }),
-      ));
-      wrap.append(el('div', { class: 'hint gap-why', text: t('basic.gapWhy') }));
-    }
-  }
+  wrap.append(gapSettingsRow({
+    rerender,
+    focusKey: `gap:${state.basicGapFor ?? ''}`,
+    isOpen: () => Boolean(state.basicGapFor),
+    currentValue: () => {
+      const ev = (state.basicEvents ?? []).find((x) => x.id === state.basicGapFor);
+      return Math.max(0, Number(ev?.clickGapMs) || 0);
+    },
+    onCommit: (ms) => {
+      const evs = state.basicEvents ?? [];
+      const at = evs.findIndex((x) => x.id === state.basicGapFor);
+      if (at < 0) return;
+      evs[at] = { ...evs[at], clickGapMs: ms };
+      state.basicEvents = evs;
+      // keep the working copy, so a re-render caused by this save does not rebuild the form from storage and drop the value
+      state.basicKeepDraft = true;
+      save({ silent: true });
+    },
+    onClose: () => { state.basicGapFor = null; },
+  }));
 
   // ---- the points of THE OPEN TIME
   wrap.append(el('div', { class: 'row' },
@@ -3745,6 +4099,7 @@ function renderTree() {
 
   const body = el('main');
   if (state.tab === 'basic') body.append(basicView(rerender));
+  else if (state.tab === 'window' && !__LITE__) body.append(windowView(rerender));
   /**
    * THE FULL-TREE BRANCH IS UNREACHABLE IN A LITE BUILD, which is what makes the removal real rather than
    * cosmetic: esbuild folds `!__LITE__` to `false` and then has no reference to these five functions from
@@ -3763,6 +4118,15 @@ function renderTree() {
   root.append(body);
 
   // A pick that lands anywhere gets applied to the step waiting for it.
+  if (state.windowPickTarget) {
+    root.append(el('div', { class: 'picking-banner' },
+      el('span', { text: t('hint.picking') }),
+      el('button', {
+        text: t('action.cancel'),
+        onclick: async () => { state.windowPickTarget = null; await send({ type: 'cancel-picking' }); render(); },
+      }),
+    ));
+  }
   if (state.pickTarget) {
     root.append(el('div', { class: 'picking-banner' },
       el('span', { text: t('hint.picking') }),
@@ -3793,6 +4157,20 @@ function recordPickDebug(entry) {
 }
 
 api.runtime.onMessage.addListener((msg) => {
+  /**
+   * A RUN'S STATE CHANGED, so the panel's picture of it is refreshed - the Stop control in the Window tab depends on knowing
+   * whether THIS automation is the one running, and without this it appeared by luck. The refresh is the same one every other
+   * path uses, so there is no second source of truth.
+   */
+  if (msg?.type === 'run-state') {
+    send({ type: 'get-active-run' })
+      .then((r) => {
+        if (r?.ok) state.activeRun = r.run;
+        render();
+      })
+      .catch(() => {});
+    return;
+  }
   /**
    * A PICK MUST NEVER BE DISCARDED IN SILENCE.
    *

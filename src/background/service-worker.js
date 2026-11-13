@@ -508,7 +508,43 @@ async function startAutomationLocked(automationId, {
 
   const settings = await getSettings();
   const opts = { focusBeforePrecise: settings.focusBeforePrecise !== false, ...automation.options, atMs };
-  const targetTabId = tabId ?? (await api.tabs.query({ active: true, currentWindow: true }))[0]?.id;
+  /**
+   * WHICH TAB THE RUN ACTS ON.
+   *
+   * THE ACTIVE TAB IS THE WRONG FIRST ANSWER FOR A MANUAL RUN, and that is a measured fault rather than a preference: the Run
+   * button lives in the panel, so at the moment it is pressed the ACTIVE TAB IS THE PANEL - which has no content script and no
+   * page to click. MEASURED in a real browser: pressing Run ended the run with "the page gave no answer for the click step",
+   * while the same record clicked 360 times when the alarm fired it.
+   *
+   * So a tab matching one of the automation's OWN `urls` patterns is preferred, and the active tab is the fallback. An automation
+   * with no patterns - the documented Basic case - behaves exactly as it did.
+   */
+  let targetTabId = tabId ?? null;
+  if (targetTabId === null) {
+    const patterns = Array.isArray(automation.urls) ? automation.urls.filter((u) => typeof u === 'string' && u.trim()) : [];
+    if (patterns.length) {
+      const all = await api.tabs.query({}).catch(() => []);
+      const match = all.find((t) => {
+        const u = t?.url ?? '';
+        // only real pages: an extension page or a browser-internal page has no content script and no clickable element
+        if (!/^https?:/i.test(u)) return false;
+        return patterns.some((p) => {
+          // a pattern is a URL (optionally with a trailing wildcard), compared as a case-insensitive prefix
+          const base = String(p).replace(/\*+$/, '').toLowerCase();
+          if (!base) return false;
+          return u.toLowerCase().startsWith(base) || u.toLowerCase().includes(base);
+        });
+      });
+      if (match?.id !== undefined) {
+        targetTabId = match.id;
+        recordEvent({ kind: 'target-tab', automationId, how: 'url-pattern', tabId: match.id });
+      }
+    }
+    if (targetTabId === null) {
+      targetTabId = (await api.tabs.query({ active: true, currentWindow: true }))[0]?.id ?? null;
+      if (targetTabId !== null) recordEvent({ kind: 'target-tab', automationId, how: 'active', tabId: targetTabId });
+    }
+  }
   if (!targetTabId) throw new Error('there is no active tab to run in');
 
   // `pendingAtMs` lives inside makeHost, above; it is per-run by construction there.
@@ -559,6 +595,14 @@ async function startAutomationLocked(automationId, {
   try {
   await api.storage.session.set({ activeRun: publicActiveRun() });
   await setBadge('running');
+  /**
+   * TELL THE INTERFACE A RUN HAS STARTED.
+   *
+   * The panel hears `trace` messages but only refreshed on its OWN actions, so a Stop button appeared (or did not) by luck. The
+   * worker knows the transition exactly here, so it says so - which is what makes a running window visible, and what makes its
+   * Stop control appear while it still matters.
+   */
+  await announceRun('started', automation.id);
 
   const tracer = (entry) => {
     // keep a bounded trace in memory; a long loop would otherwise grow without limit
@@ -583,6 +627,12 @@ async function startAutomationLocked(automationId, {
   } catch (e) {
     result = { reason: 'step-error', trace: activeRun?.trace ?? [], error: e, vars: {}, steps: 0, elapsedMs: 0 };
   }
+
+  /**
+   * AND TELL IT WHEN THE RUN IS OVER, for the same reason: the Stop control has to go away, and a stale one is worse than none.
+   * Sent before the record is written, so a slow storage write cannot leave a run looking active.
+   */
+  await announceRun('finished', automation.id, result.reason);
 
   const finished = {
     id: `run${Date.now().toString(36)}`,
@@ -686,13 +736,37 @@ export function stopActiveRun() {
 function publicActiveRun() {
   if (!activeRun) return null;
   return {
+    /**
+     * `id` IS THE AUTOMATION'S ID, and that is what every reader wants: the panel marks the running tab, the Window tab shows its
+     * own Stop control, and the Automation list highlights the row. MEASURED, and it cost a browser run: the Window tab compared
+     * `run.automationId` - a property this function does not send - so its Stop button never rendered, and an endless run had no
+     * way to be stopped from the tab that started it.
+     *
+     * `automationId` is included as well, because a reader that has been written against the other name should not break and
+     * because having both named is cheaper than having two readers disagree.
+     */
     id: activeRun.id,
+    automationId: activeRun.id,
     name: activeRun.name,
     tabId: activeRun.tabId,
     startedAt: activeRun.startedAt,
     trigger: activeRun.trigger,
     steps: activeRun.trace.filter((t) => t.type === 'step-ok' || t.type === 'step-fail').length,
   };
+}
+
+/**
+ * TELL EVERY OPEN INTERFACE THAT A RUN'S STATE CHANGED.
+ *
+ * A one-way broadcast, deliberately: the panel may not be open, and a failure to deliver must never affect the run. The panel's
+ * listener refreshes its active-run state and re-renders, which is what keeps a Stop control honest.
+ */
+async function announceRun(phase, automationId, reason = null) {
+  try {
+    await api.runtime.sendMessage({ type: 'run-state', phase, automationId, reason }).catch(() => {});
+  } catch {
+    // no receiver is a normal case, not an error
+  }
 }
 
 async function setBadge(state) {
