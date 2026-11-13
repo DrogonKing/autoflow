@@ -300,6 +300,39 @@ describe('AN ENDLESS WINDOW CANNOT HANG', () => {
   });
 });
 
+describe('THE GAP SURVIVES THE ROUND BOUNDARY', () => {
+  /**
+   * THE FAULT THIS LOCKS, measured end to end before it was understood:
+   *
+   *   with a 200 ms gap over two points, the interval between one arrival of point 1 and the next was 211 ms
+   *   instead of the ~400 ms that two gaps over two steps must produce.
+   *
+   * The waiting used to happen BETWEEN THE CLICKS OF ONE CALL to the block runner, and the window loop calls it again immediately
+   * - so the last click of a round and the first click of the next landed back to back. The setting applied everywhere except the
+   * one boundary a window creates, which is the boundary a window IS.
+   *
+   * A unit test could not see it because the unit test only ever looked INSIDE one block. This one looks at the seam.
+   */
+  it('the first click of a round waits out the gap from the last click of the previous one', async () => {
+    const host = makeHost({ stopAfterClicks: 6 });
+    await new Runner(host).run(automationWith({ window: true, clickGapMs: 200 }, threePicks()));
+    const clicks = host.calls.filter((c) => c.kind === 'click');
+    const gaps = host.calls.filter((c) => c.kind === 'sleep' && c.ms > 0).map((c) => c.ms);
+    expect(clicks.length).toBeGreaterThanOrEqual(4);
+    // three waits for six clicks: between 1-2, 2-3 (the round boundary) and 3-4
+    expect(gaps.length).toBeGreaterThanOrEqual(3);
+    // every wait is the full gap at this virtual cost, INCLUDING the one across the boundary
+    expect(Math.min(...gaps)).toBe(200);
+  });
+
+  it('and with no gap set, nothing waits across the boundary either', async () => {
+    const host = makeHost({ stopAfterClicks: 6 });
+    await new Runner(host).run(automationWith({ window: true, clickGapMs: 0 }, threePicks()));
+    const gaps = host.calls.filter((c) => c.kind === 'sleep' && c.ms > 0);
+    expect(gaps).toEqual([]);
+  });
+});
+
 describe('the per-click delay still applies inside a window', () => {
   it('the gap is a floor between clicks and does not eat the deadline arithmetic', async () => {
     const host = makeHost({ stepCostMs: 4 });

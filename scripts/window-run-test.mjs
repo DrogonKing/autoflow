@@ -146,6 +146,56 @@ const main = async () => {
   check('and it stopped near its end time rather than running on', spanA <= 4000, `${Math.round(spanA)} ms of clicking`);
 
   // =====================================================================================
+  console.log('\n================ A2. THE GAP BETWEEN CLICKS: a setting that is proved by the interval on the page ================');
+  // =====================================================================================
+  /**
+   * THE GAP WAS NEVER MEASURED END TO END. `tests/click-gap.test.js` proves the engine schedules the gap, but nothing proved the
+   * PAGE receives the clicks that far apart - and the whole reason the gap exists is the interval the page actually experiences.
+   *
+   * Two runs, same record shape, only the gap differs. The comparison is the assertion: a number is not meaningful on its own, but
+   * a 200 ms gap against a 0 ms gap must be measurably further apart, and both are measured on the same page in the same run.
+   */
+  const gapRun = async (gapMs) => {
+    await clearHits();
+    const untilMs = Date.now() + 2200;
+    const rec = await panel.evaluate(({ u, url, gap }) => ({
+      id: 'window', name: 'Window', enabled: true, urls: [url],
+      schedule: { kind: 'manual' },
+      options: { window: true, untilMs: u, clickGapMs: gap },
+      steps: [
+        { id: 'w1', kind: 'click', finder: { strategy: 'id', id: 'b1' } },
+        { id: 'w2', kind: 'click', finder: { strategy: 'id', id: 'b2' } },
+      ],
+    }), { u: untilMs, url: pageUrl, gap: gapMs });
+    await send({ type: 'save-automation', automation: rec });
+    await panel.bringToFront();
+    await panel.click('#win-run-now');
+    await panel.waitForTimeout(3200);
+    const hits = await target.evaluate(() => window.__hits.map((h) => h.id));
+    // the interval between successive arrivals of the SAME point: two steps apart, so it spans two gaps
+    const sameId = [];
+    for (let i = 0; i < hits.length; i += 1) {
+      if (hits[i] === 'b1' && hits[i + 2] === 'b1') sameId.push(i);
+    }
+    const times = await target.evaluate(() => window.__hits.map((h) => h.at));
+    const deltas = sameId.map((i) => times[i + 2] - times[i]).filter((d) => d > 0);
+    const mean = deltas.length ? Math.round(deltas.reduce((a, b) => a + b, 0) / deltas.length) : 0;
+    return { clicks: hits.length, deltas, mean };
+  };
+
+  const noGap = await gapRun(0);
+  const withGap = await gapRun(200);
+  console.log('\n--- the same run with and without a gap ---');
+  console.log('  gap 0 ms   :', noGap.clicks, 'clicks, mean interval between the same point:', noGap.mean, 'ms');
+  console.log('  gap 200 ms :', withGap.clicks, 'clicks, mean interval between the same point:', withGap.mean, 'ms');
+  check('both runs clicked, so the comparison is between two real runs',
+    noGap.clicks > 4 && withGap.clicks > 4, `${noGap.clicks} / ${withGap.clicks}`);
+  check('A 200 ms GAP REALLY SEPARATES THE CLICKS ON THE PAGE, by about 400 ms for two steps',
+    withGap.mean >= 320 && withGap.mean <= 700, `${withGap.mean} ms`);
+  check('and the zero-gap run is clearly faster, so the setting is what made the difference',
+    withGap.mean > noGap.mean * 3, `${noGap.mean} ms vs ${withGap.mean} ms`);
+
+  // =====================================================================================
   console.log('\n================ B. AN ENDLESS WINDOW: it keeps going, and Stop really stops it ================');
   // =====================================================================================
   await clearHits();

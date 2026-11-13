@@ -378,11 +378,34 @@ export class Runner {
        * moment the previous click finished. It can only ever be at least `gapMs`, which is what makes the setting reliable:
        * a slow page lengthens the real interval instead of eating the gap.
        */
-      if (gapMs > 0 && isClick(step) && clickIndex > 0) {
-        await this.host.sleep(gapMs);
+      /**
+       * ONE RULE, AND IT MEASURES FROM THE PREVIOUS CLICK - WHICHEVER CALL MADE IT.
+       *
+       * MEASURED end to end, on a real page with a real run, and this is the fault a unit test could not see: with a 200 ms gap
+       * over two points, the interval between one arrival of point 1 and the next was **211 ms**, not the ~400 ms that two gaps
+       * over two steps must produce. The waiting used to be `sleep(gapMs)` between the clicks of ONE call to this method - and the
+       * window loop calls it again immediately, so the last click of a round and the first click of the next landed back to back.
+       * The setting applied everywhere except the one boundary a window creates.
+       *
+       * `state.lastClickAt` carries the instant across calls, so the first click of a round waits out the remainder of the gap too.
+       * A FLOOR from the previous finish rather than an absolute target, for the reason already learned here: a click into a page
+       * is never free, and an absolute schedule silently drops gaps.
+       */
+      if (gapMs > 0 && isClick(step) && Number.isFinite(state.lastClickAt)) {
+        const wait = gapMs - (this.host.now() - state.lastClickAt);
+        if (wait > 0) await this.host.sleep(wait);
       }
-      if (isClick(step)) clickIndex += 1;
-      await this.#runStep(step, state, push, depth);
+      if (isClick(step)) {
+        await this.#runStep(step, state, push, depth);
+        /**
+         * RECORDED AFTER THE CLICK, not before: the gap is an interval from when the previous click FINISHED, so a slow page
+         * lengthens the real interval instead of eating into the next gap. `this.host.now()` is the run's own clock, so a virtual
+         * clock in a test advances it exactly as a real one does.
+         */
+        state.lastClickAt = this.host.now();
+      } else {
+        await this.#runStep(step, state, push, depth);
+      }
     }
   }
 
