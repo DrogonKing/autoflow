@@ -90,7 +90,21 @@ const main = async () => {
     console.log('  dist/ not built - skipping');
   } else {
     console.log(`  tabs: ${JSON.stringify(full.tabs)}`);
-    check('the full build still has all six tabs', full.tabs.length === 6, `${full.tabs.length} tabs: ${full.tabs.join(', ')}`);
+    /**
+     * THE EXPECTED TABS ARE NAMED, NOT COUNTED.
+     *
+     * This check used to be `=== 6`, which was correct when it was written and became a real failure the moment a tab was added -
+     * reporting "the full build still has all six tabs" while the build was perfectly healthy and the Window tab was the seventh. A
+     * count cannot tell "one more tab" from "a tab went missing", and the message actively misleads: it names the number instead of
+     * the thing.
+     *
+     * The list says what must be there, so a missing tab fails and an added tab is recorded on purpose. If a future tab is added the
+     * assertion is meant to be edited - that is the check working, not breaking.
+     */
+    const expectedFull = ['Basic', 'Window', 'Automations', 'Scheduled', 'Data', 'History', 'Log'];
+    const missing = expectedFull.filter((name) => !full.tabs.includes(name));
+    check('the full build has every tab, including the Window tab',
+      missing.length === 0, missing.length ? `missing: ${missing.join(', ')}` : `${full.tabs.length} tabs: ${full.tabs.join(', ')}`);
   }
 
   console.log('\n--- LITE build (dist-lite) ---');
