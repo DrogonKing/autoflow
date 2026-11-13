@@ -1528,6 +1528,11 @@ function windowView(rerender) {
       value: draft.end,
       // the same reason as the start field: without this the component returns a bare input and the row has no controls
       saveConfirm: true,
+      /**
+       * NO `onOpenSettings` HERE, ON PURPOSE. A window has ONE click gap and the Start field's gear owns it - that is the difference
+       * from the Basic tab, where each event has its own gap. The End field used to get a gear anyway, which did nothing when pressed;
+       * the component now declines to build a control it cannot honour, so this row has none.
+       */
       placeholder: t('window.endPlaceholder'),
       onCommit: (v) => {
         draft.end = String(v ?? '').trim();
@@ -3337,14 +3342,26 @@ function timeField({ value, placeholder, onCommit, onHint, rerender, onEdit, onS
    * chooser with one choice is noise, and two existing tests assert that). Putting the mark here means the setting is
    * reachable in every case without changing the chooser's rule.
    */
-  const settings = el('button', {
-    class: 'icon time-settings',
-    type: 'button',
-    title: t('basic.gapTitle').replace('{time}', placeholder ?? ''),
-    text: '\u2699',
-    onpointerdown: (e) => { e.preventDefault(); },
-    onclick: () => { if (onOpenSettings) onOpenSettings(); },
-  });
+  /**
+   * THE GEAR IS ONLY BUILT WHEN THERE IS SOMETHING FOR IT TO OPEN.
+   *
+   * MEASURED: it used to be built unconditionally with the null check INSIDE the click handler, so a caller with no settings to offer
+   * still got a button that swallowed the press. The Window tab's End field was such a caller, and the reported symptom was exactly
+   * that: «علامت چرخ دنده کنار end کار نمیکنه».
+   *
+   * A control that looks pressable and does nothing is worse than an absent one - it is tried, and it teaches the user that the
+   * controls in this form are unreliable. The rule belongs here rather than at each call site, so no future caller has to know it.
+   */
+  const settings = onOpenSettings
+    ? el('button', {
+      class: 'icon time-settings',
+      type: 'button',
+      title: t('basic.gapTitle').replace('{time}', placeholder ?? ''),
+      text: '\u2699',
+      onpointerdown: (e) => { e.preventDefault(); },
+      onclick: () => onOpenSettings(),
+    })
+    : null;
   return el('span', { class: 'time-with-save' }, input, confirm, settings);
 }
 

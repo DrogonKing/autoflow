@@ -83,7 +83,9 @@ const main = async () => {
       run: Boolean(document.querySelector('#win-run-now')),
       points: document.querySelectorAll('.win-step').length,
       addPoint: Boolean(document.querySelector('#win-add-point')),
-      gapGear: Boolean(document.querySelector('.win-times .time-settings')),
+      // exactly ONE gear: the click gap belongs to the window, not to each time, so only Start offers it
+      gearCount: document.querySelectorAll('.win-times .time-settings').length,
+      gearRows: [...document.querySelectorAll('.win-times')].map((r) => r.querySelectorAll('.time-settings').length),
       // THE COMPACT ROW: a pick button and a selector, and NOT the full editor's kind chooser
       pickButtons: document.querySelectorAll('.win-step .pick').length,
       kindChoosers: document.querySelectorAll('.win-step select').length,
@@ -103,7 +105,19 @@ const main = async () => {
   check('a run button exists', present.run === true);
   check('the tab starts with one point row, so it is usable without adding one first', present.points >= 1, String(present.points));
   check('a control to add points exists', present.addPoint === true);
-  check('the gap control sits beside the times', present.gapGear === true);
+  /**
+   * THE GEAR ON THE START ROW, AND ONLY THERE.
+   *
+   * REPORTED: «علامت چرخ دنده کنار end کار نمیکنه اگه چیزی داخلش نیست حذفش کن». A window has ONE click gap - unlike Basic, where each
+   * time owns its own - so the Start field's gear owns it and the End field's had nothing to open. MEASURED before the fix: pressing
+   * the End gear left `gapBoxOpen: false`, i.e. it did nothing.
+   *
+   * The decision is pinned as a COUNT, not as a presence: exactly one gear, and it is on the row that can honestly use it. A
+   * presence-only assertion would pass again the moment a second dead gear appeared.
+   */
+  check('there is exactly ONE gear, beside the start time', present.gearCount === 1, JSON.stringify(present.gearRows));
+  check('and the END row has none, because there is nothing for it to open',
+    (present.gearRows ?? [])[1] === 0, JSON.stringify(present.gearRows));
 
   // ---- 2. the milliseconds survive a round trip through the field
   const startValue = await panel.evaluate(() => document.querySelectorAll('.win-times .time-input')[0].value);
