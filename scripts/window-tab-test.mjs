@@ -73,20 +73,32 @@ const main = async () => {
   });
   check('the Window tab can be opened', opened === true);
 
-  await panel.waitForFunction(() => document.querySelector('#win-start') !== null, { timeout: 15000 }).catch(() => {});
-  const present = await panel.evaluate(() => ({
-    start: Boolean(document.querySelector('#win-start')),
-    end: Boolean(document.querySelector('#win-end')),
-    save: Boolean(document.querySelector('#win-save')),
-    run: Boolean(document.querySelector('#win-run-now')),
-    points: document.querySelectorAll('.win-step').length,
-    addPoint: Boolean(document.querySelector('#win-add-point')),
-    gapGear: Boolean(document.querySelector('.win-gap')),
-  }));
+  await panel.waitForFunction(() => document.querySelector('.win-times .time-input') !== null, { timeout: 15000 }).catch(() => {});
+  const present = await panel.evaluate(() => {
+    const times = [...document.querySelectorAll('.win-times .time-input')];
+    return {
+      start: times.length >= 1,
+      end: times.length >= 2,
+      save: Boolean(document.querySelector('#win-save')),
+      run: Boolean(document.querySelector('#win-run-now')),
+      points: document.querySelectorAll('.win-step').length,
+      addPoint: Boolean(document.querySelector('#win-add-point')),
+      gapGear: Boolean(document.querySelector('.win-times .time-settings')),
+      // THE COMPACT ROW: a pick button and a selector, and NOT the full editor's kind chooser
+      pickButtons: document.querySelectorAll('.win-step .pick').length,
+      kindChoosers: document.querySelectorAll('.win-step select').length,
+    };
+  });
   console.log('\n--- what the tab renders ---');
   console.log('  ', JSON.stringify(present));
   check('the start field exists', present.start === true);
   check('AND THE END FIELD EXISTS - it is optional, not absent', present.end === true);
+  /**
+   * REPORTED: «فایند رو متوجه نمیشم این همه گزینه داره مثل بیسیک فقط از pick استفاده کنه». A point is a pick and a selector; the
+   * full editor's kind chooser has no place in a window, whose points are always clicks on a chosen element.
+   */
+  check('a point offers a Pick button, like Basic', present.pickButtons >= 1, String(present.pickButtons));
+  check('and NO kind chooser, which is the clutter that was reported', present.kindChoosers === 0, String(present.kindChoosers));
   check('a save button exists', present.save === true);
   check('a run button exists', present.run === true);
   check('the tab starts with one point row, so it is usable without adding one first', present.points >= 1, String(present.points));
@@ -94,18 +106,34 @@ const main = async () => {
   check('the gap control sits beside the times', present.gapGear === true);
 
   // ---- 2. the milliseconds survive a round trip through the field
-  const startValue = await panel.inputValue('#win-start');
+  const startValue = await panel.evaluate(() => document.querySelectorAll('.win-times .time-input')[0].value);
   console.log('\n--- the start field as it opens ---');
   console.log('  value:', JSON.stringify(startValue));
   check('the start field opens with a millisecond-precision time, not an empty box',
     /^\d{2}:\d{2}:\d{2}\.\d{3}$/.test(startValue), startValue);
-  check('the end field opens EMPTY, which is the endless mode', (await panel.inputValue('#win-end')) === '');
+  check('the end field opens EMPTY, which is the endless mode',
+    (await panel.evaluate(() => document.querySelectorAll('.win-times .time-input')[1]?.value)) === '');
 
-  await panel.fill('#win-start', '20:44:45.500');
-  await panel.dispatchEvent('#win-start', 'change');
+  /**
+   * THE REPORTED FAULT, tested the way a person types: DIGITS ONLY, ONE KEYSTROKE AT A TIME.
+   *
+   * «فرمت ساعتش مشکل داره و بین اعداد : نمیذاره» - the field would not accept a colon. Basic's `timeField` does not take one on
+   * purpose: it keeps digits and inserts the separators itself. So the assertion is not "a colon is accepted" but the behaviour the
+   * user actually wants - type 204445500 and read back 20:44:45.500.
+   *
+   * Typed with `type()` rather than `fill()`, because `fill()` sets the value in one go and would not exercise the per-keystroke
+   * formatting (the same blind spot this project already recorded for `keyboard.insertText` and `maxlength`).
+   */
+  const startSel = '.win-times .time-input';
+  await panel.click(startSel);
+  await panel.evaluate(() => { document.querySelectorAll('.win-times .time-input')[0].select(); });
+  await panel.type('.win-times .time-input', '204445500', { delay: 40 });
+  await panel.evaluate(() => document.activeElement.blur());
   await panel.waitForTimeout(500);
-  const kept = await panel.inputValue('#win-start');
-  check('a typed millisecond time is kept in the field', kept === '20:44:45.500', kept);
+  const kept = await panel.evaluate(() => document.querySelectorAll('.win-times .time-input')[0].value);
+  console.log('\n--- typing 204445500 digits only ---');
+  console.log('  field now reads:', JSON.stringify(kept));
+  check('DIGITS ALONE ARE FORMATTED INTO A TIME, so the colons never have to be typed', kept === '20:44:45.500', kept);
 
   // the summary line must say what the empty end means, rather than leaving it to be guessed
   const summaryEndless = await panel.evaluate(() => {
@@ -117,9 +145,16 @@ const main = async () => {
   check('an empty end is described as running until Stop', Boolean(summaryEndless) && /Stop|استاپ/.test(summaryEndless), summaryEndless);
 
   // ---- 3. giving it an end changes the summary, so the two modes are distinguishable
-  await panel.fill('#win-end', '20:50:33.200');
-  await panel.dispatchEvent('#win-end', 'change');
-  await panel.waitForTimeout(600);
+  /**
+   * THE END FIELD IS THE SECOND `timeField`, addressed by position because the component owns its own markup. Typed as DIGITS like
+   * a person would, which is the behaviour that was asked for.
+   */
+  const endSel = '.win-times .time-input >> nth=1';
+  await panel.click(endSel);
+  await panel.evaluate(() => { document.querySelectorAll('.win-times .time-input')[1].select(); });
+  await panel.type(endSel, '205033200', { delay: 40 });
+  await panel.evaluate(() => document.activeElement.blur());
+  await panel.waitForTimeout(700);
   const summaryFinite = await panel.evaluate(() => {
     const n = document.querySelector('.win-summary');
     return n ? n.textContent.trim() : null;
@@ -129,9 +164,11 @@ const main = async () => {
   check('with an end, the summary describes a bounded window', Boolean(summaryFinite) && summaryFinite !== summaryEndless, summaryFinite);
 
   // ---- 4. an end BEFORE the start is reported where the times are typed
-  await panel.fill('#win-end', '20:30:00.000');
-  await panel.dispatchEvent('#win-end', 'change');
-  await panel.waitForTimeout(600);
+  await panel.click(endSel);
+  await panel.evaluate(() => { document.querySelectorAll('.win-times .time-input')[1].select(); });
+  await panel.type(endSel, '203000000', { delay: 40 });
+  await panel.evaluate(() => document.activeElement.blur());
+  await panel.waitForTimeout(700);
   const errText = await panel.evaluate(() => {
     const n = document.querySelector('.win-error');
     return n ? n.textContent.trim() : null;
@@ -144,12 +181,12 @@ const main = async () => {
 
   // ---- 5. the gap box opens BESIDE the times, which is the placement the user asked for
   const gapBefore = await panel.evaluate(() => document.querySelectorAll('.gap-settings').length);
-  await panel.click('.win-gap');
+  await panel.click('.win-times .time-settings');
   await panel.waitForTimeout(500);
   const gapGeom = await panel.evaluate(() => {
     const box = document.querySelector('.gap-settings');
-    const start = document.querySelector('#win-start');
-    const end = document.querySelector('#win-end');
+    const start = document.querySelector('.win-times .time-input');
+    const end = document.querySelectorAll('.win-times .time-input')[1];
     if (!box || !start) return null;
     const b = box.getBoundingClientRect();
     const e = end ? end.getBoundingClientRect() : null;

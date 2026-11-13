@@ -1458,39 +1458,76 @@ function windowView(rerender) {
     rerender();
   };
 
-  // ---- the start: mandatory, milliseconds included
-  const startField = el('input', {
-    class: 'grow win-start',
-    id: 'win-start',
-    value: draft.start,
-    placeholder: '08:44:45.500',
-    inputmode: 'numeric',
-    maxlength: '12',
-  });
-  startField.addEventListener('change', () => keepDraftThen(() => { draft.start = startField.value.trim(); }));
-
-  // ---- the end: OPTIONAL. Empty means "click until I press stop"
-  const endField = el('input', {
-    class: 'grow win-end',
-    id: 'win-end',
-    value: draft.end,
-    placeholder: t('window.endPlaceholder'),
-    inputmode: 'numeric',
-    maxlength: '12',
-  });
-  endField.addEventListener('change', () => keepDraftThen(() => { draft.end = endField.value.trim(); }));
-
+  /**
+   * THE TIMES ARE BASIC'S `timeField`, WHICH IS THE WHOLE ANSWER TO «: نمیذاره».
+   *
+   * It does not accept a colon, deliberately: it keeps a DIGITS-ONLY buffer and inserts the separators itself, so `135121` becomes
+   * `13:51:21` and `135001500` becomes `13:50:01.500`. Typing `:` is not needed, and refusing it is what lets every way of
+   * entering a time arrive as the same digits. The user's request for this behaviour is quoted in the project's own history:
+   * «اعداد ساعت رو باید دوتا دوتا بگیره مثلا ۱۳۵۱۲۱ رو بدم خودش ۱۳:۵۱:۲۱ کنه».
+   *
+   * A hand-rolled `<input>` cannot behave like this, and mine did not: it required the user to type the colons the project goes
+   * out of its way to insert.
+   */
   wrap.append(el('div', { class: 'row win-times' },
     el('label', { text: t('window.start') }),
-    startField,
-    el('button', {
-      class: 'icon win-gap', title: t('window.gapTitle'), text: t('ui.gearGlyph'),
-      onclick: () => { state.windowGapOpen = !state.windowGapOpen; rerender(); },
+    timeField({
+      focusKey: 'window-start',
+      value: draft.start,
+      /**
+       * `saveConfirm: true` IS NOT COSMETIC - IT IS WHAT BUILDS THE SETTINGS GEAR.
+       *
+       * MEASURED from the running extension: the time row contained no buttons at all, and
+       * `document.querySelectorAll('.win-times .time-settings').length` was 0, so the click-gap box had no affordance to open it.
+       * `timeField` returns early with the bare input when this is false (`if (!saveConfirm) return input;`), and `basicView` passes
+       * it. Omitting it here silently deleted the gear.
+       */
+      saveConfirm: true,
+      placeholder: 'HH:MM:SS.mmm',
+      onCommit: (v) => {
+        draft.start = String(v ?? '').trim();
+        state.windowStale = false;
+        scheduleWindowAutoSave();
+      },
+      /**
+       * TYPING SHOWS ITS RESULT IMMEDIATELY AND ARMS NO SAVE PER KEYSTROKE. This is the rule `basicView` arrived at after
+       * MEASURING that a per-keystroke save armed nine saves for a nine-digit time and made the panel appear to save
+       * continuously. The summary line and the error line are re-rendered; storage is written once, when the value settles.
+       */
+      /**
+       * ON EDIT, ONLY THE PREVIEW IS REFRESHED - NEVER A RE-RENDER.
+       *
+       * MEASURED: with `render()` here, typing `204445500` left the field holding `"2"`. `renderTree()` starts with
+       * `root.replaceChildren()`, so the input being typed into was destroyed on every keystroke; focus moved to the body and the
+       * remaining characters went nowhere. The field preserves focus and caret across a rebuild, but that is not the same as not
+       * rebuilding: the value shown comes from the model, which is written when the value SETTLES.
+       *
+       * This is what Basic does, and the lesson is recorded there: the preview updates live because that is feedback the user needs
+       * while typing, and it costs nothing.
+       */
+      onEdit: () => { state.windowStale = false; if (typeof state.windowRefreshPreview === 'function') state.windowRefreshPreview(); },
+      onSettled: () => { scheduleWindowAutoSave(); if (typeof state.windowRefreshPreview === 'function') state.windowRefreshPreview(); },
+      onOpenSettings: () => { state.windowGapOpen = !state.windowGapOpen; rerender(); },
     }),
   ));
+
+  // ---- the end: OPTIONAL. Empty means "click until I press stop"
   wrap.append(el('div', { class: 'row win-times' },
     el('label', { text: t('window.end') }),
-    endField,
+    timeField({
+      focusKey: 'window-end',
+      value: draft.end,
+      // the same reason as the start field: without this the component returns a bare input and the row has no controls
+      saveConfirm: true,
+      placeholder: t('window.endPlaceholder'),
+      onCommit: (v) => {
+        draft.end = String(v ?? '').trim();
+        state.windowStale = false;
+        scheduleWindowAutoSave();
+      },
+      onEdit: () => { state.windowStale = false; if (typeof state.windowRefreshPreview === 'function') state.windowRefreshPreview(); },
+      onSettled: () => { scheduleWindowAutoSave(); if (typeof state.windowRefreshPreview === 'function') state.windowRefreshPreview(); },
+    }),
     el('span', { class: 'hint', text: t('window.endOptional') }),
   ));
   /**
@@ -1510,20 +1547,44 @@ function windowView(rerender) {
     onCommit: (ms) => {
       draft.clickGapMs = ms;
       state.windowStale = false;       // the draft is the truth; a rebuild from storage would drop the value just typed
-      saveWindow({ silent: true });
+      scheduleWindowAutoSave();
     },
     onClose: () => { state.windowGapOpen = false; },
   }));
 
-  // ---- what the typed times mean, shown as a plain sentence
+  /**
+   * WHAT THE TYPED TIMES MEAN, AND WHETHER THEY ARE USABLE - DERIVED, NEVER REMEMBERED.
+   *
+   * MEASURED: the summary line said the window ended at 20:50:33 while the error line still said "that end time is not readable".
+   * The error had been stored in `state.windowError` when an earlier plan failed, and was only cleared inside `saveWindow` - which
+   * needs a valid plan AND a picked point. A corrected field therefore kept its old complaint.
+   *
+   * A stale error is worse than no error: it teaches the user to ignore the line that matters, the lesson this project already
+   * recorded for a duplicate pick message. So the error is COMPUTED from the current plan on every render and nothing is stored.
+   */
   const plan = buildWindowPlan({ startText: draft.start, endText: draft.end, nowMs: Date.now() });
-  if (!plan.ok) {
-    state.windowError = plan.error;
-  }
-  if (state.windowError) {
-    wrap.append(el('div', { class: 'hint win-error', text: t(`window.err.${state.windowError}`) }));
-  }
-  wrap.append(el('div', { class: 'hint win-summary', text: describeWindowPlan(plan) }));
+  state.windowError = plan.ok ? null : plan.error;
+
+  /**
+   * THE SUMMARY AND THE ERROR SHARE ONE HOST, WHICH THE FIELD CAN REFRESH WITHOUT REBUILDING THE FORM.
+   *
+   * Both are derived from the typed times, so both belong here; and because `onEdit` must not re-render, they are written into a
+   * host whose children are replaced in place. `rowsToClean` is shared with `replaceChildren`, so the host stays the same node.
+   */
+  const statusHost = el('div', { class: 'win-status' });
+  const refreshStatus = () => {
+    const p = buildWindowPlan({ startText: draft.start, endText: draft.end, nowMs: Date.now() });
+    state.windowError = p.ok ? null : p.error;
+    statusHost.replaceChildren();
+    if (!p.ok) {
+      statusHost.append(el('div', { class: 'hint win-error', text: t(`window.err.${p.error}`) }));
+      return;
+    }
+    statusHost.append(el('div', { class: 'hint win-summary', text: describeWindowPlan(p) }));
+  };
+  refreshStatus();
+  state.windowRefreshPreview = refreshStatus;
+  wrap.append(statusHost);
 
   // ---- the points, in order
   wrap.append(el('div', { class: 'row' },
@@ -1531,16 +1592,82 @@ function windowView(rerender) {
     el('span', { class: 'hint', text: `${draft.steps.length}` }),
   ));
   /**
-   * THE SHARED ROW WRITES TO WHICHEVER TARGET IS NAMED HERE. Set before the rows are built and restored afterwards, so the
-   * Basic tab's own target is untouched by a render of this tab.
+   * A POINT IS A PICK AND A SELECTOR, EXACTLY LIKE BASIC - not the full editor's row.
+   *
+   * REPORTED: «فایند رو متوجه نمیشم این همه گزینه داره مثل بیسیک فقط از pick استفاده کنه». `stepRow` is the FULL EDITOR's row: it
+   * offers a kind chooser, a finder-strategy chooser, conditions and every other field a general step needs. A window's points are
+   * always clicks on a chosen element, so all of that is noise - and it is the noise the user is objecting to.
+   *
+   * Basic already solved this with a compact row: `pickControl`, the picker's summary, a selector field, a warning, and move/remove.
+   * This is the same shape, built from the same pieces, so the two tabs cannot drift apart in what a point looks like.
    */
   const previousTargetKey = state.pickTargetKey;
   state.pickTargetKey = 'windowPickTarget';
   draft.steps.forEach((step, i) => {
-    wrap.append(el('div', { class: 'win-step', 'data-step': step.id }, stepRow(step, draft.steps, i, () => {
-      state.windowStale = false;
-      rerender();
-    })));
+    const finder = step.finder ?? { strategy: 'css', selector: '' };
+    const picked = pickerSummary(finder);
+    wrap.append(el('div', { class: 'step win-step', 'data-step': step.id },
+      el('div', { class: 'step-head' },
+        el('span', { class: 'step-kind', text: `#${i + 1}` }),
+        el('span', { class: 'step-summary', text: picked.label }),
+        el('span', { class: 'spacer' }),
+        el('button', {
+          class: 'icon', title: t('action.moveUp'), text: t('ui.moveUp'),
+          onclick: () => {
+            if (i === 0) return;
+            keepDraftThen(() => { [draft.steps[i - 1], draft.steps[i]] = [draft.steps[i], draft.steps[i - 1]]; });
+          },
+        }),
+        el('button', {
+          class: 'icon', title: t('action.moveDown'), text: t('ui.moveDown'),
+          onclick: () => {
+            if (i >= draft.steps.length - 1) return;
+            keepDraftThen(() => { [draft.steps[i + 1], draft.steps[i]] = [draft.steps[i], draft.steps[i + 1]]; });
+          },
+        }),
+        el('button', {
+          class: 'icon danger', title: t('action.delete'), text: t('ui.close'),
+          onclick: () => {
+            // a window needs at least one point to be a window at all, so the last one is cleared rather than removed
+            if (draft.steps.length > 1) {
+              keepDraftThen(() => { draft.steps.splice(i, 1); });
+              return;
+            }
+            keepDraftThen(() => { draft.steps[0] = { ...draft.steps[0], finder: { strategy: 'css', selector: '' } }; });
+          },
+        }),
+      ),
+      el('div', { class: 'step-body' },
+        el('div', { class: 'row' },
+          pickControl({
+            step,
+            redraw: () => {
+              state.windowStale = false;
+              scheduleWindowAutoSave();
+              render();
+            },
+          }),
+          el('input', {
+            class: 'grow mono',
+            value: finder.selector ?? finder.xpath ?? finder.text ?? finder.id ?? finder.name
+              ?? finder.label ?? finder.placeholder ?? finder.aria ?? finder.role ?? '',
+            placeholder: t('field.selector'),
+            onchange: (e) => {
+              const key = {
+                css: 'selector', xpath: 'xpath', text: 'text', id: 'id', name: 'name',
+                label: 'label', placeholder: 'placeholder', aria: 'aria', role: 'role',
+              }[finder.strategy] ?? 'selector';
+              const { chain, ...rest } = finder;
+              keepDraftThen(() => { step.finder = { ...rest, strategy: finder.strategy ?? 'css', [key]: e.target.value }; });
+              scheduleWindowAutoSave();
+            },
+          }),
+          positionalWarning(finder)
+            ? el('span', { class: 'hint warn', title: t('finder.positionalTitle'), text: '\u26a0' })
+            : null,
+        ),
+      ),
+    ));
   });
   state.pickTargetKey = previousTargetKey;
   wrap.append(el('div', { class: 'row add' },
@@ -1677,6 +1804,47 @@ function describeWindowPlan(plan) {
   if (plan.end.kind === 'none') return t('window.sum.endless').replace('{start}', start);
   const end = new Date(plan.end.atMs).toLocaleString();
   return t('window.sum.finite').replace('{start}', start).replace('{end}', end);
+}
+
+
+/**
+ * THE WINDOW TAB'S AUTO-SAVE.
+ *
+ * REPORTED: «اوتو سیو مثل بیسیک نداره». The rules below are Basic's, carried over rather than rediscovered, because each one was
+ * paid for there with a measured fault.
+ *
+ * The timer is MODULE-LEVEL and named after this tab, so the two tabs cannot cancel each other's pending save.
+ */
+let windowAutoSaveTimer = null;
+
+/** How long the form waits after the last edit before storing. The same delay Basic uses, so the two feel identical. */
+const WINDOW_AUTOSAVE_MS = 1200;
+
+function scheduleWindowAutoSave() {
+  if (state.tab !== 'window') return;              // the user has moved on; the stale flag covers that case
+  if (windowAutoSaveTimer) clearTimeout(windowAutoSaveTimer);
+  windowAutoSaveTimer = setTimeout(() => {
+    windowAutoSaveTimer = null;
+    if (state.tab !== 'window') return;
+    /**
+     * RULE 1: NEVER SAVE WHILE AN INPUT IN THE FORM HAS FOCUS.
+     *
+     * A person who is still typing has not finished. Basic tried a version of this and removed it for a DIFFERENT reason - it
+     * delayed the save past a field's blur commit, and a later render committed a half-typed buffer. That risk is why this
+     * reschedules instead of dropping the save: the timer is re-armed, so the save happens as soon as focus leaves.
+     */
+    const active = document.activeElement;
+    if (active && active.tagName === 'INPUT') {
+      // this tab's own fields: the two time fields, the gap field, and a point's selector
+      const inThisView = active.classList.contains('time-input') || active.classList.contains('gap-input')
+        || active.classList.contains('mono');
+      if (inThisView) {
+        scheduleWindowAutoSave();
+        return;
+      }
+    }
+    saveWindow({ silent: true });
+  }, WINDOW_AUTOSAVE_MS);
 }
 
 /**
