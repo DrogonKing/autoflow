@@ -190,8 +190,19 @@ const main = async () => {
   console.log('  gap 200 ms :', withGap.clicks, 'clicks, mean interval between the same point:', withGap.mean, 'ms');
   check('both runs clicked, so the comparison is between two real runs',
     noGap.clicks > 4 && withGap.clicks > 4, `${noGap.clicks} / ${withGap.clicks}`);
+  /**
+   * TWO STEPS APART IS TWO GAPS, AND NOW IT IS TWO GAPS RATHER THAN TWO GAPS PLUS TWO CLICK COSTS.
+   *
+   * MEASURED by the user on their own machine: with 200 ms set, the interval was about 215 ms per click - the wait was measured from
+   * the previous click's FINISH, so each click's ~15 ms of round trip was added. A two-step interval then reads ~430 ms. With the
+   * anchor at the click's START the expected value is 400 ms plus whatever the page's own cost varies by.
+   *
+   * The bound is checked from the LOW side too, at 400: the old behaviour produced 430, so this assertion fails on it. A tolerance
+   * that accepted both would have been the sort of test that watches a fault go past.
+   */
   check('A 200 ms GAP REALLY SEPARATES THE CLICKS ON THE PAGE, by about 400 ms for two steps',
-    withGap.mean >= 320 && withGap.mean <= 700, `${withGap.mean} ms`);
+    // 400 ms is two 200 ms gaps. The LOW bound is 400, so the old behaviour (430 ms, gap + one click cost per interval) fails here.
+    withGap.mean >= 400 && withGap.mean <= 560, `${withGap.mean} ms`);
   check('and the zero-gap run is clearly faster, so the setting is what made the difference',
     withGap.mean > noGap.mean * 3, `${noGap.mean} ms vs ${withGap.mean} ms`);
 

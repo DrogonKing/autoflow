@@ -104,27 +104,59 @@ describe('the instants, not the sleeps', () => {
     expect(at[2] - at[1]).toBe(20);
   });
 
-  it('a slow click WIDENS the interval rather than EATING the gap', async () => {
+  it('THE INTERVAL IS THE GAP ITSELF, however long each click takes', async () => {
     /**
-     * THE ASSERTION HERE WAS WRONG ONCE, and correcting it is the point of the test.
+     * THIS ASSERTION HAS BEEN WRONG TWICE, once in each direction, and both faults were reported by a person using the feature.
      *
-     * It used to require exactly 20 ms between the starts even when each click cost 12 ms. That encoded the ABSOLUTE design
-     * - each target being `firstClick + index x gap` - which sounded tidy and was broken in practice: MEASURED in a real
-     * browser (`gap-persist-test`), the first click took 24 ms of round trip, the second target had already passed, and the
-     * gap was silently dropped. The steps landed at 24, 30 and 44 ms - apparent intervals of 6 and 14 ms - and the user
-     * reported the setting as not applied at all.
+     * FIRST it required exactly 20 ms between starts while encoding an ABSOLUTE schedule (`firstClick + index x gap`). MEASURED in a
+     * real browser: the first click took 24 ms of round trip, the second target had already passed, and the gap was silently dropped
+     * - steps at 24, 30 and 44 ms, apparent intervals of 6 and 14 ms - reported as the setting not being applied at all.
      *
-     * The gap is a FLOOR: the wait is measured from the moment the previous click finished, so the interval is never less
-     * than the gap set. A slow click makes the real interval longer, which is honest, instead of cancelling the gap.
+     * THEN it required 20 + 12 = 32, measuring from the moment the previous click FINISHED. That never drops a gap, but it inserts
+     * the click's own cost into every interval. MEASURED by the user on their machine: «روی دویست میلی ثانیه ... تاخیرش حدودا پونزده
+     * میلی ثانیه است یعنی ۲۱۵ میلی ثانیه» - 200 ms set, about 215 ms between clicks.
+     *
+     * The anchor is now the START of the previous click, so the interval is the setting:
+     *
+     *   absolute:    gap - cost      (can vanish)
+     *   from finish: gap + cost      (always widened)
+     *   from start:  max(gap, cost)  <- what a person means by "200 ms between clicks"
+     *
+     * The cost is NOT erased - the page decides it - which is why the user sees a spread rather than a constant. What is removed is
+     * the systematic 15 ms added to every single interval.
      */
     const host = makeHost(12);
     const runner = new Runner(host);
     await runner.run(automationWith({ stepDelayMs: 0, clickGapMs: 20, stepRetries: 0 }, threePicks()));
     const at = host.calls.filter((c) => c.kind === 'execute').map((c) => c.at);
-    // 12 ms of click + 20 ms of gap = 32; the floor is honoured and the click's own cost is visible on top of it
-    expect(at[1] - at[0]).toBe(32);
-    expect(at[2] - at[1]).toBe(32);
-    expect(at[1] - at[0]).toBeGreaterThanOrEqual(20);
+    // 20 ms between STARTS, because a 12 ms click fits inside the gap
+    expect(at[1] - at[0]).toBe(20);
+    expect(at[2] - at[1]).toBe(20);
+  });
+
+  it('a click that does not fit inside the gap sets the interval, and nothing pretends otherwise', async () => {
+    /**
+     * With 30 ms of work against a 20 ms gap the next click cannot start before the previous one has finished, so the real interval
+     * is the work. This is arithmetic, not a scheduling decision - and the case that a caller cannot fix should be asserted rather
+     * than papered over.
+     */
+    const host = makeHost(30);
+    const runner = new Runner(host);
+    await runner.run(automationWith({ stepDelayMs: 0, clickGapMs: 20, stepRetries: 0 }, threePicks()));
+    const at = host.calls.filter((c) => c.kind === 'execute').map((c) => c.at);
+    expect(at[1] - at[0]).toBe(30);
+    expect(at[2] - at[1]).toBe(30);
+  });
+
+  it('AND THE GAP DOES NOT DRIFT OVER MANY CLICKS, which is what a person notices', async () => {
+    // an offset that is added to every interval is only visible in aggregate, so it is asserted in aggregate: ten clicks, two steps
+    const host = makeHost(15);
+    const runner = new Runner(host);
+    await runner.run(automationWith({ stepDelayMs: 0, clickGapMs: 200, stepRetries: 0,
+      window: true, stopAfterClicks: 10 }, [pick(1), pick(2)]));
+    const at = host.calls.filter((c) => c.kind === 'execute').map((c) => c.at);
+    const deltas = at.slice(1).map((v, i) => v - at[i]);
+    for (const d of deltas) expect(d).toBe(200);
   });
 
   it('a click that takes LONGER than the gap starts the next one immediately', async () => {

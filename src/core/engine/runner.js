@@ -379,30 +379,42 @@ export class Runner {
        * a slow page lengthens the real interval instead of eating the gap.
        */
       /**
-       * ONE RULE, AND IT MEASURES FROM THE PREVIOUS CLICK - WHICHEVER CALL MADE IT.
+       * THE GAP IS MEASURED FROM THE START OF THE PREVIOUS CLICK, so the interval IS the setting.
        *
-       * MEASURED end to end, on a real page with a real run, and this is the fault a unit test could not see: with a 200 ms gap
-       * over two points, the interval between one arrival of point 1 and the next was **211 ms**, not the ~400 ms that two gaps
-       * over two steps must produce. The waiting used to be `sleep(gapMs)` between the clicks of ONE call to this method - and the
-       * window loop calls it again immediately, so the last click of a round and the first click of the next landed back to back.
-       * The setting applied everywhere except the one boundary a window creates.
+       * MEASURED by the user, on their own machine: with 200 ms set, the delay between clicks was about 215 ms. The waiting was
+       * measured from when the previous click FINISHED, so every interval carried that click's own duration - roughly 15 ms into a
+       * live page - on top of the gap. 200 became 215.
        *
-       * `state.lastClickAt` carries the instant across calls, so the first click of a round waits out the remainder of the gap too.
-       * A FLOOR from the previous finish rather than an absolute target, for the reason already learned here: a click into a page
-       * is never free, and an absolute schedule silently drops gaps.
+       * THREE DESIGNS, AND TWO OF THEM ARE WRONG - recorded here because both faults were real and this file has now paid for all
+       * three:
+       *
+       *   absolute off the first click:  interval = gap - cost   the gap can vanish entirely, which was reported as "the setting is
+       *                                                          not applied at all" (steps at 24, 30, 44 ms for a 20 ms gap)
+       *   measured from the finish:      interval = gap + cost   the setting is always widened, reported as "215 instead of 200"
+       *   measured from the start:       interval = max(gap, cost)   <- this one
+       *
+       * The last is the only one where the number the user sets is the number they get, for as long as the page allows it. The
+       * variance the user noticed ("on average", so it is not a constant) comes from the click cost being variable - the page decides
+       * how long a click takes - and that cannot be removed. The systematic offset can, and it is removed.
+       *
+       * A SUBSEQUENT CLICK CANNOT START BEFORE THE PREVIOUS ONE FINISHED, so when the work itself is longer than the gap the real
+       * interval is the work's duration. That is arithmetic rather than a scheduling fault, and pretending otherwise by trusting a
+       * clock that has already passed is what the absolute design did.
+       *
+       * The anchor lives on `state`, so it crosses block boundaries: a window calls the block again the moment the points run out,
+       * and the seam between two rounds is a click boundary like any other.
        */
-      if (gapMs > 0 && isClick(step) && Number.isFinite(state.lastClickAt)) {
-        const wait = gapMs - (this.host.now() - state.lastClickAt);
+      if (gapMs > 0 && isClick(step) && Number.isFinite(state.lastClickStartAt)) {
+        const wait = gapMs - (this.host.now() - state.lastClickStartAt);
         if (wait > 0) await this.host.sleep(wait);
       }
       if (isClick(step)) {
-        await this.#runStep(step, state, push, depth);
         /**
-         * RECORDED AFTER THE CLICK, not before: the gap is an interval from when the previous click FINISHED, so a slow page
-         * lengthens the real interval instead of eating into the next gap. `this.host.now()` is the run's own clock, so a virtual
-         * clock in a test advances it exactly as a real one does.
+         * RECORDED BEFORE THE CLICK, so the next interval is measured from this click's START. `this.host.now()` is the run's own
+         * clock, so a virtual clock in a test advances it exactly as a real one does.
          */
-        state.lastClickAt = this.host.now();
+        state.lastClickStartAt = this.host.now();
+        await this.#runStep(step, state, push, depth);
       } else {
         await this.#runStep(step, state, push, depth);
       }

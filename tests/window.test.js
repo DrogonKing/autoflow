@@ -317,12 +317,20 @@ describe('THE GAP SURVIVES THE ROUND BOUNDARY', () => {
     const host = makeHost({ stopAfterClicks: 6 });
     await new Runner(host).run(automationWith({ window: true, clickGapMs: 200 }, threePicks()));
     const clicks = host.calls.filter((c) => c.kind === 'click');
-    const gaps = host.calls.filter((c) => c.kind === 'sleep' && c.ms > 0).map((c) => c.ms);
+    /**
+     * THE ASSERTION IS ABOUT THE INTERVAL, NOT ABOUT THE SLEEP.
+     *
+     * With the anchor at the START of the previous click the wait is `gap - cost`, so a sleep of 199 ms is correct and the interval
+     * it produces is exactly 200. Asserting the sleep duration would fail a correct implementation; asserting the interval is what
+     * the user actually experiences. MEASURED on their machine: a 200 ms setting gave ~215 ms, because the wait used to be measured
+     * from the previous click's FINISH and carried that click's own cost.
+     */
+    const at = clicks.map((c) => c.at);
+    const deltas = at.slice(1).map((v, i) => v - at[i]);
     expect(clicks.length).toBeGreaterThanOrEqual(4);
-    // three waits for six clicks: between 1-2, 2-3 (the round boundary) and 3-4
-    expect(gaps.length).toBeGreaterThanOrEqual(3);
-    // every wait is the full gap at this virtual cost, INCLUDING the one across the boundary
-    expect(Math.min(...gaps)).toBe(200);
+    expect(deltas.length).toBeGreaterThanOrEqual(3);
+    // every interval is the gap set, INCLUDING the one that crosses the round boundary
+    for (const d of deltas) expect(d).toBe(200);
   });
 
   it('and with no gap set, nothing waits across the boundary either', async () => {
