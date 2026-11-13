@@ -1,67 +1,95 @@
-> ## ⚠️ BETA — a click gap for each time
+> ## ⚠️ BETA — a new **Window** tab: repeat your points between a start time and an optional end
 >
 > Measured in a controlled browser with real clicks, **not against a real trading site yet**.
 
 ## What you asked for
 
-> «یه علامت تنظیمات کوچیک برای هر زمان انتخابی… گزینه فاصله کلیک بین pickها داخل یه زمان مشخص… دیفالتش صفره… مثلا برای
-> 10:10:50.250 با سه تا pick… بشه بین پرتاب اون سه تا pick اختلاف ۲۰ میلیثانیهای گذاشت. فقط برای اون زمان مشخص»
+> «میخوام یه تب جدید داخل auto flow درست کنی... بشه بهش زمان با دقت میلی ثانیه داد اون زمان ابتدا داشته باشه ولی انتهاش
+> اجباری نباشه... اگر خالی بود انقدر کلیک کنه تا گزینه استاپ رو دستی بزنم... تو این فاصله شروع کنه به ترتیب نقاط انتخاب شده
+> رو بزنه و اگر نقاط تموم شد دوباره بره از اول بزنه تا زمانی که زمانش تموم بشه... مثل حالت بیسیک امکان فاصله دستی گذاشتن
+> بین هر کلیک رو بزار»
 
-Beside the **time field** there is now a small **⚙**. It opens one row:
-
-```
-Gap between clicks   [ 20 ] ms   ✓  ✕
-Milliseconds between this time's picks. 0 means they fire together. It applies to this time only.
-```
-
-Default is **0** — exactly the behaviour you had. Type 20, press Enter or ✓, and that time's picks fire 20 ms apart. No other
-time is touched.
-
-It sits on the **field** rather than on the chip because you said "for each *selected* time", and the field is where the
-selected time is. It is also always visible, whereas the chip row is hidden when there is only one time.
-
-## Measured, in a real browser
+A third tab beside **Basic** and **Automations**, with the fields in the order you described them:
 
 ```
-gap 0   → the three picks land  3–4 ms apart    (a real click costs a millisecond or two)
-gap 20  → the three picks land  18/20 ms apart, and 21/19 on another run
-a second time with no gap → still 3–4 ms apart  ← the setting did not leak
+Start   [ 20:44:45.500 ]  ⚙      ← mandatory, milliseconds
+End     [            ]  optional  ← empty = keep clicking until you press Stop
+Points  [ Pick ] …  #1  #2  #3    ← in order, clicked in that order
 ```
 
-## Why the gap is computed the right way
+- **The start is a wall-clock instant, not a countdown.** Slowing the machine down cannot make it late.
+- **An empty end means "run until I press Stop".** It repeats your points, and when they run out it starts again from the first.
+- **With an end time**, it repeats the points inside the window and stops at the deadline.
+- **The gap between clicks** sits behind the ⚙ beside the start time. Default **0**, e.g. `200` ms. The same rule as Basic.
 
-The obvious implementation — sleep the gap after each click — measures from the **end** of one click to the **start** of the
-next, so every click's own duration is added. At 20 ms with clicks that take a couple of milliseconds you drift, and on a
-slow page the drift accumulates, so the last of three picks lands well past 10:10:50.290.
+## Measured, in a real browser, with real clicks
 
-Each pick's target here is **absolute**: the instant the first pick landed, plus its index times the gap. A slow click cannot
-push the following ones back — it just has less waiting left to do, and if it overran the next target the next click starts
-immediately rather than pretending to wait. `tests/click-gap.test.js` asserts the instants, not the sleeps, including a
-click that takes longer than the gap.
+Clicks were counted **by the page itself**, not by the engine reporting on itself — a distinction that matters, because the engine can
+be perfectly happy while nothing reaches the page.
 
-## Detail worth knowing
+```
+a bounded window   476 real clicks, points repeated in order, stopped at its deadline
+an endless window  kept clicking until Stop was pressed, and Stop really stopped it (311 → 311)
+a scheduled window  fired by its alarm with no user action, 388 clicks in order
+a real pick        pressed Pick, clicked an element on a page, the selector landed
+gap 200 ms         mean interval between the same point: 408–411 ms   (two steps = two gaps = 400)
+```
 
-- **The first pick is never delayed.** It is the scheduled instant, which is the whole point of the schedule.
-- **Only clicks consume a gap slot.** A `fill` between two picks is not a pick, and spacing it would change what the step does.
-- **Clamped:** 0 to 60000 ms, digits only. A typed `-5` or `1e9` cannot become the interval.
-- **One save, when the value settles** — Enter, ✓, or leaving the field. Not per keystroke, for the same reason the time
-  field is not: a save per keystroke made the panel unusable.
-- **The record carries it explicitly**, even at zero, so clearing the setting is a real change. A record saved before this
-  build has no such key and behaves as zero — nothing to migrate.
+## Three faults found by measuring, that a green unit suite could not see
 
-## Two faults found while building it, both fixed
+**The gap was applied everywhere except the round boundary — the boundary a window*is*.** With 200 ms set, the interval between one
+arrival of the same point and the next was **211 ms** instead of ~400: the wait was applied between the steps of one pass, and the
+window calls that pass again the moment the points run out. 33 unit tests were green while the feature was measurably wrong, because
+every existing gap test asserted the interval *inside* one pass.
 
-**The gap was dropped on every reload.** The panel rebuilds its rows from the stored records field by field, so a field not
-named there is silently lost — a gap of 20 ms came back as 0 after reopening the panel. Found by the test, not by reading.
+**A manual run clicked nothing.** The target tab was resolved as "whatever is in front", and pressing Run happens in the panel — so the
+panel itself was in front. `the page gave no answer for the click step`. A scheduled run never hit this, which is why the same record
+clicked 360 times when its alarm fired it. The tab matching the record's own URL is now preferred.
 
-**The chip row is hidden with a single time** — correct in itself (a chooser with one choice is noise, and two tests assert
-it), but it meant a gear placed on the chip was unreachable in the common case. That is why the gear is on the field.
+**The Stop button never rendered.** `publicActiveRun()` returns the run's **automation** id while the panel read `automationId`, a
+property that was never sent — so an endless run could not be stopped from the very tab that started it.
+
+## Why the numbers are what they are
+
+The gap is measured from the **start** of the previous click, so the interval **is** the setting:
+
+```
+absolute off the first click:  interval = gap − cost      the gap can vanish entirely
+measured from the finish:      interval = gap + cost      always widened (200 showed as 215)
+measured from the start:       interval = max(gap, cost)  ← this
+```
+
+A click that takes longer than the gap still sets the interval — that is arithmetic, not a scheduling choice — but nothing pretends
+otherwise now. The spread you see run to run comes from the click cost being variable, which the page decides and no scheduler can
+remove.
+
+## Reuse, so the two tabs cannot drift apart
+
+The times are Basic's own `timeField` (digits only — `204445500` becomes `20:44:45.500`, so the colons never have to be typed), the
+points are Basic's compact row (a Pick button and a selector, not the full editor's kind chooser), and the auto-save follows Basic's
+rules — each of which was paid for there with a measured fault: never save while a field has focus, save what is usable rather than
+refusing the whole form, never re-render from a save, and do not arm one save per keystroke.
+
+Auditing that reuse found a **critical** fault: pressing Pick in the new tab did nothing at all. `pickControl` decided where to write by
+reading a mutable global **at click time**, while the tab set it only during the build — so the pick was filed against the Basic list,
+where the window's step id does not exist, and the finder was dropped without a word. A point *is* a pick, so the tab was unusable.
+The slot is now an explicit parameter, with Basic's value as the default; the staging global is gone.
+
+## Known limits, stated rather than implied
+
+- **Absolute millisecond precision is not measured.** The window starts in the right second and the clicks are in order, but whether
+  the first click lands on the `.500` itself depends on the worker's wake jitter, which is not something this code controls. The
+  instant is stored exactly and handed to the alarm subsystem's precise path; the observed offset has not been quantified.
+- **Never used on a real trading site.** Every measurement is against a local test page.
+- The 12-hour cap on an endless window and the empty-round detector are covered by the unit suite with a virtual clock, not in a
+  browser.
 
 ## Verified
 
 ```
-811 unit tests · 44 files (up from 801)
-click-gap-browser-test   11 ok · 0 medium · 0 HIGH
-click-gap.test.js        10 tests — the instants, the clamp, per-time isolation, a slow click, a click slower than the gap
-events-ui 9/9 · remove-time 15/15
+893 unit tests · 48 files
+window-tab-test    27 ok · 0 FAIL   the fields, the digits-only time, the pick-only row, the gap box
+window-run-test    15 ok · 0 FAIL   476 real clicks, endless + Stop, a scheduled run, the gap measured on the page
+window-pick-test    5 ok · 0 FAIL   a real page, a real pick, the page remembered for the record
+all four bundles build: chrome, chrome-lite, firefox, firefox-lite
 ```
