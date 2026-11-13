@@ -132,12 +132,6 @@ const state = {
   windowError: null,      // why the typed times were not accepted, shown where they are typed
   windowNotice: null,     // what Save did: armed for an instant, or not armed and why
   windowSavedAt: null,    // when Save last succeeded, so the button can confirm and then stop
-  /**
-   * WHICH `pickTarget` THE SHARED POINT ROW WRITES TO. Defaulted so every existing caller is unchanged; the Window tab sets it
-   * while its own points are being built. A hardcoded target in the shared helper is exactly how a pick would be filed against
-   * the wrong tab's record.
-   */
-  pickTargetKey: 'pickTarget',
 };
 
 // ---------------------------------------------------------------------------------------------
@@ -596,10 +590,20 @@ function scheduleEditor(onChange) {
  * listen for it - so pressing Pick by mistake left the only exit as clicking an element, which then got recorded as the
  * target. Misclicks must be recoverable.
  */
-function pickControl({ step, redraw, rerender }) {
+function pickControl({ step, redraw, rerender, targetKey = 'pickTarget' }) {
   // `rerender` accepted as an alias so an older call site cannot silently pass the wrong behaviour
   redraw = redraw ?? rerender;
-  const targetKey = state.pickTargetKey ?? 'pickTarget';
+  /**
+   * WHICH SLOT THE WAITING PICK IS NAMED IN, DECIDED BY THE CALLER.
+   *
+   * MEASURED, and this was the fault that made the Window tab unusable: this used to read `state.pickTargetKey` AT CLICK TIME. The
+   * Window tab set that global only while it was BUILDING its rows and restored it immediately, so by the time a user pressed
+   * Pick the key was back to the Basic default - the pick was filed against the Basic list, no step there had the window's step id,
+   * and the finder was dropped without a word.
+   *
+   * A component that decides where to write by reading a mutable global at click time works only while nothing changes that global
+   * between building the control and pressing it. That is a promise no caller can keep, so the caller now states it as a parameter.
+   */
   const picking = state[targetKey] === step.id;
   /**
    * A pick that just landed says so, the way Save does.
@@ -636,7 +640,7 @@ function pickControl({ step, redraw, rerender }) {
     // the point this button belongs to, so the confirmation can find the CURRENT button after a re-render replaces it
     'data-step-id': step.id,
     onclick: async () => {
-      if (picking) { cancelPick(redraw); return; }
+      if (picking) { cancelPick(redraw, targetKey); return; }
       /**
        * THE WAITING POINT IS NAMED BY THE CALLER, not hardcoded to the Basic tab's.
        *
@@ -645,7 +649,7 @@ function pickControl({ step, redraw, rerender }) {
        * would be applied to the wrong record - or to none, and the selector would stay empty while the button claimed success.
        * The default keeps every existing caller behaving exactly as before.
        */
-      const targetKey = state.pickTargetKey ?? 'pickTarget';
+      // the caller's slot, from the closure parameter - never a global read here
       state[targetKey] = step.id;
       state.pickSavedAt = null;      // the new pick supersedes the previous confirmation
       state.pickSavedFor = null;
@@ -733,8 +737,13 @@ function pickControl({ step, redraw, rerender }) {
 }
 
 /** Tell the page to stop picking and forget the target. Both halves, or the overlay stays on the page. */
-function cancelPick(redraw) {
-  state.pickTarget = null;
+function cancelPick(redraw, key = 'pickTarget') {
+  /**
+   * THE SLOT THE CALLER NAMED, for the same reason it is a parameter to `pickControl`: reading a global here would clear whichever
+   * tab last staged it rather than the tab whose Cancel was pressed, leaving one banner on screen and the other tab's pending pick
+   * destroyed.
+   */
+  state[key] = null;
   state.pickCancelled = Date.now();
   // fire and forget: the page's own Escape path is the same call, and a failure here must not block the panel
   send({ type: 'cancel-picking' }).catch(() => {});
@@ -1601,8 +1610,14 @@ function windowView(rerender) {
    * Basic already solved this with a compact row: `pickControl`, the picker's summary, a selector field, a warning, and move/remove.
    * This is the same shape, built from the same pieces, so the two tabs cannot drift apart in what a point looks like.
    */
-  const previousTargetKey = state.pickTargetKey;
-  state.pickTargetKey = 'windowPickTarget';
+  /**
+   * THE TARGET SLOT IS PASSED TO EACH ROW, not staged in a global around the build.
+   *
+   * The staged version LOOKED tidy and was wrong: `pickControl` reads the slot when the button is PRESSED, which is a different
+   * moment from when the row is built, and the global had been restored by then. Passing it makes the two moments agree by
+   * construction.
+   */
+  const previousTargetKey = null;
   draft.steps.forEach((step, i) => {
     const finder = step.finder ?? { strategy: 'css', selector: '' };
     const picked = pickerSummary(finder);
@@ -1641,6 +1656,8 @@ function windowView(rerender) {
         el('div', { class: 'row' },
           pickControl({
             step,
+            // the Window tab's own slot, stated here rather than assumed from a global at press time
+            targetKey: 'windowPickTarget',
             redraw: () => {
               state.windowStale = false;
               scheduleWindowAutoSave();
@@ -1669,7 +1686,6 @@ function windowView(rerender) {
       ),
     ));
   });
-  state.pickTargetKey = previousTargetKey;
   wrap.append(el('div', { class: 'row add' },
     el('button', {
       class: 'grow',
@@ -4412,6 +4428,26 @@ api.runtime.onMessage.addListener((msg) => {
       return (state.basic?.steps ?? []).find((s) => s.id === state.pickTarget) ?? null;
     };
     const inBasic = state.basic ? findBasic() : null;
+
+    /**
+     * THE WINDOW TAB'S POINTS ARE SEARCHED TOO, AND SEARCHED FIRST WHEN THAT IS THE WAITING TAB.
+     *
+     * MEASURED, and it was a critical fault: `pickControl` names the waiting step in `state.windowPickTarget` - which the Window
+     * tab sets - but this handler only ever searched `state.editing` and `state.basicEvents`. So a pick made in the Window tab found
+     * no step waiting for it, the finder was dropped, and the selector stayed empty. A point IS a pick, so the tab could not be
+     * used at all.
+     *
+     * The waiting key decides which tab is asking. Searching by the key rather than guessing from the step id is what keeps the two
+     * tabs from claiming each other's picks: a Basic step id is never in the window draft, and vice versa.
+     */
+    const findWindow = () => {
+      if (!state.windowPickTarget) return null;
+      return (state.windowDraft?.steps ?? []).find((x) => x.id === state.windowPickTarget) ?? null;
+    };
+    const inWindow = findWindow();
+    // when the Window tab is the one waiting, its step wins - the Basic list may hold a step with the same id only if a draft was
+    // cloned, and applying the finder to the wrong copy is the fault this project already recorded once
+    const stepOrder = state.windowPickTarget ? [inWindow, inEditing, inBasic] : [inEditing, inBasic, inWindow];
     /**
      * LEFT IN PLACE ON PURPOSE: this is the diagnostic that found the lost id.
      *
@@ -4429,7 +4465,7 @@ api.runtime.onMessage.addListener((msg) => {
       editingSteps: (state.editing?.steps ?? []).map((s) => s.id),
       found: Boolean(inEditing ?? inBasic),
     });
-    const step = inEditing ?? inBasic ?? null;
+    const step = stepOrder.find((x) => x) ?? null;
     if (step) {
       step.finder = msg.finder;
       /**
@@ -4468,6 +4504,13 @@ api.runtime.onMessage.addListener((msg) => {
       if (inBasic) {
         const owner = (state.basicEvents ?? []).find((ev) => (ev.steps ?? []).some((s) => s === step || s.id === step.id));
         target = { id: owner?.id ?? state.basic?.id ?? BASIC_ID };
+      } else if (inWindow) {
+        /**
+         * THE WINDOW'S OWN RECORD. A window run needs a page to act on, and this is the only moment the pairing is known - the
+         * user is looking at the page and the pick came from it. Without this the record carries no URL and a scheduled run
+         * refuses with "no URL pattern, so a scheduled run has no safe tab".
+         */
+        target = { id: WINDOW_ID };
       } else {
         target = state.editing;
       }
@@ -4477,7 +4520,14 @@ api.runtime.onMessage.addListener((msg) => {
           send({ type: 'remember-pick-page', automationId: target.id, url: pageUrl }).catch(() => {});
         }
       }
-      state.pickTarget = null;
+      /**
+       * CLEARED BY THE KEY THAT WAS WAITING, NOT THE BASIC ONE.
+       *
+       * Clearing `state.pickTarget` unconditionally would leave the Window tab still waiting for a pick it has already received -
+       * its banner would stay on screen and the next pick would be filed against a stale step.
+       */
+      if (state.windowPickTarget && step === inWindow) state.windowPickTarget = null;
+      else state.pickTarget = null;
       /**
        * The confirmation, and its expiry, both start HERE.
        *
@@ -4501,6 +4551,18 @@ api.runtime.onMessage.addListener((msg) => {
       // a pick landing in the simple view is form work: keep the draft so the point it was picked for survives
       if (state.tab === 'basic') state.basicKeepDraft = true;
       /**
+       * AND THE SAME FOR THE WINDOW TAB, WHICH IS WHY ITS PICK NEVER LANDED.
+       *
+       * MEASURED: the pick arrived WITH a finder and was applied to the draft, and then the `render()` a few lines below discarded it
+       * - `windowView` rebuilds the draft from storage whenever `state.windowStale` is true, and `saveWindow` sets that flag. A window
+       * form auto-saves, so a save has usually run before the user clicks on the page, and the very render meant to show the pick
+       * threw it away.
+       *
+       * This is `basicKeepDraft`'s mechanism with the opposite sense. The flag has to be set BEFORE the render, because the render is
+       * what reads it.
+       */
+      if (inWindow) state.windowStale = false;
+      /**
        * A PICK IS AN EDIT, SO IT ARMS THE AUTO-SAVE TOO.
        *
        * MEASURED (`second-pick-test`): two points picked, the form correct, and `diagnosticEvents` EMPTY - no save was
@@ -4511,6 +4573,12 @@ api.runtime.onMessage.addListener((msg) => {
        * `basicAutoSave` is stashed on `state` by the view, because this listener lives outside `basicView`'s closure.
        */
       if (state.tab === 'basic' && typeof state.basicAutoSave === 'function') state.basicAutoSave();
+      /**
+       * A PICK IN THE WINDOW TAB ARMS ITS AUTO-SAVE TOO. Basic needed this and it is recorded here for the same reason: a form built
+       * entirely out of picks was never saved, and the next render rebuilt it from a storage that held nothing - "the second pick
+       * disappears". The window's saver is module-level, so it is called directly rather than through a stash on `state`.
+       */
+      if (inWindow) scheduleWindowAutoSave();
       render();
     } else {
       /**
